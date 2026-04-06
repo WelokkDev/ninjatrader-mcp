@@ -1,0 +1,39 @@
+{
+  "name": "ninjatrader-mcp",
+  "version": "0.1.0",
+  "description": "MCP server bridging Claude Code to NinjaTrader for futures zone detection and trade journaling",
+  "type": "module",
+  "bin": {
+    "ninjatrader-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc && shx chmod +x build/index.js",
+    "watch": "tsc --watch",
+    "inspect": "npx @modelcontextprotocol/inspector build/index.js",
+    "seed": "node build/scripts/seed.js",
+    "start": "node build/index.js"
+  },
+  "files": ["build"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WelokkDev/ninjatrader-mcp.git"
+  },
+  "keywords": ["mcp", "ninjatrader", "futures", "trading"],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/WelokkDev/ninjatrader-mcp/issues"
+  },
+  "homepage": "https://github.com/WelokkDev/ninjatrader-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.8.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.2",
+    "shx": "^0.4.0",
+    "typescript": "^6.0.2"
+  }
+}

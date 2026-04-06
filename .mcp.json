@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ninjatrader": {
+      "command": "node",
+      "args": ["./build/index.js"]
+    }
+  }
+}
