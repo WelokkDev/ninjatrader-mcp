@@ -18,8 +18,24 @@ export interface HelloAckMessage {
   serverVersion: string;
 }
 
+export interface DrawZoneMessage {
+  v: 1;
+  type: "draw_zone";
+  id: string;
+  symbol: string;
+  proximal: number;
+  distal: number;
+}
+
+export interface ClearZonesMessage {
+  v: 1;
+  type: "clear_zones";
+  symbol: string;
+  id?: string;
+}
+
 export type InboundMessage = HelloMessage | HeartbeatMessage;
-export type OutboundMessage = HelloAckMessage;
+export type OutboundMessage = HelloAckMessage | DrawZoneMessage | ClearZonesMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

@@ -9,6 +9,8 @@ lerna-debug.log*
 # Trading logic
 private/
 data/*.db
+data/*.db-shm
+data/*.db-wal
 src/private/
 build/
 
