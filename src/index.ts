@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import "./db/connection.js";
+import { startBridge, stopBridge } from "./bridge/index.js";
 
 import { registerGetCandles } from "./tools/get-candles.js";
 // import { registerScanZones } from "./tools/scan-zones.js";
@@ -25,7 +26,17 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("NinjaTrader MCP server running");
+
+  await startBridge();
 }
+
+const shutdown = async (signal: string) => {
+  console.error(`Received ${signal}, shutting down`);
+  await stopBridge();
+  process.exit(0);
+};
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 main().catch((error) => {
   console.error("Fatal error:", error);

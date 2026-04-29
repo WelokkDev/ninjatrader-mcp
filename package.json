@@ -13,12 +13,19 @@
     "seed": "node build/scripts/seed.js",
     "start": "node build/index.js"
   },
-  "files": ["build"],
+  "files": [
+    "build"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/WelokkDev/ninjatrader-mcp.git"
   },
-  "keywords": ["mcp", "ninjatrader", "futures", "trading"],
+  "keywords": [
+    "mcp",
+    "ninjatrader",
+    "futures",
+    "trading"
+  ],
   "author": "",
   "license": "MIT",
   "bugs": {
@@ -27,7 +34,9 @@
   "homepage": "https://github.com/WelokkDev/ninjatrader-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/ws": "^8.18.1",
     "better-sqlite3": "^12.8.0",
+    "ws": "^8.20.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
