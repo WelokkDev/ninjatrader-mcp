@@ -57,6 +57,10 @@ export function getBridgeStatus(): ConnectionStatus & { listening: boolean; port
   };
 }
 
+export function isConnected(): boolean {
+  return connections.isConnected();
+}
+
 export function onMessage<T extends InboundMessage["type"]>(
   type: T,
   handler: (message: Extract<InboundMessage, { type: T }>) => void,
@@ -66,4 +70,12 @@ export function onMessage<T extends InboundMessage["type"]>(
 
 export function send(message: OutboundMessage): boolean {
   return connections.send(message);
+}
+
+export function request(
+  type: string,
+  payload: Record<string, unknown>,
+  timeoutMs?: number,
+): Promise<InboundMessage> {
+  return connections.request(type, payload, timeoutMs);
 }

@@ -3,11 +3,19 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import db from "../db/connection.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import type { Candle } from "../core/types.js";
+import { isConnected, request } from "../bridge/index.js";
+import { ingestCandles } from "../bridge/ingest.js";
+
+const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
+       FROM candles
+      WHERE symbol = ? AND timeframe = ? AND timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
+      LIMIT ?`;
 
 export function registerGetCandles(server: McpServer): void {
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns pre-aggregated candles from the database for the specified symbol, timeframe, and date range.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns pre-aggregated candles from the database; on cache miss, requests 15m bars from NinjaTrader and aggregates locally.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, CL, GC)"),
       timeframe: z
@@ -35,8 +43,6 @@ export function registerGetCandles(server: McpServer): void {
         };
       }
 
-      // Parse dates as UTC — RTH candles (13:30-20:00 UTC) always fall
-      // within the same calendar date in UTC, so this is safe.
       const startTs = Math.floor(Date.parse(start + "T00:00:00Z") / 1000);
       const endTs = Math.floor(Date.parse(end + "T23:59:59Z") / 1000);
 
@@ -51,15 +57,72 @@ export function registerGetCandles(server: McpServer): void {
         };
       }
 
-      const rows = db
-        .prepare(
-          `SELECT timestamp, open, high, low, close, volume
-           FROM candles
-           WHERE symbol = ? AND timeframe = ? AND timestamp >= ? AND timestamp <= ?
-           ORDER BY timestamp ASC
-           LIMIT ?`,
-        )
-        .all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+      const stmt = db.prepare(QUERY_SQL);
+      let rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+
+      if (rows.length === 0) {
+        if (!isConnected()) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No cached data for ${symbol} ${timeframe} in this range. NinjaTrader is not connected — start NT8 with the McpBridge addon to fetch live data.`,
+              },
+            ],
+          };
+        }
+
+        console.error(
+          `[get_candles] Cache miss for ${symbol} ${timeframe} — requesting from NinjaTrader`,
+        );
+
+        try {
+          const response = (await request("request_candles", {
+            symbol,
+            timeframe: "15m",
+            from: startTs,
+            to: endTs,
+          })) as {
+            type: string;
+            symbol: string;
+            timeframe: string;
+            candles: Candle[];
+          };
+
+          const fetched: Candle[] = response.candles.map((c) => ({
+            timestamp: c.timestamp,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+          }));
+
+          const result = ingestCandles(symbol, fetched);
+          console.error(
+            `[get_candles] ingested ${result.inserted} 15m bars for ${symbol}; aggregated=${JSON.stringify(result.aggregated)}`,
+          );
+
+          rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[get_candles] bridge request failed: ${msg}`);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  symbol,
+                  timeframe,
+                  count: rows.length,
+                  candles: rows,
+                  warning: `Partial data — NinjaTrader request failed: ${msg}`,
+                }),
+              },
+            ],
+          };
+        }
+      }
 
       return {
         content: [

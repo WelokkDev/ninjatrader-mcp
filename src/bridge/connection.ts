@@ -1,7 +1,9 @@
+import { randomUUID } from "crypto";
 import type { WebSocket } from "ws";
 import { encode, parseMessage, type OutboundMessage, type InboundMessage } from "./protocol.js";
 
 export const HEARTBEAT_TIMEOUT_MS = 30_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface ConnectionStatus {
   connected: boolean;
@@ -9,9 +11,17 @@ export interface ConnectionStatus {
   lastHeartbeatAt: number | null;
   ntVersion: string | null;
   instruments: string[];
+  pendingRequests: number;
 }
 
 export type MessageHandler = (message: InboundMessage) => void;
+
+interface PendingRequest {
+  resolve: (value: InboundMessage) => void;
+  reject: (err: Error) => void;
+  timer: NodeJS.Timeout;
+  type: string;
+}
 
 interface ActiveConnection {
   socket: WebSocket;
@@ -25,8 +35,13 @@ interface ActiveConnection {
 export class ConnectionManager {
   private active: ActiveConnection | null = null;
   private handlers = new Map<InboundMessage["type"], Set<MessageHandler>>();
+  private pending = new Map<string, PendingRequest>();
 
   hasActiveConnection(): boolean {
+    return this.active !== null;
+  }
+
+  isConnected(): boolean {
     return this.active !== null;
   }
 
@@ -38,6 +53,7 @@ export class ConnectionManager {
         lastHeartbeatAt: null,
         ntVersion: null,
         instruments: [],
+        pendingRequests: this.pending.size,
       };
     }
     return {
@@ -46,6 +62,7 @@ export class ConnectionManager {
       lastHeartbeatAt: this.active.lastHeartbeatAt,
       ntVersion: this.active.ntVersion,
       instruments: [...this.active.instruments],
+      pendingRequests: this.pending.size,
     };
   }
 
@@ -70,6 +87,47 @@ export class ConnectionManager {
       console.error("[bridge] send failed:", err);
       return false;
     }
+  }
+
+  request(
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Promise<InboundMessage> {
+    if (!this.active) {
+      throw new Error("bridge not connected");
+    }
+
+    const id = randomUUID();
+    const envelope = { v: 1, id, type, ...payload } as unknown as OutboundMessage;
+
+    return new Promise<InboundMessage>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.delete(id)) {
+          reject(
+            new Error(
+              `Request ${type} (${id}) timed out after ${timeoutMs}ms — is NinjaTrader running?`,
+            ),
+          );
+        }
+      }, timeoutMs);
+
+      this.pending.set(id, { resolve, reject, timer, type });
+
+      let sent = false;
+      try {
+        this.active!.socket.send(encode(envelope));
+        sent = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (this.pending.delete(id)) {
+          clearTimeout(timer);
+          reject(new Error(`failed to send request ${type} (${id}): ${msg}`));
+        }
+      }
+
+      if (!sent) return;
+    });
   }
 
   attach(socket: WebSocket): void {
@@ -100,6 +158,16 @@ export class ConnectionManager {
     }
   }
 
+  private rejectAllPending(reason: string): void {
+    if (this.pending.size === 0) return;
+    const err = new Error(reason);
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    this.pending.clear();
+  }
+
   private handleMessage(conn: ActiveConnection, raw: string): void {
     if (this.active !== conn) return;
     const result = parseMessage(raw);
@@ -123,6 +191,21 @@ export class ConnectionManager {
         break;
     }
 
+    // Correlate any inbound message that carries an id with a pending request.
+    const maybeId = (msg as { id?: unknown }).id;
+    if (typeof maybeId === "string") {
+      const entry = this.pending.get(maybeId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        this.pending.delete(maybeId);
+        if (msg.type === "error") {
+          entry.reject(new Error(msg.message));
+        } else {
+          entry.resolve(msg);
+        }
+      }
+    }
+
     const set = this.handlers.get(msg.type);
     if (set) {
       for (const h of set) {
@@ -139,6 +222,7 @@ export class ConnectionManager {
     if (this.active !== conn) return;
     clearInterval(conn.watchdog);
     this.active = null;
+    this.rejectAllPending("NinjaTrader disconnected while waiting for response");
     console.error(`[bridge] client disconnected (code=${code}${reason ? `, reason=${reason}` : ""})`);
   }
 
