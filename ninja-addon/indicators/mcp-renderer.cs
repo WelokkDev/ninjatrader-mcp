@@ -17,10 +17,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 {
 	public class McpBridgeRenderer : Indicator
 	{
-		private const string TagPrefix     = "mcp_";
-		private const int    AnchorBarsBack = 50;
+		private const string TagPrefix      = "mcp_";
+		private const int    AnchorBarsBack = 50; // fallback anchor when fromTs is omitted
 
 		private string symbolKey;
+		private bool   registered;
 
 		private readonly ConcurrentQueue<DrawZoneCommand>  drawQueue
 			= new ConcurrentQueue<DrawZoneCommand>();
@@ -55,22 +56,50 @@ namespace NinjaTrader.NinjaScript.Indicators
 					return;
 				}
 
-				McpBridge.DrawZoneReceived  += OnDrawZoneReceived;
+				// Adopt any pre-existing mcp_* draw objects so a reload of this
+				// indicator doesn't orphan rectangles drawn by the previous instance.
+				try
+				{
+					foreach (var d in DrawObjects)
+					{
+						if (d == null || string.IsNullOrEmpty(d.Tag)) continue;
+						if (d.Tag.StartsWith(TagPrefix)) myTags.Add(d.Tag);
+					}
+					if (myTags.Count > 0)
+						Log("adopted " + myTags.Count + " existing mcp_* draw objects on " + symbolKey);
+				}
+				catch (Exception ex) { Log("tag adoption failed: " + ex.Message); }
+
+				McpBridge.DrawZoneReceived   += OnDrawZoneReceived;
 				McpBridge.ClearZonesReceived += OnClearZonesReceived;
 
-				if (McpBridge.Instance != null)
-					McpBridge.Instance.RegisterSymbol(symbolKey);
-				else
+				TryRegister();
+				if (!registered)
 					Log("McpBridge not loaded yet; will register on next event");
 			}
 			else if (State == State.Terminated)
 			{
-				McpBridge.DrawZoneReceived  -= OnDrawZoneReceived;
+				McpBridge.DrawZoneReceived   -= OnDrawZoneReceived;
 				McpBridge.ClearZonesReceived -= OnClearZonesReceived;
 
-				if (symbolKey != null && McpBridge.Instance != null)
+				if (registered && symbolKey != null && McpBridge.Instance != null)
+				{
 					McpBridge.Instance.UnregisterSymbol(symbolKey);
+					registered = false;
+				}
 			}
+		}
+
+		// Cheap retry: if McpBridge wasn't loaded when this indicator attached,
+		// register on the first inbound event so `hello.instruments` reflects us
+		// the next time the AddOn reconnects.
+		private void TryRegister()
+		{
+			if (registered || symbolKey == null) return;
+			var bridge = McpBridge.Instance;
+			if (bridge == null) return;
+			bridge.RegisterSymbol(symbolKey);
+			registered = true;
 		}
 
 		// Bridge fires these on the WS reader thread — queue and marshal onto
@@ -78,13 +107,17 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private void OnDrawZoneReceived(DrawZoneCommand cmd)
 		{
 			if (cmd == null || cmd.Symbol != symbolKey) return;
+			TryRegister();
 			drawQueue.Enqueue(cmd);
 			TriggerCustomEvent(_ => DrainQueues(), null);
 		}
 
 		private void OnClearZonesReceived(ClearZonesCommand cmd)
 		{
-			if (cmd == null || cmd.Symbol != symbolKey) return;
+			if (cmd == null) return;
+			// Empty/missing symbol means "apply to every chart that has the renderer".
+			if (!string.IsNullOrEmpty(cmd.Symbol) && cmd.Symbol != symbolKey) return;
+			TryRegister();
 			clearQueue.Enqueue(cmd);
 			TriggerCustomEvent(_ => DrainQueues(), null);
 		}
@@ -103,19 +136,34 @@ namespace NinjaTrader.NinjaScript.Indicators
 			{
 				try
 				{
-					var tag      = TagPrefix + draw.Id;
-					var startBar = Math.Min(AnchorBarsBack, CurrentBar);
+					var tag = TagPrefix + draw.Id;
+
+					DateTime fromTime;
+					if (draw.FromTime.HasValue)
+					{
+						fromTime = draw.FromTime.Value;
+					}
+					else
+					{
+						var startBar = Math.Min(AnchorBarsBack, CurrentBar);
+						fromTime = Time[startBar];
+					}
+
+					var toTime = draw.ToTime.HasValue ? draw.ToTime.Value : Time[0];
+
 					Draw.Rectangle(
 						this,
 						tag,
 						false,
-						Time[startBar], draw.Proximal,
-						Time[0],        draw.Distal,
+						fromTime, draw.Proximal,
+						toTime,   draw.Distal,
 						Brushes.DodgerBlue,
 						Brushes.DodgerBlue,
 						30);
 					myTags.Add(tag);
-					Log("drew " + tag + " " + draw.Proximal + "/" + draw.Distal);
+					Log("drew " + tag + " " + draw.Proximal + "/" + draw.Distal
+						+ " " + fromTime.ToString("yyyy-MM-dd HH:mm")
+						+ "→" + toTime.ToString("yyyy-MM-dd HH:mm"));
 				}
 				catch (Exception ex) { Log("draw failed: " + ex.Message); }
 			}
@@ -125,7 +173,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 			{
 				try
 				{
-					if (!string.IsNullOrEmpty(clr.Id))
+					if (clr.Ids != null && clr.Ids.Count > 0)
+					{
+						foreach (var rawId in clr.Ids)
+						{
+							if (string.IsNullOrEmpty(rawId)) continue;
+							var tag = TagPrefix + rawId;
+							RemoveDrawObject(tag);
+							myTags.Remove(tag);
+						}
+						Log("cleared " + clr.Ids.Count + " ids on " + symbolKey);
+					}
+					else if (!string.IsNullOrEmpty(clr.Id))
 					{
 						var tag = TagPrefix + clr.Id;
 						RemoveDrawObject(tag);

@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__ninjatrader__draw_zone",
+      "mcp__ninjatrader__clear_zones"
+    ]
+  },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "ninjatrader"

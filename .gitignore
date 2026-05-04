@@ -11,6 +11,7 @@ private/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+.test-data/
 src/private/
 build/
 

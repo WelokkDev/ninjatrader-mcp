@@ -8,8 +8,8 @@ import { registerLiveIngestHandler } from "./bridge/ingest.js";
 
 import { registerGetCandles } from "./tools/get-candles.js";
 // import { registerScanZones } from "./tools/scan-zones.js";
-// import { registerDrawZone } from "./tools/draw-zone.js";
-// import { registerClearZones } from "./tools/clear-zones.js";
+import { registerDrawZone } from "./tools/draw-zone.js";
+import { registerClearZones } from "./tools/clear-zones.js";
 // import { registerLogTrade } from "./tools/log-trade.js";
 
 const server = new McpServer({
@@ -19,8 +19,8 @@ const server = new McpServer({
 
 registerGetCandles(server);
 // registerScanZones(server);
-// registerDrawZone(server);
-// registerClearZones(server);
+registerDrawZone(server);
+registerClearZones(server);
 // registerLogTrade(server);
 
 async function main() {

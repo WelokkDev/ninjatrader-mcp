@@ -24,16 +24,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 {
 	public class DrawZoneCommand
 	{
-		public string Id;
-		public string Symbol;
-		public double Proximal;
-		public double Distal;
+		public string    Id;
+		public string    Symbol;
+		public double    Proximal;
+		public double    Distal;
+		// Pre-converted to chart time (ET, DateTimeKind.Unspecified) by the AddOn
+		// so the renderer doesn't need to know about timezones. Null = unspecified;
+		// the renderer applies its bar-anchor fallback.
+		public DateTime? FromTime;
+		public DateTime? ToTime;
 	}
 
 	public class ClearZonesCommand
 	{
-		public string Symbol;
-		public string Id; // null = clear all for symbol
+		public string       Symbol; // null/empty = apply to every chart
+		public string       Id;     // single-id form (legacy)
+		public List<string> Ids;    // batch form; takes priority over Id when present
 	}
 
 	public class McpBridge : NinjaTrader.NinjaScript.AddOnBase
@@ -293,6 +299,24 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return Convert.ToDouble(v);
 		}
 
+		// JavaScriptSerializer deserializes JSON arrays as object[] (or ArrayList in
+		// some configurations); accept either and stringify each element.
+		private static List<string> GetStringArray(IDictionary<string, object> obj, string key)
+		{
+			object v;
+			if (obj == null || !obj.TryGetValue(key, out v) || v == null) return null;
+			var enumerable = v as System.Collections.IEnumerable;
+			if (enumerable == null) return null;
+			var list = new List<string>();
+			foreach (var item in enumerable)
+			{
+				if (item == null) continue;
+				var s = item.ToString();
+				if (!string.IsNullOrEmpty(s)) list.Add(s);
+			}
+			return list.Count > 0 ? list : null;
+		}
+
 		private void HandleMessage(string raw)
 		{
 			Dictionary<string, object> obj;
@@ -317,14 +341,35 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				case "draw_zone":
 				{
+					var fromTs = GetLong(obj, "fromTs");
+					var toTs   = GetLong(obj, "toTs");
+					DateTime? fromTime = null;
+					DateTime? toTime   = null;
+					try
+					{
+						if (fromTs.HasValue) fromTime = UnixSecondsToExchangeTime(fromTs.Value);
+						if (toTs.HasValue)   toTime   = UnixSecondsToExchangeTime(toTs.Value);
+					}
+					catch (Exception ex)
+					{
+						Log("draw_zone bad timestamp: " + ex.Message + " — falling back to bar anchor");
+						fromTime = null;
+						toTime   = null;
+					}
+
 					var cmd = new DrawZoneCommand
 					{
 						Id       = GetString(obj, "id"),
 						Symbol   = GetString(obj, "symbol"),
 						Proximal = GetDouble(obj, "proximal"),
 						Distal   = GetDouble(obj, "distal"),
+						FromTime = fromTime,
+						ToTime   = toTime,
 					};
-					Log("draw_zone " + cmd.Symbol + " id=" + cmd.Id + " p=" + cmd.Proximal + " d=" + cmd.Distal);
+					Log("draw_zone " + cmd.Symbol + " id=" + cmd.Id
+						+ " p=" + cmd.Proximal + " d=" + cmd.Distal
+						+ " from=" + (fromTime.HasValue ? fromTime.Value.ToString("yyyy-MM-dd HH:mm") : "<bar-anchor>")
+						+ " to="   + (toTime.HasValue   ? toTime.Value.ToString("yyyy-MM-dd HH:mm")   : "<current-bar>"));
 					var handler = DrawZoneReceived;
 					if (handler != null) handler(cmd);
 					break;
@@ -335,9 +380,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 					var cmd = new ClearZonesCommand
 					{
 						Symbol = GetString(obj, "symbol"),
-						Id     = GetString(obj, "id"), // may be null
+						Id     = GetString(obj, "id"),
+						Ids    = GetStringArray(obj, "ids"),
 					};
-					Log("clear_zones " + cmd.Symbol + (cmd.Id != null ? " id=" + cmd.Id : " (all)"));
+					var symbolDesc = string.IsNullOrEmpty(cmd.Symbol) ? "<all-charts>" : cmd.Symbol;
+					string idDesc;
+					if (cmd.Ids != null && cmd.Ids.Count > 0) idDesc = " ids=[" + string.Join(",", cmd.Ids.ToArray()) + "]";
+					else if (!string.IsNullOrEmpty(cmd.Id))   idDesc = " id=" + cmd.Id;
+					else                                       idDesc = " (all)";
+					Log("clear_zones " + symbolDesc + idDesc);
 					var handler = ClearZonesReceived;
 					if (handler != null) handler(cmd);
 					break;

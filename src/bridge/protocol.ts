@@ -25,13 +25,21 @@ export interface DrawZoneMessage {
   symbol: string;
   proximal: number;
   distal: number;
+  // Unix seconds, matching the candle protocol. Both optional:
+  // omit fromTs to anchor the rectangle to a fixed bars-back fallback,
+  // omit toTs to extend it to the current bar.
+  fromTs?: number;
+  toTs?: number;
 }
 
 export interface ClearZonesMessage {
   v: 1;
   type: "clear_zones";
-  symbol: string;
+  // Optional: omit to clear on every chart that has the renderer attached.
+  symbol?: string;
+  // Single-id form (kept for compatibility); prefer `ids` for batches.
   id?: string;
+  ids?: string[];
 }
 
 export interface RequestCandlesMessage {
