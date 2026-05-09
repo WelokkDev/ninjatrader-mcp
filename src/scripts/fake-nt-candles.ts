@@ -100,6 +100,12 @@ async function main(): Promise<void> {
       const timeframe = String(msg.timeframe);
       const from = Number(msg.from);
       const to = Number(msg.to);
+      const tradingHoursTemplate = msg.tradingHoursTemplate
+        ? String(msg.tradingHoursTemplate)
+        : "<MISSING>";
+      console.error(
+        `[fake-nt-candles] recv request_candles id=${id} symbol=${symbol} tf=${timeframe} tradingHoursTemplate=${tradingHoursTemplate}`,
+      );
       const candles = buildFakeCandles(from, to, 5);
       const response = {
         v: 1,

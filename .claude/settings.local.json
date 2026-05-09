@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__ninjatrader__draw_zone",
-      "mcp__ninjatrader__clear_zones"
+      "mcp__ninjatrader__clear_zones",
+      "mcp__ninjatrader__get_candles"
     ]
   },
   "enableAllProjectMcpServers": true,

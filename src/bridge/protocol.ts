@@ -50,6 +50,11 @@ export interface RequestCandlesMessage {
   timeframe: string;
   from: number;
   to: number;
+  // Internal session-template name (e.g. "cme_us_index_futures_eth").
+  // Required: the NT8 add-on fails the request closed if missing or
+  // unknown rather than falling back to a default — see design F-1
+  // and the C# add-on's TRADING_HOURS_MAP.
+  tradingHoursTemplate: string;
 }
 
 export interface CandlePayload {

@@ -233,6 +233,36 @@ describe("get_candles handler — cache hit path", () => {
     expect(result.content[0].text).toMatch(/Invalid session-day for NQ/);
   });
 
+  it("on cache miss, sends request_candles with the symbol's tradingHoursTemplate", async () => {
+    // Empty DB → cache miss → bridge.request("request_candles", payload)
+    // gets called. The payload must carry the NQ session-template name
+    // ("cme_us_index_futures_eth") so the C# add-on picks the right
+    // NT8 TradingHours template. Regression guard against the F-1 bug.
+    let capturedPayload: Record<string, unknown> | null = null;
+    const handler = createGetCandlesHandler({
+      db,
+      isConnected: () => true,
+      request: async (_type, payload) => {
+        capturedPayload = payload as Record<string, unknown>;
+        return {
+          v: 1, id: "x", type: "candles_response",
+          symbol: "NQ", timeframe: "15m", candles: [],
+        };
+      },
+      ingestCandles: () => ({ inserted: 0, aggregated: {} }),
+    });
+
+    await handler({
+      symbol: "NQ",
+      timeframe: "15m",
+      start: "2026-05-01",
+      end: "2026-05-01",
+    });
+
+    expect(capturedPayload).not.toBeNull();
+    expect(capturedPayload!.tradingHoursTemplate).toBe("cme_us_index_futures_eth");
+  });
+
   it("returns clear error when cache is empty and bridge disconnected", async () => {
     const handler = createGetCandlesHandler({
       db,

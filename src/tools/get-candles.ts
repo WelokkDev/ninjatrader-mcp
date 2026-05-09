@@ -129,6 +129,11 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           timeframe: "15m",
           from: startTs,
           to: endTs,
+          // The C# add-on uses this to pick the NT8 TradingHours template
+          // for the request. Pass the symbol's session-template name from
+          // the registry — never hardcode (NQ and BTC must produce
+          // different values here). See design F-1.
+          tradingHoursTemplate: config.session.name,
         })) as {
           type: string;
           symbol: string;

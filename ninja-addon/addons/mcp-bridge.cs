@@ -56,6 +56,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
+		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
+			new Dictionary<string, string>(StringComparer.Ordinal)
+		{
+			{ "cme_us_index_futures_eth", "CME US Index Futures ETH" },
+			{ "nymex_energy_eth",         "CME US Energy ETH" },
+			{ "comex_metals_eth",         "COMEX Metals ETH" },
+		};
+
 		private CancellationTokenSource cts;
 		private Task                    runner;
 		private ClientWebSocket         socket;
@@ -138,10 +146,66 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
+		// ---------- TradingHours startup verification ----------
+
+		// Log every NT8 TradingHours template available on this install,
+		// then verify each value in TRADING_HOURS_MAP exists. Run once at
+		// AddOn startup (from RunAsync). The user cross-references the log
+		// to confirm the mapping is correct for their NT8 version, and
+		// updates TRADING_HOURS_MAP if any guesses are wrong.
+		private void LogAvailableTradingHours()
+		{
+			try
+			{
+				var sb = new StringBuilder();
+				sb.Append("[startup] Available NT8 TradingHours templates:");
+				int count = 0;
+				foreach (var th in TradingHours.All)
+				{
+					if (th == null) continue;
+					sb.Append(" '").Append(th.Name).Append("'");
+					count++;
+				}
+				if (count == 0) sb.Append(" <none>");
+				Log(sb.ToString());
+
+				foreach (var kvp in TRADING_HOURS_MAP)
+				{
+					var nt8Name = kvp.Value;
+					var found = false;
+					foreach (var th in TradingHours.All)
+					{
+						if (th == null) continue;
+						if (string.Equals(th.Name, nt8Name, StringComparison.Ordinal))
+						{
+							found = true;
+							break;
+						}
+					}
+					if (found)
+					{
+						Log("[startup] verified mapping: " + kvp.Key + " → '" + nt8Name + "' (exists in NT8)");
+					}
+					else
+					{
+						Log("[startup] WARNING: mapping target NOT FOUND in NT8: "
+							+ kvp.Key + " → '" + nt8Name
+							+ "' — fix TRADING_HOURS_MAP in mcp-bridge.cs");
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("[startup] failed to enumerate TradingHours.All: " + ex.Message);
+			}
+		}
+
 		// ---------- main loop ----------
 
 		private async Task RunAsync(CancellationToken ct)
 		{
+			LogAvailableTradingHours();
+
 			var backoffMs = ReconnectMinMs;
 
 			while (!ct.IsCancellationRequested)
@@ -566,11 +630,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private void HandleRequestCandles(IDictionary<string, object> obj)
 		{
-			var id        = GetString(obj, "id");
-			var symbol    = GetString(obj, "symbol");
-			var timeframe = GetString(obj, "timeframe");
-			var fromUnix  = GetLong(obj, "from");
-			var toUnix    = GetLong(obj, "to");
+			var id                   = GetString(obj, "id");
+			var symbol               = GetString(obj, "symbol");
+			var timeframe            = GetString(obj, "timeframe");
+			var fromUnix             = GetLong(obj, "from");
+			var toUnix               = GetLong(obj, "to");
+			var tradingHoursTemplate = GetString(obj, "tradingHoursTemplate");
 
 			if (string.IsNullOrEmpty(id))
 			{
@@ -582,6 +647,50 @@ namespace NinjaTrader.NinjaScript.AddOns
 				SendErrorResponse(id, "request_candles missing required fields (symbol, from, to)");
 				return;
 			}
+			if (string.IsNullOrEmpty(tradingHoursTemplate))
+			{
+				// Fail closed: do NOT silently fall back to RTH or any other template.
+				// The MCP redesign (F-1) requires the TS side to specify which session.
+				SendErrorResponse(id, "request_candles missing required field: tradingHoursTemplate");
+				return;
+			}
+
+			string nt8TemplateName;
+			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
+			{
+				var knownKeys = new StringBuilder();
+				foreach (var k in TRADING_HOURS_MAP.Keys)
+				{
+					if (knownKeys.Length > 0) knownKeys.Append(", ");
+					knownKeys.Append(k);
+				}
+				SendErrorResponse(id, "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
+					+ "'. Known: " + knownKeys.ToString()
+					+ ". Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.");
+				return;
+			}
+
+			TradingHours nt8TradingHours;
+			try
+			{
+				nt8TradingHours = TradingHours.Get(nt8TemplateName);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message);
+				return;
+			}
+			if (nt8TradingHours == null)
+			{
+				SendErrorResponse(id, "NT8 has no TradingHours template named '" + nt8TemplateName
+					+ "' (mapped from '" + tradingHoursTemplate
+					+ "'). Check 'Tools → Trading Hours' in NT8 and update TRADING_HOURS_MAP if NT8 uses a different name on this install.");
+				return;
+			}
+
+			Log("TradingHours lookup: symbol=" + symbol
+				+ " template=" + tradingHoursTemplate
+				+ " → NT8 template='" + nt8TemplateName + "'");
 
 			var instrument = ResolveInstrument(symbol);
 			if (instrument == null)
@@ -612,7 +721,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					BarsPeriodType = BarsPeriodType.Minute,
 					Value          = 15,
 				};
-				barsRequest.TradingHours = TradingHours.Get("CME US Index Futures RTH");
+				barsRequest.TradingHours = nt8TradingHours;
 			}
 			catch (Exception ex)
 			{
