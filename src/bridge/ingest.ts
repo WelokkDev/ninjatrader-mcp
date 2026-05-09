@@ -1,61 +1,17 @@
 import db from "../db/connection.js";
 import { aggregateCandles } from "../core/aggregator.js";
 import { SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { getInstrumentConfig } from "../core/sessions/registry.js";
+import {
+  sessionDayContaining,
+  sessionDayRange,
+} from "../core/sessions/session-day.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 
-const ET_TZ = "America/New_York";
 const HIGHER_TIMEFRAMES: Timeframe[] = SUPPORTED_TIMEFRAMES.filter(
   (tf) => tf !== "15m",
 );
-
-const etDateFmt = new Intl.DateTimeFormat("en-CA", {
-  timeZone: ET_TZ,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-const etPartsFmt = new Intl.DateTimeFormat("en-US", {
-  timeZone: ET_TZ,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-});
-
-function etDateOf(unixSec: number): string {
-  // en-CA gives YYYY-MM-DD format reliably.
-  return etDateFmt.format(new Date(unixSec * 1000));
-}
-
-// Returns the [start, endExclusive) Unix-second range for an ET calendar day.
-// Handles DST by computing the wall-clock-vs-UTC offset at noon UTC of the
-// target day (always lands on the same ET date in either EST or EDT).
-function etDayRangeUnix(etDate: string): { start: number; endExclusive: number } {
-  const [y, m, d] = etDate.split("-").map(Number);
-  const probeUtcMs = Date.UTC(y, m - 1, d, 17, 0, 0); // 17:00 UTC
-  const parts = etPartsFmt.formatToParts(new Date(probeUtcMs));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  const etAsUtcMs = Date.UTC(
-    parseInt(get("year")),
-    parseInt(get("month")) - 1,
-    parseInt(get("day")),
-    parseInt(get("hour")),
-    parseInt(get("minute")),
-    parseInt(get("second")),
-  );
-  const offsetMs = etAsUtcMs - probeUtcMs; // negative for ET (UTC-4 / UTC-5)
-  const startMs = Date.UTC(y, m - 1, d, 0, 0, 0) - offsetMs;
-  const endMs = Date.UTC(y, m - 1, d + 1, 0, 0, 0) - offsetMs;
-  return {
-    start: Math.floor(startMs / 1000),
-    endExclusive: Math.floor(endMs / 1000),
-  };
-}
 
 function isValidCandle(c: Candle): boolean {
   return (
@@ -90,9 +46,29 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
     HIGHER_TIMEFRAMES.map((tf) => [tf, 0]),
   );
 
-  if (valid.length === 0) {
-    return { inserted: 0, aggregated };
+  if (valid.length === 0) return { inserted: 0, aggregated };
+
+  // Throws on unknown symbol — by design (see registry / design A.7).
+  const config = getInstrumentConfig(symbol);
+
+  // Map each incoming bar to its session-day. Bars outside any session-day
+  // (in maintenance breaks, weekend gaps, or pre-session) are dropped with
+  // a warning rather than persisted.
+  const inSession: Array<{ candle: Candle; sessionDayLabel: string }> = [];
+  const affectedSessionDays = new Set<string>();
+  for (const c of valid) {
+    const sd = sessionDayContaining(c.timestamp, config.session);
+    if (sd === null) {
+      console.error(
+        `[ingest] dropping bar for ${symbol} at unix=${c.timestamp} — not in any session-day for template "${config.session.name}"`,
+      );
+      continue;
+    }
+    inSession.push({ candle: c, sessionDayLabel: sd.label });
+    affectedSessionDays.add(sd.label);
   }
+
+  if (inSession.length === 0) return { inserted: 0, aggregated };
 
   const insertStmt = db.prepare(
     `INSERT OR REPLACE INTO candles
@@ -100,31 +76,37 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  const selectDayStmt = db.prepare(
+  // SELECT all 15m bars within a session-day's (startUnix, endUnix]
+  // range. Note: half-open in SQL maps to `> ? AND <= ?` to match the
+  // session-day boundary convention from design D.2 / D.6.
+  const selectSessionStmt = db.prepare(
     `SELECT timestamp, open, high, low, close, volume
        FROM candles
       WHERE symbol = ? AND timeframe = '15m'
-        AND timestamp >= ? AND timestamp < ?
+        AND timestamp > ? AND timestamp <= ?
       ORDER BY timestamp ASC`,
   );
 
-  const affectedDays = new Set<string>();
-  for (const c of valid) {
-    affectedDays.add(etDateOf(c.timestamp));
-  }
-
   const tx = db.transaction(() => {
-    for (const c of valid) {
+    for (const { candle: c } of inSession) {
       insertStmt.run(symbol, "15m", c.timestamp, c.open, c.high, c.low, c.close, c.volume);
     }
 
-    for (const day of affectedDays) {
-      const { start, endExclusive } = etDayRangeUnix(day);
-      const dayCandles = selectDayStmt.all(symbol, start, endExclusive) as Candle[];
-      if (dayCandles.length === 0) continue;
+    for (const label of affectedSessionDays) {
+      const range = sessionDayRange(label, config.session);
+      const sessionCandles = selectSessionStmt.all(
+        symbol,
+        range.startUnix,
+        range.endUnix,
+      ) as Candle[];
+      if (sessionCandles.length === 0) continue;
 
       for (const tf of HIGHER_TIMEFRAMES) {
-        const aggCandles = aggregateCandles(dayCandles, tf);
+        const aggCandles = aggregateCandles(sessionCandles, tf, {
+          session: config.session,
+          alignment: config.alignment,
+          timestampConvention: config.timestampConvention,
+        });
         for (const a of aggCandles) {
           insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume);
         }
@@ -135,7 +117,7 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
 
   tx();
 
-  return { inserted: valid.length, aggregated };
+  return { inserted: inSession.length, aggregated };
 }
 
 export function registerLiveIngestHandler(): void {

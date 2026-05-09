@@ -1,10 +1,20 @@
 export interface Candle {
+  // Unix seconds. Close-stamped per NT8 convention: `timestamp` is the
+  // close of the bar, not the open. For a 15-minute bar covering
+  // 18:00:00–18:14:59 ET, NT8's `Bars.GetTime(i)` returns 18:15:00 ET, and
+  // we store that verbatim.
   timestamp: number;
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number;
+  // Set true on the most-recent aggregated bar when its session-day's
+  // expected end is in the future — i.e., more underlying bars may still
+  // arrive that extend or supersede this bucket. Consumers that ignore
+  // the field see no behavior change. The WAW detector should skip
+  // pairing logic on partial bars (follow-up — not enforced today).
+  partial?: boolean;
 }
 
 export type Timeframe = "15m" | "30m" | "1h" | "2h" | "4h";

@@ -1,72 +1,91 @@
 import type { Candle, Timeframe } from "./types.js";
-import { AGGREGATION_MAP } from "./constants.js";
+import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
+import { sessionDayContaining } from "./sessions/session-day.js";
 
-const SESSION_START_MINUTES = 9 * 60 + 30; // 9:30 AM ET
+const PERIOD_MINUTES: Record<Timeframe, number> = {
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+};
 
-const etFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "numeric",
-  minute: "numeric",
-  hourCycle: "h23",
-});
-
-function getETComponents(timestampSec: number): {
-  date: string;
-  minuteOfDay: number;
-} {
-  const parts = etFormatter.formatToParts(new Date(timestampSec * 1000));
-  const get = (type: string) => parts.find((p) => p.type === type)!.value;
-  const hour = parseInt(get("hour"));
-  const minute = parseInt(get("minute"));
-  return {
-    date: `${get("year")}-${get("month")}-${get("day")}`,
-    minuteOfDay: hour * 60 + minute,
-  };
+export interface AggregateOptions {
+  session: SessionTemplate;
+  alignment: AlignmentStrategy;
+  timestampConvention: "close-stamped";
+  // Used to mark partial bars. Defaults to Date.now()/1000. Tests can pin
+  // it for deterministic partial-bar behavior.
+  now?: number;
 }
 
 /**
- * Aggregates 15m candles into the target timeframe.
+ * Aggregates 15-minute close-stamped candles into the target timeframe
+ * using the instrument's session model.
  *
- * Alignment rules:
- *   30m  — clock-aligned to :00, :30
- *   1h   — clock-aligned to the hour
- *   2h   — clock-aligned to even hours (10:00, 12:00, 14:00)
- *   4h   — session-aligned to 9:30, 13:30 (RTH boundaries)
+ * Output is close-stamped: each aggregated bar's `timestamp` is the
+ * close-stamp of the LAST underlying 15-minute bar in its bucket, which
+ * matches NT8's display convention (a 4h bucket Mon 18:00 → Mon 22:00 ET
+ * is labeled 22:00).
  *
- * Never aggregates across day boundaries.
- * Incomplete groups at end-of-day are kept (not discarded).
+ * For details and design rationale, see
+ * `docs/design/session-aware-aggregation.md`.
  */
 export function aggregateCandles(
   candles: Candle[],
   targetTimeframe: Timeframe,
+  options: AggregateOptions,
 ): Candle[] {
-  if (targetTimeframe === "15m") return [...candles];
+  if (targetTimeframe === "15m") {
+    // 15m passthrough — copy so callers can't mutate input.
+    return markPartial([...candles].map(stripPartial), options);
+  }
 
-  const periodMinutes = AGGREGATION_MAP[targetTimeframe] * 15;
+  if (
+    options.alignment !== "session_aligned_with_stubs" &&
+    options.alignment !== "wall_clock_utc"
+  ) {
+    // wall_clock_utc is implemented via the session-day model with a
+    // daily-UTC template (CONTINUOUS_24_7), so it routes through the
+    // same code path. The remaining three strategies are documented in
+    // design B.1 but not wired up.
+    throw new Error(
+      `aggregateCandles: alignment "${options.alignment}" is not implemented`,
+    );
+  }
 
-  // Group candles into buckets keyed by (tradingDay, alignedBucketMinute)
+  const periodSeconds = PERIOD_MINUTES[targetTimeframe] * 60;
   const buckets = new Map<string, Candle[]>();
 
   for (const candle of candles) {
-    const { date, minuteOfDay } = getETComponents(candle.timestamp);
-
-    let bucketMinute: number;
-    if (targetTimeframe === "4h") {
-      // Session-aligned: offset from 9:30 session start
-      const sinceSession = minuteOfDay - SESSION_START_MINUTES;
-      bucketMinute =
-        SESSION_START_MINUTES +
-        Math.floor(sinceSession / periodMinutes) * periodMinutes;
-    } else {
-      // Clock-aligned: floor to period boundary
-      bucketMinute =
-        Math.floor(minuteOfDay / periodMinutes) * periodMinutes;
+    const sd = sessionDayContaining(candle.timestamp, options.session);
+    if (sd === null) {
+      console.error(
+        `[aggregator] dropping bar at ${candle.timestamp} — not in any session-day for template "${options.session.name}"`,
+      );
+      continue;
     }
-
-    const key = `${date}|${bucketMinute}`;
+    // CRITICAL: subtract 1 second from the close-stamp before flooring
+    // so that boundary close-stamps (e.g. Tue 22:00 = the close of the
+    // first 4h bucket on CME ETH) fall into the bucket their data window
+    // belongs to, not the next one.
+    //
+    // Worked example (4h, periodSeconds=14400, sd.startUnix = Mon 18:00 ET):
+    //   Bar Tue 22:00 ET (= +14400s):
+    //     naive   floor(14400 / 14400) = 1  ← wrong (puts it in bucket 1
+    //                                          which closes at 02:00)
+    //     -1 adj  floor(14399 / 14400) = 0  ← correct (bucket 0 closes
+    //                                          at 22:00, which IS this
+    //                                          bar's close-stamp)
+    //
+    // DO NOT REMOVE the `- 1`. A simplification pass that deletes it as
+    // dead arithmetic will silently shift every boundary close-stamp
+    // into the wrong bucket. See docs/design/session-aware-aggregation.md
+    // section D.4 for full derivation and verification table.
+    const bucketIndex = Math.floor(
+      (candle.timestamp - sd.startUnix - 1) / periodSeconds,
+    );
+    const key = `${sd.label}|${bucketIndex}`;
     let bucket = buckets.get(key);
     if (!bucket) {
       bucket = [];
@@ -75,18 +94,43 @@ export function aggregateCandles(
     bucket.push(candle);
   }
 
-  // Aggregate each bucket into a single candle
   const result: Candle[] = [];
   for (const group of buckets.values()) {
+    group.sort((a, b) => a.timestamp - b.timestamp);
+    const last = group[group.length - 1];
     result.push({
-      timestamp: group[0].timestamp,
+      // Close-stamp of the LAST underlying bar = close-stamp of the
+      // bucket. Matches NT8's display convention.
+      timestamp: last.timestamp,
       open: group[0].open,
       high: Math.max(...group.map((c) => c.high)),
       low: Math.min(...group.map((c) => c.low)),
-      close: group[group.length - 1].close,
+      close: last.close,
       volume: group.reduce((sum, c) => sum + c.volume, 0),
     });
   }
 
-  return result.sort((a, b) => a.timestamp - b.timestamp);
+  result.sort((a, b) => a.timestamp - b.timestamp);
+  return markPartial(result, options);
+}
+
+function stripPartial(c: Candle): Candle {
+  if (c.partial === undefined) return c;
+  const { partial: _drop, ...rest } = c;
+  return rest;
+}
+
+// Sets `partial: true` on the LAST candle in a sorted-ascending array
+// when its containing session-day's expected end is in the future.
+// Mutates the trailing entry in place (after a copy at the call site).
+function markPartial(sorted: Candle[], options: AggregateOptions): Candle[] {
+  if (sorted.length === 0) return sorted;
+  const last = sorted[sorted.length - 1];
+  const sd = sessionDayContaining(last.timestamp, options.session);
+  if (sd === null) return sorted;
+  const now = options.now ?? Math.floor(Date.now() / 1000);
+  if (sd.endUnix > now) {
+    sorted[sorted.length - 1] = { ...last, partial: true };
+  }
+  return sorted;
 }

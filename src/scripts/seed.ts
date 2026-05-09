@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import db from "../db/connection.js";
 import { aggregateCandles } from "../core/aggregator.js";
 import { SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { getInstrumentConfig } from "../core/sessions/registry.js";
 import type { Candle, Timeframe } from "../core/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,10 +44,13 @@ function main() {
 
   for (const file of files) {
     const symbol = file.replace("_15m.csv", "");
+    // Throws if the symbol isn't registered. Fail loudly rather than
+    // silently aggregating with the wrong session model.
+    const config = getInstrumentConfig(symbol);
+
     const content = readFileSync(path.join(sampleDir, file), "utf-8");
     const candles = parseCsv(content);
 
-    // Insert 15m candles in a single transaction
     db.transaction(() => {
       for (const c of candles) {
         insertStmt.run(
@@ -57,10 +61,13 @@ function main() {
     })();
     console.error(`${symbol} 15m: ${candles.length} rows`);
 
-    // Aggregate and insert higher timeframes
     for (const tf of SUPPORTED_TIMEFRAMES) {
       if (tf === "15m") continue;
-      const aggregated = aggregateCandles(candles, tf);
+      const aggregated = aggregateCandles(candles, tf, {
+        session: config.session,
+        alignment: config.alignment,
+        timestampConvention: config.timestampConvention,
+      });
       db.transaction(() => {
         for (const c of aggregated) {
           insertStmt.run(

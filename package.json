@@ -9,11 +9,14 @@
   "scripts": {
     "build": "tsc && shx chmod +x build/index.js",
     "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
     "inspect": "npx @modelcontextprotocol/inspector build/index.js",
     "seed": "node build/scripts/seed.js",
     "start": "node build/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:waw": "tsc && node build/scripts/test-waw.js",
+    "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js"
   },
   "files": [
     "build"
