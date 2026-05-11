@@ -152,7 +152,14 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
               skipped: skippedKnown,
               unknown: unknownSkips,
             },
-            zones,
+            // Each zone is enriched with parallel unix-second
+            // timestamps so callers can feed draw_zone (which expects
+            // unix seconds) without re-parsing the ISO strings.
+            zones: zones.map((z) => ({
+              ...z,
+              c1TimestampUnix: Math.floor(new Date(z.c1Timestamp).getTime() / 1000),
+              c2TimestampUnix: Math.floor(new Date(z.c2Timestamp).getTime() / 1000),
+            })),
             totalCount: zones.length,
             qualifiedCount: zones.filter((z) => z.qualified).length,
           }),

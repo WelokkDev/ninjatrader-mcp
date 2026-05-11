@@ -151,14 +151,26 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 					var toTime = draw.ToTime.HasValue ? draw.ToTime.Value : Time[0];
 
+					// Color by direction. The WAW detector sets distal
+					// below proximal for demand zones (proximal=open,
+					// distal=low) and above for supply zones
+					// (proximal=open, distal=high), so the inference is
+					// reliable for any zone produced by scan_zones.
+					// Equal values fall back to the original neutral
+					// color.
+					Brush brush;
+					if (draw.Distal < draw.Proximal)      brush = Brushes.LimeGreen;
+					else if (draw.Distal > draw.Proximal) brush = Brushes.OrangeRed;
+					else                                   brush = Brushes.DodgerBlue;
+
 					Draw.Rectangle(
 						this,
 						tag,
 						false,
 						fromTime, draw.Proximal,
 						toTime,   draw.Distal,
-						Brushes.DodgerBlue,
-						Brushes.DodgerBlue,
+						brush,
+						brush,
 						30);
 					myTags.Add(tag);
 					Log("drew " + tag + " " + draw.Proximal + "/" + draw.Distal
