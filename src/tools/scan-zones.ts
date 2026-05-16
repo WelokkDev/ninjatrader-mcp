@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { readFileSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
@@ -7,7 +10,10 @@ import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
 import type { Candle } from "../core/types.js";
 import { detectWaws } from "../private/waw/detector.js";
-import { quantifierRegistry } from "../private/waw/quantifiers/registry.js";
+import {
+  loadStrategy,
+  strategyAdditionalTimeframes,
+} from "../private/waw/strategy-loader.js";
 import type { Strategy, MarketContext } from "../private/waw/types.js";
 
 // scan_zones runs the configured detection pipeline against candles
@@ -15,6 +21,12 @@ import type { Strategy, MarketContext } from "../private/waw/types.js";
 // to get_candles: get_candles fills the cache; scan_zones reads from it.
 // On cache miss the tool returns a clear error rather than fetching —
 // callers should run get_candles first.
+//
+// Strategy resolution: by default loads "default.json" from the
+// strategies directory. A `strategyName` parameter selects an
+// alternative file. `skipQuantifiers` filters the loaded strategy's
+// quantifier list — names not in the loaded strategy surface under
+// quantifiers.unknown but never fail the call.
 
 const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
        FROM candles
@@ -22,6 +34,14 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
       ORDER BY timestamp ASC`;
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const STRATEGY_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Strategy files live in private/waw/strategies. After build, the
+// build script copies them alongside the compiled JS so this relative
+// path resolves identically in dev (src/) and production (build/).
+const STRATEGY_DIR = path.resolve(__dirname, "../private/waw/strategies");
 
 export interface ScanZonesArgs {
   symbol: string;
@@ -31,6 +51,7 @@ export interface ScanZonesArgs {
   minWickCoverageOfPriorBody?: number;
   allowDojiAsCandle2?: boolean;
   skipQuantifiers?: string[];
+  strategyName?: string;
 }
 
 export interface ScanZonesDeps {
@@ -45,6 +66,17 @@ function err(text: string): ToolResult {
   return { content: [{ type: "text" as const, text }] };
 }
 
+function readStrategy(name: string): Strategy {
+  if (!STRATEGY_NAME_RE.test(name)) {
+    throw new Error(
+      `Invalid strategyName "${name}". Allowed: letters, digits, "_", "-".`,
+    );
+  }
+  const filePath = path.resolve(STRATEGY_DIR, `${name}.json`);
+  const raw = readFileSync(filePath, "utf-8");
+  return loadStrategy(raw);
+}
+
 export function createScanZonesHandler(deps: ScanZonesDeps) {
   return async ({
     symbol,
@@ -54,6 +86,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     minWickCoverageOfPriorBody = 0,
     allowDojiAsCandle2 = false,
     skipQuantifiers = [],
+    strategyName = "default",
   }: ScanZonesArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
       return err(
@@ -71,6 +104,14 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       minWickCoverageOfPriorBody > 1
     ) {
       return err("minWickCoverageOfPriorBody must be a number in [0, 1]");
+    }
+
+    let baseStrategy: Strategy;
+    try {
+      baseStrategy = readStrategy(strategyName);
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      return err(`Failed to load strategy "${strategyName}": ${m}`);
     }
 
     const config = getInstrumentConfig(symbol);
@@ -100,34 +141,51 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       );
     }
 
-    // Build the run set: every registered quantifier minus the names
-    // the caller asked to skip. Unknown skip names surface in the
-    // response under quantifiers.unknown so callers can self-correct;
-    // they don't fail the call.
-    const allRegistered = quantifierRegistry.names();
+    // Filter the loaded strategy's quantifier list by skipQuantifiers.
+    // Names in skipQuantifiers that match nothing in the strategy
+    // surface under quantifiers.unknown so callers can self-correct.
     const skipSet = new Set(skipQuantifiers);
-    const knownSet = new Set(allRegistered);
-    const skippedKnown = skipQuantifiers.filter((n) => knownSet.has(n));
-    const unknownSkips = skipQuantifiers.filter((n) => !knownSet.has(n));
-    const runNames = allRegistered.filter((n) => !skipSet.has(n));
+    const loadedNames = baseStrategy.quantifiers.map((q) => q.name);
+    const loadedSet = new Set(loadedNames);
+    const skippedKnown = skipQuantifiers.filter((n) => loadedSet.has(n));
+    const unknownSkips = skipQuantifiers.filter((n) => !loadedSet.has(n));
+    const runQuantifiers = baseStrategy.quantifiers.filter(
+      (q) => !skipSet.has(q.name),
+    );
+    const runNames = runQuantifiers.map((q) => q.name);
 
+    // Detection settings: per-call overrides win over what's in the
+    // strategy file. Existing API contract — callers can tune
+    // minWickCoverageOfPriorBody / allowDojiAsCandle2 inline.
     const strategy: Strategy = {
-      name: "scan_zones",
+      name: baseStrategy.name,
       detection: {
         allowDojiAsCandle2,
         minWickCoverageOfPriorBody,
       },
-      quantifiers: runNames.map((name) => ({
-        name,
-        enabled: true,
-        config: {},
-      })),
+      quantifiers: runQuantifiers,
     };
+
+    // Pre-fetch lower-TF candles for any quantifier that declares
+    // `timeframes` in its config. Empty result sets are fine —
+    // downstream quantifiers handle "available but no bars in window"
+    // per their own insufficientDataPolicy.
+    const additionalTfs = strategyAdditionalTimeframes(strategy);
+    const lowerTimeframeCandles = new Map<string, readonly Candle[]>();
+    for (const tf of additionalTfs) {
+      if (tf === timeframe) continue; // primary TF; already fetched
+      const rows = deps.db
+        .prepare(QUERY_SQL)
+        .all(symbol, tf, startTs, endTs) as Candle[];
+      lowerTimeframeCandles.set(tf, rows);
+    }
 
     const ctx: MarketContext = {
       candles,
       symbol,
       timeframe,
+      lowerTimeframeCandles:
+        lowerTimeframeCandles.size > 0 ? lowerTimeframeCandles : undefined,
     };
 
     const zones = detectWaws(candles, ctx, strategy);
@@ -140,6 +198,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
             symbol,
             timeframe,
             session: config.session.name,
+            strategy: baseStrategy.name,
             range: {
               from: new Date(candles[0].timestamp * 1000).toISOString(),
               to: new Date(
@@ -147,6 +206,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
               ).toISOString(),
             },
             candleCount: candles.length,
+            additionalTimeframesFetched: [...lowerTimeframeCandles.keys()],
             quantifiers: {
               run: runNames,
               skipped: skippedKnown,
@@ -213,7 +273,14 @@ export function registerScanZones(server: McpServer): void {
         .optional()
         .default([])
         .describe(
-          "Names of quantifiers to skip on this scan. Default runs every registered quantifier. Unknown names are reported under quantifiers.unknown in the response rather than failing the call.",
+          "Names of quantifiers to skip on this scan. Unknown names are reported under quantifiers.unknown in the response rather than failing the call.",
+        ),
+      strategyName: z
+        .string()
+        .optional()
+        .default("default")
+        .describe(
+          "Strategy file to load from src/private/waw/strategies/ (without the .json extension). Defaults to 'default'.",
         ),
     },
     handler,
