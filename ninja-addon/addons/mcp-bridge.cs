@@ -650,8 +650,29 @@ namespace NinjaTrader.NinjaScript.AddOns
 			if (string.IsNullOrEmpty(tradingHoursTemplate))
 			{
 				// Fail closed: do NOT silently fall back to RTH or any other template.
-				// The MCP redesign (F-1) requires the TS side to specify which session.
 				SendErrorResponse(id, "request_candles missing required field: tradingHoursTemplate");
+				return;
+			}
+
+			BarsPeriodType barsPeriodType;
+			int            barsPeriodValue;
+			string         resolvedTimeframe;
+			if (string.IsNullOrEmpty(timeframe) || timeframe == "15m")
+			{
+				barsPeriodType    = BarsPeriodType.Minute;
+				barsPeriodValue   = 15;
+				resolvedTimeframe = "15m";
+			}
+			else if (timeframe == "5m")
+			{
+				barsPeriodType    = BarsPeriodType.Minute;
+				barsPeriodValue   = 5;
+				resolvedTimeframe = "5m";
+			}
+			else
+			{
+				SendErrorResponse(id, "Unsupported timeframe for request_candles: '"
+					+ timeframe + "'. Supported raw TFs: 5m, 15m.");
 				return;
 			}
 
@@ -718,8 +739,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				barsRequest = new BarsRequest(instrument, fromDt, toDt);
 				barsRequest.BarsPeriod = new BarsPeriod
 				{
-					BarsPeriodType = BarsPeriodType.Minute,
-					Value          = 15,
+					BarsPeriodType = barsPeriodType,
+					Value          = barsPeriodValue,
 				};
 				barsRequest.TradingHours = nt8TradingHours;
 			}
@@ -785,7 +806,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 								+ " (first=" + firstTs + " last=" + lastTs + ")");
 						}
 
-						SendCandlesResponse(id, symbol, "15m", candles);
+						SendCandlesResponse(id, symbol, resolvedTimeframe, candles);
 					}
 					catch (Exception ex)
 					{

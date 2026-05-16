@@ -78,8 +78,6 @@ describe("sessionDayRange — CME ETH", () => {
 describe("sessionDayContaining — CME ETH boundary semantics (open-exclusive, close-inclusive)", () => {
   const tpl = CME_US_INDEX_FUTURES_ETH;
 
-  // Per design D.6 + "things to watch for #6": these two boundary cases
-  // are non-negotiable.
   it("at exact endUnix (Tue 17:00:00 ET) returns the closing session-day", () => {
     const sd = sessionDayContaining(et("2026-04-21T17:00:00"), tpl);
     expect(sd).not.toBeNull();

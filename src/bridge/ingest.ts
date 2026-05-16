@@ -1,6 +1,6 @@
 import db from "../db/connection.js";
 import { aggregateCandles } from "../core/aggregator.js";
-import { SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   sessionDayContaining,
@@ -9,8 +9,10 @@ import {
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 
-const HIGHER_TIMEFRAMES: Timeframe[] = SUPPORTED_TIMEFRAMES.filter(
-  (tf) => tf !== "15m",
+// TFs that are aggregated from 15m on the 15m ingest path. 5m bars do
+// not feed this chain (5m is a parallel raw stream).
+const DERIVED_TIMEFRAMES: Timeframe[] = SUPPORTED_TIMEFRAMES.filter(
+  (tf) => !RAW_TIMEFRAMES.includes(tf),
 );
 
 function isValidCandle(c: Candle): boolean {
@@ -30,25 +32,34 @@ export interface IngestResult {
   aggregated: Record<string, number>;
 }
 
-export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
+export function ingestCandles(
+  symbol: string,
+  timeframe: Timeframe,
+  candles: Candle[],
+): IngestResult {
+  if (!RAW_TIMEFRAMES.includes(timeframe)) {
+    throw new Error(
+      `ingestCandles: timeframe '${timeframe}' is not a raw TF — only ${RAW_TIMEFRAMES.join(", ")} can be ingested directly`,
+    );
+  }
+
   const valid: Candle[] = [];
   for (const c of candles) {
     if (isValidCandle(c)) {
       valid.push(c);
     } else {
       console.error(
-        `[ingest] skipping invalid candle for ${symbol}: ${JSON.stringify(c)}`,
+        `[ingest] skipping invalid candle for ${symbol} ${timeframe}: ${JSON.stringify(c)}`,
       );
     }
   }
 
   const aggregated: Record<string, number> = Object.fromEntries(
-    HIGHER_TIMEFRAMES.map((tf) => [tf, 0]),
+    DERIVED_TIMEFRAMES.map((tf) => [tf, 0]),
   );
 
   if (valid.length === 0) return { inserted: 0, aggregated };
 
-  // Throws on unknown symbol — by design (see registry / design A.7).
   const config = getInstrumentConfig(symbol);
 
   // Map each incoming bar to its session-day. Bars outside any session-day
@@ -60,7 +71,7 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
     const sd = sessionDayContaining(c.timestamp, config.session);
     if (sd === null) {
       console.error(
-        `[ingest] dropping bar for ${symbol} at unix=${c.timestamp} — not in any session-day for template "${config.session.name}"`,
+        `[ingest] dropping bar for ${symbol} ${timeframe} at unix=${c.timestamp} — not in any session-day for template "${config.session.name}"`,
       );
       continue;
     }
@@ -76,9 +87,10 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  // SELECT all 15m bars within a session-day's (startUnix, endUnix]
-  // range. Note: half-open in SQL maps to `> ? AND <= ?` to match the
-  // session-day boundary convention from design D.2 / D.6.
+  // Only 15m bars drive the derived-TF aggregation cascade. SELECT all
+  // 15m bars within a session-day's (startUnix, endUnix] range for
+  // re-aggregation. Half-open in SQL maps to `> ? AND <= ?` per the
+  // session-day boundary convention
   const selectSessionStmt = db.prepare(
     `SELECT timestamp, open, high, low, close, volume
        FROM candles
@@ -89,8 +101,12 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
 
   const tx = db.transaction(() => {
     for (const { candle: c } of inSession) {
-      insertStmt.run(symbol, "15m", c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
     }
+
+    // 5m is a raw, parallel stream — persisted and stopped. Only 15m
+    // ingest fans out into the derived chain.
+    if (timeframe !== "15m") return;
 
     for (const label of affectedSessionDays) {
       const range = sessionDayRange(label, config.session);
@@ -101,7 +117,7 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
       ) as Candle[];
       if (sessionCandles.length === 0) continue;
 
-      for (const tf of HIGHER_TIMEFRAMES) {
+      for (const tf of DERIVED_TIMEFRAMES) {
         const aggCandles = aggregateCandles(sessionCandles, tf, {
           session: config.session,
           alignment: config.alignment,
@@ -123,13 +139,17 @@ export function ingestCandles(symbol: string, candles: Candle[]): IngestResult {
 export function registerLiveIngestHandler(): void {
   onMessage("bar_close", (msg) => {
     try {
-      const result = ingestCandles(msg.symbol, [msg.candle]);
+      const result = ingestCandles(
+        msg.symbol,
+        msg.timeframe as Timeframe,
+        [msg.candle],
+      );
       console.error(
         `[ingest] bar_close ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} agg=${JSON.stringify(result.aggregated)}`,
       );
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
-      console.error(`[ingest] bar_close ingest failed for ${msg.symbol}: ${m}`);
+      console.error(`[ingest] bar_close ingest failed for ${msg.symbol} ${msg.timeframe}: ${m}`);
     }
   });
 }

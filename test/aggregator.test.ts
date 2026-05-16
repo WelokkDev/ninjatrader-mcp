@@ -175,9 +175,6 @@ describe("aggregateCandles — 4h is session-aligned (CME ETH)", () => {
 });
 
 describe("aggregateCandles — boundary close-stamps land in the correct bucket", () => {
-  // Per design G.3 / "things to watch for #1": this is the test that
-  // fails without the `-1` second adjustment in the aggregator's
-  // bucket-index formula.
   it("Tue 22:00, 02:00, 06:00, 10:00, 14:00 each land in bucket 0..4 (not 1..5)", () => {
     // Each test bar carries a unique volume so we can identify which
     // bucket it ended up in.

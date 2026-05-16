@@ -70,10 +70,8 @@ export const NYSE_RTH: SessionTemplate = {
   ],
 };
 
-// Continuous 24/7 (crypto). Seven daily UTC spans of 00:00 → 24:00 (per
-// design D.7 decision). Each calendar day in UTC is its own session-day.
-// Defined for completeness / future use; not registered to any symbol
-// today.
+// Continuous 24/7. Seven daily UTC spans of 00:00 → 24:00 (per
+// Each calendar day in UTC is its own session-day.
 export const CONTINUOUS_24_7: SessionTemplate = {
   name: "continuous_24_7",
   description: "Continuous 24/7 (crypto). Seven daily UTC spans, 00:00 → 24:00.",

@@ -3,6 +3,7 @@ import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
 import { sessionDayContaining } from "./sessions/session-day.js";
 
 const PERIOD_MINUTES: Record<Timeframe, number> = {
+  "5m": 5,
   "15m": 15,
   "30m": 30,
   "1h": 60,
@@ -28,16 +29,13 @@ export interface AggregateOptions {
  * matches NT8's display convention (a 4h bucket Mon 18:00 → Mon 22:00 ET
  * is labeled 22:00).
  *
- * For details and design rationale, see
- * `docs/design/session-aware-aggregation.md`.
  */
 export function aggregateCandles(
   candles: Candle[],
   targetTimeframe: Timeframe,
   options: AggregateOptions,
 ): Candle[] {
-  if (targetTimeframe === "15m") {
-    // 15m passthrough — copy so callers can't mutate input.
+  if (targetTimeframe === "5m" || targetTimeframe === "15m") {
     return markPartial([...candles].map(stripPartial), options);
   }
 
@@ -46,9 +44,7 @@ export function aggregateCandles(
     options.alignment !== "wall_clock_utc"
   ) {
     // wall_clock_utc is implemented via the session-day model with a
-    // daily-UTC template (CONTINUOUS_24_7), so it routes through the
-    // same code path. The remaining three strategies are documented in
-    // design B.1 but not wired up.
+    // daily-UTC template (CONTINUOUS_24_7)
     throw new Error(
       `aggregateCandles: alignment "${options.alignment}" is not implemented`,
     );
@@ -70,18 +66,9 @@ export function aggregateCandles(
     // first 4h bucket on CME ETH) fall into the bucket their data window
     // belongs to, not the next one.
     //
-    // Worked example (4h, periodSeconds=14400, sd.startUnix = Mon 18:00 ET):
-    //   Bar Tue 22:00 ET (= +14400s):
-    //     naive   floor(14400 / 14400) = 1  ← wrong (puts it in bucket 1
-    //                                          which closes at 02:00)
-    //     -1 adj  floor(14399 / 14400) = 0  ← correct (bucket 0 closes
-    //                                          at 22:00, which IS this
-    //                                          bar's close-stamp)
-    //
     // DO NOT REMOVE the `- 1`. A simplification pass that deletes it as
     // dead arithmetic will silently shift every boundary close-stamp
-    // into the wrong bucket. See docs/design/session-aware-aggregation.md
-    // section D.4 for full derivation and verification table.
+    // into the wrong bucket.
     const bucketIndex = Math.floor(
       (candle.timestamp - sd.startUnix - 1) / periodSeconds,
     );

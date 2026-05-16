@@ -5,7 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import db from "../db/connection.js";
 import { aggregateCandles } from "../core/aggregator.js";
-import { SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import type { Candle, Timeframe } from "../core/types.js";
 
@@ -62,7 +62,7 @@ function main() {
     console.error(`${symbol} 15m: ${candles.length} rows`);
 
     for (const tf of SUPPORTED_TIMEFRAMES) {
-      if (tf === "15m") continue;
+      if (RAW_TIMEFRAMES.includes(tf)) continue;
       const aggregated = aggregateCandles(candles, tf, {
         session: config.session,
         alignment: config.alignment,

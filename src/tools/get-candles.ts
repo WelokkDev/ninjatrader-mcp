@@ -5,15 +5,14 @@ import defaultDb from "../db/connection.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
-import type { Candle } from "../core/types.js";
+import type { Candle, Timeframe } from "../core/types.js";
 import {
   isConnected as defaultIsConnected,
   request as defaultRequest,
 } from "../bridge/index.js";
 import { ingestCandles as defaultIngestCandles } from "../bridge/ingest.js";
 
-// Session-day query semantics: startUnix is exclusive, endUnix is
-// inclusive (per design D.2 / F.2). SQL bounds match the convention.
+// Session-day query semantics: startUnix is exclusive, endUnix is inclusive
 const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
        FROM candles
       WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?
@@ -22,10 +21,16 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
 
 export interface GetCandlesArgs {
   symbol: string;
-  timeframe: "15m" | "30m" | "1h" | "2h" | "4h";
+  timeframe: "5m" | "15m" | "30m" | "1h" | "2h" | "4h";
   start: string;
   end: string;
   limit?: number;
+}
+
+// 5m is its own raw stream; everything else derives from
+// 15m via the aggregation chain in ingest.ts.
+function fetchTimeframeFor(requested: Timeframe): Timeframe {
+  return requested === "5m" ? "5m" : "15m";
 }
 
 export interface GetCandlesDeps {
@@ -123,16 +128,13 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         `[get_candles] Cache miss for ${symbol} ${timeframe} — requesting from NinjaTrader`,
       );
 
+      const fetchTf = fetchTimeframeFor(timeframe);
       try {
         const response = (await deps.request("request_candles", {
           symbol,
-          timeframe: "15m",
+          timeframe: fetchTf,
           from: startTs,
           to: endTs,
-          // The C# add-on uses this to pick the NT8 TradingHours template
-          // for the request. Pass the symbol's session-template name from
-          // the registry — never hardcode (NQ and BTC must produce
-          // different values here). See design F-1.
           tradingHoursTemplate: config.session.name,
         })) as {
           type: string;
@@ -150,9 +152,9 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           volume: c.volume,
         }));
 
-        const result = deps.ingestCandles(symbol, fetched);
+        const result = deps.ingestCandles(symbol, fetchTf, fetched);
         console.error(
-          `[get_candles] ingested ${result.inserted} 15m bars for ${symbol}; aggregated=${JSON.stringify(result.aggregated)}`,
+          `[get_candles] ingested ${result.inserted} ${fetchTf} bars for ${symbol}; aggregated=${JSON.stringify(result.aggregated)}`,
         );
 
         rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
@@ -202,11 +204,11 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns pre-aggregated candles from the database; on cache miss, requests 15m bars from NinjaTrader and aggregates locally.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns pre-aggregated candles from the database; on cache miss, requests bars from NinjaTrader (5m as a raw stream, all other TFs derived locally from 15m).",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
-        .enum(["15m", "30m", "1h", "2h", "4h"])
+        .enum(["5m", "15m", "30m", "1h", "2h", "4h"])
         .describe("Candle timeframe"),
       start: z
         .string()

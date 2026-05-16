@@ -31,7 +31,7 @@ export interface SessionTemplate {
 }
 
 // One concrete materialized session-day with absolute unix-second
-// boundaries. Convention from design D.6 / D.2:
+// boundaries:
 //   startUnix is exclusive — the session open instant; the first
 //                            in-session bar's close-stamp is > startUnix
 //   endUnix   is inclusive — the close-stamp of the last in-session bar
@@ -42,11 +42,6 @@ export interface SessionDay {
   endUnix: number;
 }
 
-// Five strategies are documented in design B.1 for completeness. Only
-// session_aligned_with_stubs is implemented today; 24/7 instruments use
-// the same algorithm with a daily-UTC template, which makes its output
-// equivalent to wall_clock_utc. The remaining three are accepted by the
-// type but throw at the aggregator until someone wires them up.
 export type AlignmentStrategy =
   | "session_aligned_with_stubs"
   | "session_aligned_drop_stubs"

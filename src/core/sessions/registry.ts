@@ -8,7 +8,7 @@ import type { InstrumentConfig } from "./types.js";
 // Per-instrument session config. The aggregator does not read this map —
 // callers do (`bridge/ingest.ts`, `tools/get-candles.ts`, `scripts/seed.ts`,
 // `scripts/test-waw.ts`) and pass the resolved config into
-// aggregateCandles. See design A.5 / E.3.
+// aggregateCandles.
 //
 // Schedules for cme_us_index_futures_eth, nymex_energy_eth, and
 // comex_metals_eth are pending user verification against actual NT8

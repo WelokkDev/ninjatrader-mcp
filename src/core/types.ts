@@ -17,7 +17,7 @@ export interface Candle {
   partial?: boolean;
 }
 
-export type Timeframe = "15m" | "30m" | "1h" | "2h" | "4h";
+export type Timeframe = "5m" | "15m" | "30m" | "1h" | "2h" | "4h";
 
 export type ZoneType = "supply" | "demand";
 
