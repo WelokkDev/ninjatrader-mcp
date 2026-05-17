@@ -67,7 +67,11 @@ describe("get_candles handler — cache hit path", () => {
     db = makeDb();
   });
 
-  it("returns cached rows without calling the bridge", async () => {
+  it("returns cached rows without calling the bridge when bridge is offline", async () => {
+    // Sparse seed (2 bars in a 92-bar session) — under the auto-fill
+    // flow, the cache is "partial" and would normally trigger a refetch.
+    // We test the offline path here: with isConnected=false, ensureCached
+    // skips the fetch and returns what's cached.
     seed(db, "NQ", "15m", [
       { timestamp: NQ_MAY_1_RTH_OPEN, open: 20100, high: 20120, low: 20090, close: 20110, volume: 1000 },
       { timestamp: NQ_MAY_1_RTH_OPEN + 900, open: 20110, high: 20130, low: 20100, close: 20125, volume: 1500 },
@@ -76,13 +80,13 @@ describe("get_candles handler — cache hit path", () => {
     let bridgeCalled = false;
     const handler = createGetCandlesHandler({
       db,
-      isConnected: () => true,
+      isConnected: () => false,
       request: async () => {
         bridgeCalled = true;
-        throw new Error("bridge should not be called on cache hit");
+        throw new Error("bridge should not be called when isConnected=false");
       },
       ingestCandles: () => {
-        throw new Error("ingestCandles should not be called on cache hit");
+        throw new Error("ingestCandles should not be called when isConnected=false");
       },
     });
 
@@ -109,9 +113,10 @@ describe("get_candles handler — cache hit path", () => {
       { timestamp: et("2026-04-30T18:15:00"), open: 1, high: 1, low: 1, close: 1, volume: 100 },
     ]);
 
+    // Offline bridge: ensureCached short-circuits, SELECT returns what's seeded.
     const handler = createGetCandlesHandler({
       db,
-      isConnected: () => true,
+      isConnected: () => false,
       request: async () => { throw new Error("unreachable"); },
       ingestCandles: () => { throw new Error("unreachable"); },
     });
@@ -134,7 +139,7 @@ describe("get_candles handler — cache hit path", () => {
 
     const handler = createGetCandlesHandler({
       db,
-      isConnected: () => true,
+      isConnected: () => false,
       request: async () => { throw new Error("unreachable"); },
       ingestCandles: () => { throw new Error("unreachable"); },
     });

@@ -6,6 +6,8 @@ import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
 import type { Candle, Timeframe } from "../core/types.js";
+import { validateSessionDay } from "../core/cache/validator.js";
+import { ensureCached } from "../core/cache/fill.js";
 import {
   isConnected as defaultIsConnected,
   request as defaultRequest,
@@ -45,6 +47,62 @@ type ToolResult = {
 };
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+interface ValidationIssue {
+  sessionDay: string;
+  status: "empty" | "incomplete";
+  missingCount: number;
+  extraCount: number;
+  sampleMissing?: number[];
+  sampleExtra?: number[];
+}
+
+interface ValidationSummary {
+  ok: number;
+  mismatch: number;
+  in_progress: number;
+  issues?: ValidationIssue[];
+  in_progress_days?: string[];
+}
+
+// Final-pass validation over the user's exact requested range at the
+// REQUESTED TF (not the raw TF). Reports per-day status in the response.
+function validateRequestedRange(
+  db: Database,
+  symbol: string,
+  classifications: ReadonlyArray<{ day: { label: string; startUnix: number; endUnix: number }; class: string }>,
+  timeframe: Timeframe,
+  nowUnix: number,
+): ValidationSummary {
+  const summary: ValidationSummary = { ok: 0, mismatch: 0, in_progress: 0 };
+  const issues: ValidationIssue[] = [];
+  const inProgressDays: string[] = [];
+
+  for (const { day } of classifications) {
+    const r = validateSessionDay(db, symbol, day, timeframe, nowUnix);
+    if (r.status === "skipped") {
+      summary.in_progress++;
+      inProgressDays.push(day.label);
+    } else if (r.status === "ok") {
+      summary.ok++;
+    } else {
+      summary.mismatch++;
+      const isEmpty = r.actual.length === 0;
+      issues.push({
+        sessionDay: r.sessionDay,
+        status: isEmpty ? "empty" : "incomplete",
+        missingCount: r.missing.length,
+        extraCount: r.extra.length,
+        ...(r.missing.length > 0 && { sampleMissing: r.missing.slice(0, 6) }),
+        ...(r.extra.length > 0 && { sampleExtra: r.extra.slice(0, 6) }),
+      });
+    }
+  }
+
+  if (issues.length > 0) summary.issues = issues;
+  if (inProgressDays.length > 0) summary.in_progress_days = inProgressDays;
+  return summary;
+}
 
 export function createGetCandlesHandler(deps: GetCandlesDeps) {
   return async ({
@@ -109,73 +167,65 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       };
     }
 
-    const stmt = deps.db.prepare(QUERY_SQL);
-    let rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+    // Fill any gaps in the cache at the raw TF that backs this request.
+    // Day-aligned: any session-day that is empty, partial, or in-progress
+    // triggers a fetch covering the entire session-day window.
+    const rawTF = fetchTimeframeFor(timeframe);
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const fillResult = await ensureCached(
+      deps.db,
+      symbol,
+      startTs,
+      endTs,
+      rawTF,
+      config.session,
+      {
+        isConnected: deps.isConnected,
+        request: deps.request,
+        ingestCandles: deps.ingestCandles,
+      },
+      nowUnix,
+    );
 
-    if (rows.length === 0) {
-      if (!deps.isConnected()) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No cached data for ${symbol} ${timeframe} in this range. NinjaTrader is not connected — start NT8 with the McpBridge addon to fetch live data.`,
-            },
-          ],
-        };
-      }
-
+    if (fillResult.windowsFetched > 0) {
       console.error(
-        `[get_candles] Cache miss for ${symbol} ${timeframe} — requesting from NinjaTrader`,
+        `[get_candles] filled ${fillResult.windowsFetched} window(s) for ${symbol} ${rawTF}; days=${fillResult.fetchedDays.join(",")}`,
       );
+    }
 
-      const fetchTf = fetchTimeframeFor(timeframe);
-      try {
-        const response = (await deps.request("request_candles", {
-          symbol,
-          timeframe: fetchTf,
-          from: startTs,
-          to: endTs,
-          tradingHoursTemplate: config.session.name,
-        })) as {
-          type: string;
-          symbol: string;
-          timeframe: string;
-          candles: Candle[];
-        };
+    // Now query the user's exact range at the requested TF.
+    const stmt = deps.db.prepare(QUERY_SQL);
+    const rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
 
-        const fetched: Candle[] = response.candles.map((c) => ({
-          timestamp: c.timestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: c.volume,
-        }));
+    const validation = validateRequestedRange(
+      deps.db,
+      symbol,
+      fillResult.classifications,
+      timeframe,
+      nowUnix,
+    );
 
-        const result = deps.ingestCandles(symbol, fetchTf, fetched);
-        console.error(
-          `[get_candles] ingested ${result.inserted} ${fetchTf} bars for ${symbol}; aggregated=${JSON.stringify(result.aggregated)}`,
-        );
-
-        rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[get_candles] bridge request failed: ${msg}`);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                symbol,
-                timeframe,
-                count: rows.length,
-                candles: rows,
-                warning: `Partial data — NinjaTrader request failed: ${msg}`,
-              }),
-            },
-          ],
-        };
-      }
+    // Compose the warning string. Preserve the legacy
+    // "NinjaTrader is not connected" guidance verbatim — existing
+    // callers/tests pattern-match on it.
+    let warning: string | undefined;
+    if (fillResult.bridgeDisconnected && rows.length === 0) {
+      warning = `No cached data for ${symbol} ${timeframe} in this range. NinjaTrader is not connected — start NT8 with the McpBridge addon to fetch live data.`;
+    } else if (fillResult.windowsFailed > 0) {
+      const summary = fillResult.errors
+        .slice(0, 3)
+        .map((e) => `${e.window} (${e.message})`)
+        .join("; ");
+      const more =
+        fillResult.errors.length > 3
+          ? ` …and ${fillResult.errors.length - 3} more`
+          : "";
+      const conn = fillResult.bridgeDisconnected
+        ? " NinjaTrader is not connected — start NT8 with the McpBridge addon."
+        : "";
+      warning = `Could not fill ${fillResult.windowsFailed} gap(s): ${summary}${more}.${conn}`;
+    } else if (validation.mismatch > 0) {
+      warning = `Cache validation flagged ${validation.mismatch} session-day(s) at ${timeframe}. See \`validation.issues\` for details.`;
     }
 
     return {
@@ -187,6 +237,8 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
             timeframe,
             count: rows.length,
             candles: rows,
+            validation,
+            ...(warning && { warning }),
           }),
         },
       ],
@@ -204,7 +256,7 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns pre-aggregated candles from the database; on cache miss, requests bars from NinjaTrader (5m as a raw stream, all other TFs derived locally from 15m).",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z

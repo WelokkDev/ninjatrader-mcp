@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:waw": "tsc && node build/private/tests/test-waw.js",
-    "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js"
+    "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js",
+    "dump-bars": "tsc && node build/scripts/dump-bars.js",
+    "audit-bars": "tsc && node build/scripts/audit-bars.js"
   },
   "files": [
     "build"
