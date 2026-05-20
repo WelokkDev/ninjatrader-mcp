@@ -9,7 +9,9 @@ import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
 import type { Candle } from "../core/types.js";
+import { formatLocalISO } from "../core/time.js";
 import { detectWaws } from "../private/waw/detector.js";
+import { summarizeQuantifierResults } from "../private/waw/pipeline.js";
 import {
   loadStrategy,
   strategyAdditionalTimeframes,
@@ -50,8 +52,10 @@ export interface ScanZonesArgs {
   end: string;
   minWickCoverageOfPriorBody?: number;
   allowDojiAsCandle2?: boolean;
+  wickContainmentTolerance?: number;
   skipQuantifiers?: string[];
   strategyName?: string;
+  diagnosticMode?: boolean;
 }
 
 export interface ScanZonesDeps {
@@ -85,8 +89,10 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     end,
     minWickCoverageOfPriorBody = 0,
     allowDojiAsCandle2 = false,
+    wickContainmentTolerance = 0.05,
     skipQuantifiers = [],
     strategyName = "default",
+    diagnosticMode = false,
   }: ScanZonesArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
       return err(
@@ -104,6 +110,14 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       minWickCoverageOfPriorBody > 1
     ) {
       return err("minWickCoverageOfPriorBody must be a number in [0, 1]");
+    }
+
+    if (
+      typeof wickContainmentTolerance !== "number" ||
+      wickContainmentTolerance < 0 ||
+      wickContainmentTolerance > 1
+    ) {
+      return err("wickContainmentTolerance must be a number in [0, 1]");
     }
 
     let baseStrategy: Strategy;
@@ -149,10 +163,10 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     const loadedSet = new Set(loadedNames);
     const skippedKnown = skipQuantifiers.filter((n) => loadedSet.has(n));
     const unknownSkips = skipQuantifiers.filter((n) => !loadedSet.has(n));
-    const runQuantifiers = baseStrategy.quantifiers.filter(
+    const enabledQuantifiers = baseStrategy.quantifiers.filter(
       (q) => !skipSet.has(q.name),
     );
-    const runNames = runQuantifiers.map((q) => q.name);
+    const runNames = enabledQuantifiers.map((q) => q.name);
 
     // Detection settings: per-call overrides win over what's in the
     // strategy file. Existing API contract — callers can tune
@@ -162,8 +176,9 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       detection: {
         allowDojiAsCandle2,
         minWickCoverageOfPriorBody,
+        wickContainmentTolerance,
       },
-      quantifiers: runQuantifiers,
+      quantifiers: enabledQuantifiers,
     };
 
     // Pre-fetch lower-TF candles for any quantifier that declares
@@ -188,7 +203,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
         lowerTimeframeCandles.size > 0 ? lowerTimeframeCandles : undefined,
     };
 
-    const zones = detectWaws(candles, ctx, strategy);
+    const zones = detectWaws(candles, ctx, strategy, { diagnosticMode });
 
     return {
       content: [
@@ -199,11 +214,16 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
             timeframe,
             session: config.session.name,
             strategy: baseStrategy.name,
+            diagnosticMode,
             range: {
-              from: new Date(candles[0].timestamp * 1000).toISOString(),
-              to: new Date(
-                candles[candles.length - 1].timestamp * 1000,
-              ).toISOString(),
+              from: formatLocalISO(
+                candles[0].timestamp,
+                config.session.timezone,
+              ),
+              to: formatLocalISO(
+                candles[candles.length - 1].timestamp,
+                config.session.timezone,
+              ),
             },
             candleCount: candles.length,
             additionalTimeframesFetched: [...lowerTimeframeCandles.keys()],
@@ -215,13 +235,23 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
             // Each zone is enriched with parallel unix-second
             // timestamps so callers can feed draw_zone (which expects
             // unix seconds) without re-parsing the ISO strings.
-            zones: zones.map((z) => ({
-              ...z,
-              c1TimestampUnix: Math.floor(new Date(z.c1Timestamp).getTime() / 1000),
-              c2TimestampUnix: Math.floor(new Date(z.c2Timestamp).getTime() / 1000),
-            })),
+            zones: zones.map((z) => {
+              const c1Unix = Math.floor(new Date(z.c1Timestamp).getTime() / 1000);
+              const c2Unix = Math.floor(new Date(z.c2Timestamp).getTime() / 1000);
+              return {
+                ...z,
+                c1Timestamp: formatLocalISO(c1Unix, config.session.timezone),
+                c2Timestamp: formatLocalISO(c2Unix, config.session.timezone),
+                c1TimestampUnix: c1Unix,
+                c2TimestampUnix: c2Unix,
+              };
+            }),
             totalCount: zones.length,
             qualifiedCount: zones.filter((z) => z.qualified).length,
+            // Per-quantifier rollup across all detected zones. pipelineIndex
+            // exposes the effective run order so callers can interpret passRate
+            // Set diagnosticMode: true for unbiased per-quantifier numbers.
+            quantifierStats: summarizeQuantifierResults(zones, runNames),
           }),
         },
       ],
@@ -268,6 +298,15 @@ export function registerScanZones(server: McpServer): void {
         .describe(
           "Allow doji bars as the second candle in a pair (default false)",
         ),
+      wickContainmentTolerance: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .default(0.05)
+        .describe(
+          "Fraction of c1 body height by which c2's wick may extend outside c1's body before the pair is rejected. Defaults to 0.05 (5%) to forgive sub-tick noise on otherwise-clean pairs; set to 0 for strict containment. Applied to both ends of the wick.",
+        ),
       skipQuantifiers: z
         .array(z.string())
         .optional()
@@ -281,6 +320,13 @@ export function registerScanZones(server: McpServer): void {
         .default("default")
         .describe(
           "Strategy file to load from src/private/waw/strategies/ (without the .json extension). Defaults to 'default'.",
+        ),
+      diagnosticMode: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Research/audit mode. When true, every enabled quantifier evaluates on every detected zone (no short-circuit), so quantifierResults[] carries a verdict per quantifier even on disqualified zones, and quantifierStats.passRate is unbiased. When false, late-pipeline quantifiers' passRate is conditional on earlier passes. Slower; opt in for full failure diagnosis or unbiased per-quantifier selectivity.",
         ),
     },
     handler,

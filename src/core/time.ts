@@ -85,13 +85,29 @@ function getLocalFormatter(tz: string): Intl.DateTimeFormat {
 
 // Formats a unix-second timestamp as wall-clock "YYYY-MM-DD HH:MM:SS" in
 // the given IANA timezone. Mirrors formatExchangeTime but parameterized
-// on tz. Throws (via Intl) if tz is not a valid IANA name — callers that
-// receive tz from external config should validate via isValidTimezone
-// first to surface a clean error at load time.
+// on tz.
 export function formatLocalDateTime(unixSec: number, tz: string): string {
   const parts = getLocalFormatter(tz).formatToParts(new Date(unixSec * 1000));
   const get = (t: string) => parts.find((p) => p.type === t)!.value;
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+}
+
+export function formatLocalISO(unixSec: number, tz: string): string {
+  const parts = getLocalFormatter(tz).formatToParts(new Date(unixSec * 1000));
+  const get = (t: string) => parts.find((p) => p.type === t)!.value;
+  const y = get("year"), mo = get("month"), d = get("day");
+  const hh = get("hour"), mm = get("minute"), ss = get("second");
+  // Offset = (wall-clock-as-UTC) - (actual UTC). Positive when local is
+  // east of UTC, negative when west (ET is -05:00 in EST, -04:00 in EDT).
+  const wallAsUtcSec = Math.floor(
+    Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss) / 1000,
+  );
+  const offsetMin = Math.round((wallAsUtcSec - unixSec) / 60);
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const absMin = Math.abs(offsetMin);
+  const offHh = String(Math.floor(absMin / 60)).padStart(2, "0");
+  const offMm = String(absMin % 60).padStart(2, "0");
+  return `${y}-${mo}-${d}T${hh}:${mm}:${ss}${sign}${offHh}:${offMm}`;
 }
 
 // Returns true if `tz` is a valid IANA timezone name. Implementation
