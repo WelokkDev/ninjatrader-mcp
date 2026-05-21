@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Standalone DB audit. For every (symbol, session-day) pair with at
 // least one cached bar, structurally validates every supported
 // timeframe against the session geometry. Reports ok/mismatch/skipped

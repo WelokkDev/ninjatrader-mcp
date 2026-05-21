@@ -5,6 +5,15 @@ import { fileURLToPath } from "url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
+import {
+  isConnected as defaultIsConnected,
+  send as defaultSend,
+} from "../bridge/index.js";
+import type {
+  OutboundMessage,
+  DrawZoneMessage,
+  ClearZonesMessage,
+} from "../bridge/protocol.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
@@ -16,7 +25,12 @@ import {
   loadStrategy,
   strategyAdditionalTimeframes,
 } from "../private/waw/strategy-loader.js";
-import type { Strategy, MarketContext } from "../private/waw/types.js";
+import type {
+  Strategy,
+  MarketContext,
+  QuantifierResult,
+  Zone,
+} from "../private/waw/types.js";
 
 // scan_zones runs the configured detection pipeline against candles
 // already in the SQLite cache and returns the matching zones. Companion
@@ -45,6 +59,16 @@ const __dirname = path.dirname(__filename);
 // path resolves identically in dev (src/) and production (build/).
 const STRATEGY_DIR = path.resolve(__dirname, "../private/waw/strategies");
 
+// A score filter expresses a per-quantifier acceptance window. A zone is  kept iff EVERY filter is satisfied. 
+// A filter is satisfied when the named quantifier's score is in [min, max] (each bound optional). When the named quantifier didn't produce a score 
+// (no `score` field on its  result, or the quantifier wasn't in the run set), the filter consults`includeNull`: false (default) drops the zone, true keeps it.
+export interface ScoreFilter {
+  quantifier: string;
+  min?: number;
+  max?: number;
+  includeNull?: boolean;
+}
+
 export interface ScanZonesArgs {
   symbol: string;
   timeframe: "15m" | "30m" | "1h" | "2h" | "4h";
@@ -55,16 +79,38 @@ export interface ScanZonesArgs {
   wickContainmentTolerance?: number;
   skipQuantifiers?: string[];
   strategyName?: string;
-  diagnosticMode?: boolean;
+  scoreFilters?: ScoreFilter[];
+  draw?: boolean;
+  clearBeforeDraw?: boolean;
 }
 
 export interface ScanZonesDeps {
   db: Database;
+  isConnected?: () => boolean;
+  send?: (message: OutboundMessage) => boolean;
 }
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
 };
+
+// Pure filter helper. Exported for direct unit testing.
+export function passesScoreFilters(
+  results: readonly QuantifierResult[],
+  filters: readonly ScoreFilter[],
+): boolean {
+  for (const f of filters) {
+    const r = results.find((q) => q.quantifierName === f.quantifier);
+    const score = r?.score;
+    if (score === undefined || score === null) {
+      if (!f.includeNull) return false;
+      continue;
+    }
+    if (f.min !== undefined && score < f.min) return false;
+    if (f.max !== undefined && score > f.max) return false;
+  }
+  return true;
+}
 
 function err(text: string): ToolResult {
   return { content: [{ type: "text" as const, text }] };
@@ -82,6 +128,9 @@ function readStrategy(name: string): Strategy {
 }
 
 export function createScanZonesHandler(deps: ScanZonesDeps) {
+  const isConnectedFn = deps.isConnected ?? defaultIsConnected;
+  const sendFn = deps.send ?? defaultSend;
+
   return async ({
     symbol,
     timeframe,
@@ -92,7 +141,9 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     wickContainmentTolerance = 0.05,
     skipQuantifiers = [],
     strategyName = "default",
-    diagnosticMode = false,
+    scoreFilters = [],
+    draw = false,
+    clearBeforeDraw = true,
   }: ScanZonesArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
       return err(
@@ -155,9 +206,8 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       );
     }
 
-    // Filter the loaded strategy's quantifier list by skipQuantifiers.
-    // Names in skipQuantifiers that match nothing in the strategy
-    // surface under quantifiers.unknown so callers can self-correct.
+    // Filter the loaded strategy's quantifier list by skipQuantifiers. 
+    // Names in skipQuantifiers that match nothing in the strategy surface under quantifiers.unknown so callers can self-correct.
     const skipSet = new Set(skipQuantifiers);
     const loadedNames = baseStrategy.quantifiers.map((q) => q.name);
     const loadedSet = new Set(loadedNames);
@@ -168,9 +218,8 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     );
     const runNames = enabledQuantifiers.map((q) => q.name);
 
-    // Detection settings: per-call overrides win over what's in the
-    // strategy file. Existing API contract — callers can tune
-    // minWickCoverageOfPriorBody / allowDojiAsCandle2 inline.
+    // Detection settings: per-call overrides win over what's in the strategy file. 
+    // Existing API contract — callers can tune minWickCoverageOfPriorBody / allowDojiAsCandle2 inline.
     const strategy: Strategy = {
       name: baseStrategy.name,
       detection: {
@@ -181,10 +230,8 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       quantifiers: enabledQuantifiers,
     };
 
-    // Pre-fetch lower-TF candles for any quantifier that declares
-    // `timeframes` in its config. Empty result sets are fine —
-    // downstream quantifiers handle "available but no bars in window"
-    // per their own insufficientDataPolicy.
+    // Pre-fetch lower-TF candles for any quantifier that declares `timeframes` in its config. 
+    // Empty result sets are fine, downstream quantifiers handle "available but no bars in window" per their own insufficientDataPolicy.
     const additionalTfs = strategyAdditionalTimeframes(strategy);
     const lowerTimeframeCandles = new Map<string, readonly Candle[]>();
     for (const tf of additionalTfs) {
@@ -203,7 +250,79 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
         lowerTimeframeCandles.size > 0 ? lowerTimeframeCandles : undefined,
     };
 
-    const zones = detectWaws(candles, ctx, strategy, { diagnosticMode });
+    // Pipeline always runs every enabled quantifier on every detected
+    // zone — no short-circuit, no mode flag. Earlier callers passed
+    // diagnosticMode to disable short-circuit; the short-circuit is now
+    // gone and the flag has been removed.
+    const zones = detectWaws(candles, ctx, strategy);
+
+    // Decorate zones with parallel unix-second timestamps so callers
+    // (and the draw path below) don't have to re-parse the ISO strings.
+    const decoratedZones = zones.map((z) => {
+      const c1Unix = Math.floor(new Date(z.c1Timestamp).getTime() / 1000);
+      const c2Unix = Math.floor(new Date(z.c2Timestamp).getTime() / 1000);
+      return {
+        ...z,
+        c1Timestamp: formatLocalISO(c1Unix, config.session.timezone),
+        c2Timestamp: formatLocalISO(c2Unix, config.session.timezone),
+        c1TimestampUnix: c1Unix,
+        c2TimestampUnix: c2Unix,
+      };
+    });
+
+    // Apply scoreFilters to derive the survivor set. An empty filter
+    // list passes everything through (no filtering).
+    const survivors =
+      scoreFilters.length > 0
+        ? decoratedZones.filter((z) =>
+            passesScoreFilters(z.quantifierResults, scoreFilters),
+          )
+        : decoratedZones;
+
+    // Optional auto-draw of survivors on the NT8 chart. Drawing failures
+    // never block the scan response — the report below still surfaces
+    // every zone and its scores regardless of draw status.
+    let drawInfo: {
+      requested: boolean;
+      dispatched: boolean;
+      cleared: boolean;
+      drawnIds: string[];
+      reason?: string;
+    } = {
+      requested: draw,
+      dispatched: false,
+      cleared: false,
+      drawnIds: [],
+    };
+    if (draw) {
+      if (!isConnectedFn()) {
+        drawInfo.reason =
+          "NinjaTrader is not connected — survivors were not drawn. Start NT8 with the McpBridge AddOn and rerun with draw=true.";
+      } else {
+        if (clearBeforeDraw) {
+          const clearMsg: ClearZonesMessage = {
+            v: 1,
+            type: "clear_zones",
+            symbol,
+          };
+          drawInfo.cleared = sendFn(clearMsg);
+        }
+        for (const z of survivors) {
+          const drawId = `${symbol}_${timeframe}_${z.type}_${z.c2TimestampUnix}`;
+          const msg: DrawZoneMessage = {
+            v: 1,
+            type: "draw_zone",
+            id: drawId,
+            symbol,
+            proximal: z.proximal,
+            distal: z.distal,
+            fromTs: z.c2TimestampUnix,
+          };
+          if (sendFn(msg)) drawInfo.drawnIds.push(drawId);
+        }
+        drawInfo.dispatched = drawInfo.drawnIds.length === survivors.length;
+      }
+    }
 
     return {
       content: [
@@ -214,7 +333,6 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
             timeframe,
             session: config.session.name,
             strategy: baseStrategy.name,
-            diagnosticMode,
             range: {
               from: formatLocalISO(
                 candles[0].timestamp,
@@ -232,26 +350,16 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
               skipped: skippedKnown,
               unknown: unknownSkips,
             },
-            // Each zone is enriched with parallel unix-second
-            // timestamps so callers can feed draw_zone (which expects
-            // unix seconds) without re-parsing the ISO strings.
-            zones: zones.map((z) => {
-              const c1Unix = Math.floor(new Date(z.c1Timestamp).getTime() / 1000);
-              const c2Unix = Math.floor(new Date(z.c2Timestamp).getTime() / 1000);
-              return {
-                ...z,
-                c1Timestamp: formatLocalISO(c1Unix, config.session.timezone),
-                c2Timestamp: formatLocalISO(c2Unix, config.session.timezone),
-                c1TimestampUnix: c1Unix,
-                c2TimestampUnix: c2Unix,
-              };
-            }),
-            totalCount: zones.length,
-            qualifiedCount: zones.filter((z) => z.qualified).length,
-            // Per-quantifier rollup across all detected zones. pipelineIndex
-            // exposes the effective run order so callers can interpret passRate
-            // Set diagnosticMode: true for unbiased per-quantifier numbers.
-            quantifierStats: summarizeQuantifierResults(zones, runNames),
+            zones: survivors,
+            totalCount: decoratedZones.length,
+            qualifiedCount: decoratedZones.filter((z) => z.qualified).length,
+            survivorCount: survivors.length,
+            scoreFiltersApplied: scoreFilters.length,
+            drawInfo,
+            quantifierStats: summarizeQuantifierResults(
+              decoratedZones,
+              runNames,
+            ),
           }),
         },
       ],
@@ -321,12 +429,54 @@ export function registerScanZones(server: McpServer): void {
         .describe(
           "Strategy file to load from src/private/waw/strategies/ (without the .json extension). Defaults to 'default'.",
         ),
-      diagnosticMode: z
+      scoreFilters: z
+        .array(
+          z.object({
+            quantifier: z
+              .string()
+              .min(1)
+              .describe(
+                "Quantifier name as registered in the loaded strategy's run set. When the named quantifier isn't in the run set, the filter consults includeNull.",
+              ),
+            min: z
+              .number()
+              .min(0)
+              .max(1)
+              .optional()
+              .describe("Inclusive lower bound on the quantifier's score."),
+            max: z
+              .number()
+              .min(0)
+              .max(1)
+              .optional()
+              .describe("Inclusive upper bound on the quantifier's score."),
+            includeNull: z
+              .boolean()
+              .optional()
+              .default(false)
+              .describe(
+                "When the quantifier produced no score on the zone, or wasn't in the run set, false (default) drops the zone, true keeps it.",
+              ),
+          }),
+        )
+        .optional()
+        .default([])
+        .describe(
+          "Per-quantifier acceptance windows applied after detection. A zone survives iff every filter is satisfied. Filters are policy, not pipeline — every quantifier still evaluates on every zone; filters only decide what comes back in zones[] (and what gets drawn).",
+        ),
+      draw: z
         .boolean()
         .optional()
         .default(false)
         .describe(
-          "Research/audit mode. When true, every enabled quantifier evaluates on every detected zone (no short-circuit), so quantifierResults[] carries a verdict per quantifier even on disqualified zones, and quantifierStats.passRate is unbiased. When false, late-pipeline quantifiers' passRate is conditional on earlier passes. Slower; opt in for full failure diagnosis or unbiased per-quantifier selectivity.",
+          "When true, draw surviving zones (after scoreFilters) on the connected NinjaTrader chart. Requires the McpBridge AddOn to be running; otherwise drawInfo.reason explains the skip.",
+        ),
+      clearBeforeDraw: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe(
+          "Only honored when draw=true. When true (default), clear existing zone rectangles on the chart for this symbol before drawing the new survivor set. Set false to draw additively.",
         ),
     },
     handler,
