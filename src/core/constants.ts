@@ -14,7 +14,7 @@ export const RAW_TIMEFRAMES: ReadonlyArray<Timeframe> = ["5m", "15m"];
 
 // Multipliers applied to the 15-minute base. The aggregator short-circuits
 // on raw timeframes before reading this map, so 5m and 15m have no entry.
-export const AGGREGATION_MAP: Record<Exclude<Timeframe, "5m" | "15m">, number> = {
+export const AGGREGATION_MAP: Record<Exclude<Timeframe, "5m" | "15m" | "1d">, number> = {
   "30m": 2,
   "1h": 4,
   "2h": 8,

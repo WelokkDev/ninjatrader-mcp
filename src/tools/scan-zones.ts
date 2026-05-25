@@ -230,16 +230,17 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       quantifiers: enabledQuantifiers,
     };
 
-    // Pre-fetch lower-TF candles for any quantifier that declares `timeframes` in its config. 
-    // Empty result sets are fine, downstream quantifiers handle "available but no bars in window" per their own insufficientDataPolicy.
+    // Pre-fetch additional-TF candles for any quantifier that declares `timeframes` in its config. 
+    // Empty result sets are fine, downstream quantifiers handle "available but no bars in window" per their own insufficientDataPolicy. 
+    // The same pre-fetched data is exposed under two MarketContext fields with disjoint consumer families
     const additionalTfs = strategyAdditionalTimeframes(strategy);
-    const lowerTimeframeCandles = new Map<string, readonly Candle[]>();
+    const additionalCandles = new Map<string, readonly Candle[]>();
     for (const tf of additionalTfs) {
       if (tf === timeframe) continue; // primary TF; already fetched
       const rows = deps.db
         .prepare(QUERY_SQL)
         .all(symbol, tf, startTs, endTs) as Candle[];
-      lowerTimeframeCandles.set(tf, rows);
+      additionalCandles.set(tf, rows);
     }
 
     const ctx: MarketContext = {
@@ -247,7 +248,9 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       symbol,
       timeframe,
       lowerTimeframeCandles:
-        lowerTimeframeCandles.size > 0 ? lowerTimeframeCandles : undefined,
+        additionalCandles.size > 0 ? additionalCandles : undefined,
+      smaCandles:
+        additionalCandles.size > 0 ? additionalCandles : undefined,
     };
 
     // Pipeline always runs every enabled quantifier on every detected
@@ -344,7 +347,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
               ),
             },
             candleCount: candles.length,
-            additionalTimeframesFetched: [...lowerTimeframeCandles.keys()],
+            additionalTimeframesFetched: [...additionalCandles.keys()],
             quantifiers: {
               run: runNames,
               skipped: skippedKnown,

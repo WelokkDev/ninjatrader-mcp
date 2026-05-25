@@ -2,11 +2,8 @@ import type { Database } from "better-sqlite3";
 import type { SessionDay } from "../sessions/types.js";
 import type { Timeframe } from "../types.js";
 
-// Period (in seconds) for each timeframe. The validator's geometry
-// works for any TF whose period evenly divides into the session
-// duration, or leaves a stub at the session close. No per-TF special
-// casing — see expected-stamp formula in validateSessionDay.
-const SECONDS_PER_TIMEFRAME: Record<Timeframe, number> = {
+// "1d" is excluded — the SQLite cache holds only intraday bars; daily bars are sourced on demand
+const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "5m": 300,
   "15m": 900,
   "30m": 1800,
@@ -68,6 +65,12 @@ export function validateSessionDay(
     symbol,
     timeframe,
   };
+
+  if (timeframe === "1d") {
+    throw new Error(
+      `validateSessionDay: timeframe "1d" is not stored in the intraday cache. Daily candles are sourced on demand by the SMA rollup layer.`,
+    );
+  }
 
   if (sessionDay.endUnix > nowUnix) {
     return {

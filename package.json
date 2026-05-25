@@ -7,7 +7,8 @@
     "ninjatrader-mcp": "./build/index.js"
   },
   "scripts": {
-    "build": "tsc && shx chmod +x build/index.js && shx mkdir -p build/private/waw/strategies && shx cp src/private/waw/strategies/*.json build/private/waw/strategies/",
+    "generate:schema": "ts-json-schema-generator --path src/private/sma/types.ts --type SMAConfig --tsconfig tsconfig.json --out src/private/sma/config/schema/sma-config.schema.json",
+    "build": "npm run generate:schema && tsc && shx chmod +x build/index.js && shx mkdir -p build/private/waw/strategies build/private/sma/presets build/private/sma/config/schema && shx cp src/private/waw/strategies/*.json build/private/waw/strategies/ && shx cp src/private/sma/presets/*.json build/private/sma/presets/ && shx cp src/private/sma/config/schema/sma-config.schema.json build/private/sma/config/schema/",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "inspect": "npx @modelcontextprotocol/inspector build/index.js",
@@ -50,6 +51,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.2",
     "shx": "^0.4.0",
+    "ts-json-schema-generator": "^2.9.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.5"
   }

@@ -2,7 +2,8 @@ import type { Candle, Timeframe } from "./types.js";
 import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
 import { sessionDayContaining } from "./sessions/session-day.js";
 
-const PERIOD_MINUTES: Record<Timeframe, number> = {
+// "1d" is excluded, the intraday aggregator does not produce daily bars (see core/constants.ts header).
+const PERIOD_MINUTES: Record<Exclude<Timeframe, "1d">, number> = {
   "5m": 5,
   "15m": 15,
   "30m": 30,
@@ -35,6 +36,11 @@ export function aggregateCandles(
   targetTimeframe: Timeframe,
   options: AggregateOptions,
 ): Candle[] {
+  if (targetTimeframe === "1d") {
+    throw new Error(
+      `aggregateCandles: target "1d" is not supported by the intraday aggregator. Use src/private/sma/rollup/daily-aggregator.ts for session-aligned daily bars.`,
+    );
+  }
   if (targetTimeframe === "5m" || targetTimeframe === "15m") {
     return markPartial([...candles].map(stripPartial), options);
   }
