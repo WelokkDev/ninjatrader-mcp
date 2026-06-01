@@ -10,6 +10,8 @@ import { registerGetCandles } from "./tools/get-candles.js";
 import { registerScanZones } from "./tools/scan-zones.js";
 import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerClearZones } from "./tools/clear-zones.js";
+import { registerGetPlayingField } from "./tools/get-playing-field.js";
+import { registerScanForTrade } from "./tools/scan-for-trade.js";
 // import { registerLogTrade } from "./tools/log-trade.js";
 
 const server = new McpServer({
@@ -21,6 +23,8 @@ registerGetCandles(server);
 registerScanZones(server);
 registerDrawZone(server);
 registerClearZones(server);
+registerGetPlayingField(server);
+registerScanForTrade(server);
 // registerLogTrade(server);
 
 async function main() {
