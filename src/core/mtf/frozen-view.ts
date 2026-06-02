@@ -5,7 +5,7 @@ import { sessionDayContaining } from "../sessions/session-day.js";
 
 // Intraday period lengths in seconds. "1d" is intentionally absent, daily bars come from the private session-aligned daily aggregator, 
 // not here (mirrors core/aggregator.ts, which likewise refuses "1d").
-const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
+export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
   "5m": 5 * 60,
   "15m": 15 * 60,
   "30m": 30 * 60,
@@ -13,6 +13,17 @@ const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
   "2h": 120 * 60,
   "4h": 240 * 60,
 };
+
+// Bucket index for a close-stamped bar within its session-day. The `- 1` is load-bearing (see bucketAsOf): 
+// it pulls a boundary close-stamp into the bucket whose data window it ends, not the next one. 
+// Exported so the build-once frozen-source precompute uses the EXACT same math (no drift).
+export function bucketIndexOf(
+  timestamp: number,
+  sessionDayStartUnix: number,
+  periodSeconds: number,
+): number {
+  return Math.floor((timestamp - sessionDayStartUnix - 1) / periodSeconds);
+}
 
 // Build the as-of multi-timeframe snapshot for a single decision instant.
 // `primaryBars` is the entry-TF series; `timeframes` are the higher TFs to derive; `session` drives bucket-boundary alignment. 
@@ -85,7 +96,7 @@ function bucketAsOf(
     // They stay in `primary` (the raw entry-TF series) but never form an HTF bar.
     if (sd === null) continue;
     // The `- 1` is load-bearing: it pulls a boundary close-stamp (e.g. a 4h bucket's 22:00 close) into the bucket whose data window it ends, not the next one.
-    const index = Math.floor((c.timestamp - sd.startUnix - 1) / periodSeconds);
+    const index = bucketIndexOf(c.timestamp, sd.startUnix, periodSeconds);
     const key = `${sd.label}|${index}`;
     let bucket = buckets.get(key);
     if (!bucket) {
@@ -125,7 +136,7 @@ function bucketAsOf(
 // Byte-identical to core/aggregator.ts: open = first bar, close and timestamp = last bar, high / low / volume reduced across the bucket.
 // Never carries a `partial` flag — completed-vs-live is encoded by which FrozenView map the bar lands in, not by the field 
 // (computeSMAOnCandles forces a trailing-partial SMA to null and throws on a non-trailing one, so a flagged forming bar would break SMA reads).
-function aggregateBucket(group: readonly Candle[]): Candle {
+export function aggregateBucket(group: readonly Candle[]): Candle {
   const last = group[group.length - 1];
   return {
     timestamp: last.timestamp,

@@ -3,6 +3,7 @@ import defaultDb from "./connection.js";
 import type {
   BacktestRun,
   ExitReason,
+  ManagementMode,
   Trade,
   TradeDecisionRow,
   TradeDirection,
@@ -37,6 +38,9 @@ interface TradeRow {
   r_multiple: number | null;
   zone_ref: string | null;
   decision_ref: string | null;
+  management_mode: string | null;
+  bars_in_trade: number | null;
+  mfe: number | null;
   created_at: number;
 }
 
@@ -70,6 +74,9 @@ function rowToTrade(r: TradeRow): Trade {
     // The ledger round-trips them as JSON without introspection.
     zoneRef: r.zone_ref ? JSON.parse(r.zone_ref) : null,
     decisionRef: r.decision_ref ? JSON.parse(r.decision_ref) : null,
+    managementMode: (r.management_mode as ManagementMode | null) ?? null,
+    barsInTrade: r.bars_in_trade,
+    mfe: r.mfe,
     createdAt: r.created_at,
   };
 }
@@ -109,11 +116,21 @@ export interface Ledger {
   insertTrade(trade: Trade): void;
   updateTradeExit(
     tradeId: string,
-    exit: { exitTime: number; exitPrice: number; exitReason: ExitReason },
+    exit: {
+      exitTime: number;
+      exitPrice: number;
+      exitReason: ExitReason;
+      barsInTrade?: number;
+      mfe?: number;
+    },
   ): Trade;
   insertDecision(row: TradeDecisionRow): void;
   getTrade(tradeId: string): Trade | undefined;
-  listTrades(filter?: { runId?: string; mode?: TradeMode }): Trade[];
+  listTrades(filter?: {
+    runId?: string;
+    mode?: TradeMode;
+    managementMode?: ManagementMode;
+  }): Trade[];
   listDecisions(filter?: {
     runId?: string;
     verdict?: "yes" | "no";
@@ -131,10 +148,10 @@ export function createLedger(db: Database.Database): Ledger {
     `INSERT INTO trades
        (trade_id, run_id, mode, symbol, direction, entry_time, entry_price,
         stop_price, target_price, exit_time, exit_price, exit_reason,
-        r_multiple, zone_ref, decision_ref, created_at)
+        r_multiple, zone_ref, decision_ref, management_mode, bars_in_trade, mfe, created_at)
      VALUES (@trade_id, @run_id, @mode, @symbol, @direction, @entry_time, @entry_price,
         @stop_price, @target_price, @exit_time, @exit_price, @exit_reason,
-        @r_multiple, @zone_ref, @decision_ref, @created_at)`,
+        @r_multiple, @zone_ref, @decision_ref, @management_mode, @bars_in_trade, @mfe, @created_at)`,
   );
 
   const updateExitStmt = db.prepare(
@@ -142,7 +159,9 @@ export function createLedger(db: Database.Database): Ledger {
         SET exit_time = @exit_time,
             exit_price = @exit_price,
             exit_reason = @exit_reason,
-            r_multiple = @r_multiple
+            r_multiple = @r_multiple,
+            bars_in_trade = @bars_in_trade,
+            mfe = @mfe
       WHERE trade_id = @trade_id`,
   );
 
@@ -187,13 +206,22 @@ export function createLedger(db: Database.Database): Ledger {
         decision_ref: trade.decisionRef
           ? JSON.stringify(trade.decisionRef)
           : null,
+        management_mode: trade.managementMode,
+        bars_in_trade: trade.barsInTrade,
+        mfe: trade.mfe,
         created_at: trade.createdAt,
       });
     },
 
     updateTradeExit(
       tradeId: string,
-      exit: { exitTime: number; exitPrice: number; exitReason: ExitReason },
+      exit: {
+        exitTime: number;
+        exitPrice: number;
+        exitReason: ExitReason;
+        barsInTrade?: number;
+        mfe?: number;
+      },
     ): Trade {
       const existing = getTradeStmt.get(tradeId) as TradeRow | undefined;
       if (!existing) {
@@ -211,6 +239,8 @@ export function createLedger(db: Database.Database): Ledger {
         exit_price: exit.exitPrice,
         exit_reason: exit.exitReason,
         r_multiple: rMultiple,
+        bars_in_trade: exit.barsInTrade ?? null,
+        mfe: exit.mfe ?? null,
       });
       return rowToTrade(getTradeStmt.get(tradeId) as TradeRow);
     },
@@ -233,7 +263,11 @@ export function createLedger(db: Database.Database): Ledger {
       return row ? rowToTrade(row) : undefined;
     },
 
-    listTrades(filter?: { runId?: string; mode?: TradeMode }): Trade[] {
+    listTrades(filter?: {
+      runId?: string;
+      mode?: TradeMode;
+      managementMode?: ManagementMode;
+    }): Trade[] {
       const clauses: string[] = [];
       const params: Record<string, unknown> = {};
       if (filter?.runId !== undefined) {
@@ -243,6 +277,10 @@ export function createLedger(db: Database.Database): Ledger {
       if (filter?.mode !== undefined) {
         clauses.push("mode = @mode");
         params.mode = filter.mode;
+      }
+      if (filter?.managementMode !== undefined) {
+        clauses.push("management_mode = @management_mode");
+        params.management_mode = filter.managementMode;
       }
       const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
       const stmt = db.prepare(

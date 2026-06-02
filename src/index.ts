@@ -12,6 +12,9 @@ import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerClearZones } from "./tools/clear-zones.js";
 import { registerGetPlayingField } from "./tools/get-playing-field.js";
 import { registerScanForTrade } from "./tools/scan-for-trade.js";
+import { registerRunBacktest } from "./tools/run-backtest.js";
+import { registerListTrades } from "./tools/list-trades.js";
+import { registerListDecisions } from "./tools/list-decisions.js";
 // import { registerLogTrade } from "./tools/log-trade.js";
 
 const server = new McpServer({
@@ -25,6 +28,9 @@ registerDrawZone(server);
 registerClearZones(server);
 registerGetPlayingField(server);
 registerScanForTrade(server);
+registerRunBacktest(server);
+registerListTrades(server);
+registerListDecisions(server);
 // registerLogTrade(server);
 
 async function main() {

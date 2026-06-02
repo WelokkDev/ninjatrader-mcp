@@ -13,6 +13,14 @@ export type TradeDirection = "long" | "short";
 // Which execution surface produced a trade. 'backtest' rows carry a run_id; 'paper'/'live' rows do not (run_id is null).
 export type TradeMode = "backtest" | "paper" | "live";
 
+// Which exit-management policy resolved a trade. The backtest replays the SAME
+// entry set under each requested mode so they are comparable apples-to-apples:
+//   fixed        — stop+target never move (the control / conservative floor)
+//   trailing     — a structure-agnostic ATR chandelier (aggressive comparator)
+//   constrained  — the book-faithful trail (behind the SMA8 after a confirming
+//                  close, never to breakeven)
+export type ManagementMode = "fixed" | "trailing" | "constrained";
+
 // How a trade left the market. Mirrors trades.exit_reason.
 //   stop / target          — intra-bar touch of the stop or target
 //   gap-stop / gap-target   — bar opened already through the level
@@ -76,6 +84,13 @@ export interface Trade {
   rMultiple: number | null;
   zoneRef: unknown; // serialized private ZoneRef, or null
   decisionRef: unknown; // serialized private Decision, or null
+  // Which exit-management policy produced this trade (the backtest experiment
+  // axis). null for legacy/paper/live rows that predate the mode.
+  managementMode: ManagementMode | null;
+  // Bars held until exit, and max favorable excursion in R. Populated at exit
+  // (updateTradeExit); null while open.
+  barsInTrade: number | null;
+  mfe: number | null;
   createdAt: number;
 }
 

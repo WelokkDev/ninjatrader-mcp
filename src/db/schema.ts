@@ -59,6 +59,9 @@ export function initializeSchema(db: Database.Database): void {
       r_multiple   REAL,
       zone_ref     TEXT,             -- opaque JSON zone reference (engine-defined shape)
       decision_ref TEXT,             -- opaque JSON decision payload at entry
+      management_mode TEXT,          -- 'fixed'|'trailing'|'constrained' (backtest exit policy); null for legacy/live
+      bars_in_trade   INTEGER,       -- bars held until exit; null while open
+      mfe             REAL,          -- max favorable excursion in R; null while open
       created_at   INTEGER NOT NULL
     );
 
@@ -86,4 +89,29 @@ export function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_trade_decisions_run_id
       ON trade_decisions (run_id);
   `);
+
+  // Forward migrations for columns added after a `trades` table already existed.
+  // CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table, so the
+  // backtest experiment's per-trade fields (management_mode / bars_in_trade /
+  // mfe) are added idempotently here. Cheap and safe: the table is keyed by an
+  // empty/append-only ledger and ALTER ... ADD COLUMN is non-destructive.
+  ensureColumn(db, "trades", "management_mode", "TEXT");
+  ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
+  ensureColumn(db, "trades", "mfe", "REAL");
+}
+
+// Add `column` to `table` if it isn't already present (a minimal idempotent
+// migration; SQLite has no `ADD COLUMN IF NOT EXISTS`).
+function ensureColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  decl: string,
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
 }
