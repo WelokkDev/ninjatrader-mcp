@@ -4,6 +4,7 @@ import { sessionDayContaining } from "./sessions/session-day.js";
 
 // "1d" is excluded, the intraday aggregator does not produce daily bars (see core/constants.ts header).
 const PERIOD_MINUTES: Record<Exclude<Timeframe, "1d">, number> = {
+  "1m": 1,
   "5m": 5,
   "15m": 15,
   "30m": 30,

@@ -669,10 +669,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 				barsPeriodValue   = 5;
 				resolvedTimeframe = "5m";
 			}
+			else if (timeframe == "1m")
+			{
+				barsPeriodType    = BarsPeriodType.Minute;
+				barsPeriodValue   = 1;
+				resolvedTimeframe = "1m";
+			}
 			else
 			{
 				SendErrorResponse(id, "Unsupported timeframe for request_candles: '"
-					+ timeframe + "'. Supported raw TFs: 5m, 15m.");
+					+ timeframe + "'. Supported raw TFs: 1m, 5m, 15m.");
 				return;
 			}
 
@@ -875,6 +881,51 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Log("send failed (" + logTag + "): " + ex.Message);
 				}
 			});
+		}
+
+		// ---------- enriched bar push (called by McpDataExporter indicator) ----------
+
+		/// <summary>
+		/// Sends a bar_close message with optional indicator fields.
+		/// Called by the McpDataExporter indicator on each bar close.
+		/// indicatorsJson: JSON string or null. If non-null it is embedded verbatim
+		/// as the "indicators" field so the MCP server can store it.
+		/// </summary>
+		public void QueueBarClose(string symbol, string timeframe,
+			long timestampUnix, double open, double high, double low, double close, double volume,
+			string indicatorsJson)
+		{
+			var candle = new Dictionary<string, object>
+			{
+				{ "timestamp", timestampUnix },
+				{ "open",      open },
+				{ "high",      high },
+				{ "low",       low },
+				{ "close",     close },
+				{ "volume",    volume },
+			};
+
+			if (!string.IsNullOrEmpty(indicatorsJson))
+			{
+				try
+				{
+					var ind = Json.Deserialize<Dictionary<string, object>>(indicatorsJson);
+					if (ind != null) candle["indicators"] = ind;
+				}
+				catch { /* skip malformed JSON */ }
+			}
+
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",         1 },
+				{ "type",      "bar_close" },
+				{ "symbol",    symbol },
+				{ "timeframe", timeframe },
+				{ "candle",    candle },
+			};
+
+			SendFireAndForget(Json.Serialize(payload),
+				"enriched bar_close " + symbol + " " + timeframe + " ts=" + timestampUnix);
 		}
 
 		// ---------- logging ----------

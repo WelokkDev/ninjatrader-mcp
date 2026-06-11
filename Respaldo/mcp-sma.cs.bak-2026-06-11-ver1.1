@@ -1,4 +1,4 @@
-// Versión 1.2 - 2026-06-11 12:00 - Copiado SMAConfig.generated.cs a nivel de indicators/ (NT8 no compila subcarpetas). Línea 157: Converter.Settings → Generated.Converter.Settings para evitar ambigüedad con System.Converter<TInput,TOutput>.
+// Versión 1.1 - 2026-06-11 11:09 - Líneas modificadas: 40, 132, 156. Renombrado SMAConfig → SmaConfig (3 ocurrencias) para que coincida con la clase generada por quicktype en SMAConfig.generated.cs y resuelva CS0246/CS0305 del CSV de errores. El using al namespace Generated ya existía en la línea 11. No se modificó nada más.
 #region Using declarations
 using System;
 using System.ComponentModel.DataAnnotations;
@@ -154,7 +154,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			try
 			{
 				var json = File.ReadAllText(presetPath);
-				var cfg  = JsonConvert.DeserializeObject<SmaConfig>(json, NinjaTrader.NinjaScript.Indicators.Generated.Converter.Settings);
+				var cfg  = JsonConvert.DeserializeObject<SmaConfig>(json, Converter.Settings);
 				if (cfg == null)
 				{
 					Log("preset at '" + presetPath + "' deserialized to null; indicator disabled");

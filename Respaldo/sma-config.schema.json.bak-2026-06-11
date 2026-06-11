@@ -1,0 +1,52 @@
+{
+  "$ref": "#/definitions/SMAConfig",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "SMAConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "crossovers": {
+          "additionalProperties": false,
+          "properties": {
+            "alertOnCross": {
+              "type": "boolean"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "type": "object"
+        },
+        "periods": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "close",
+            "open",
+            "high",
+            "low",
+            "hl2",
+            "hlc3"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "preset",
+        "periods",
+        "source"
+      ],
+      "type": "object"
+    }
+  }
+}
