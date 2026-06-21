@@ -18,10 +18,14 @@ export interface ListDecisionsArgs {
   runId?: string;
   verdict?: "yes" | "no";
   reasonsOnly?: boolean;
+  limit?: number;
 }
 
 export function createListDecisionsHandler() {
-  return async ({ runId, verdict, reasonsOnly }: ListDecisionsArgs): Promise<ToolResult> => {
+  // SAFETY: defaults to the cheap funnel (reasonsOnly=true). The full-trace path
+  // is opt-in AND hard-capped — a real run holds ~15k full-trace rows (176MB+),
+  // so an uncapped dump would blow the caller's context instantly.
+  return async ({ runId, verdict, reasonsOnly = true, limit = 200 }: ListDecisionsArgs): Promise<ToolResult> => {
     const decisions = ledger.listDecisions({ runId, verdict });
     if (reasonsOnly) {
       // The stall funnel: count 'no' bars by their short reason code.
@@ -33,7 +37,9 @@ export function createListDecisionsHandler() {
       }
       return ok({ count: decisions.length, yes, funnel });
     }
-    return ok({ count: decisions.length, decisions });
+    const cap = Math.max(1, Math.min(limit, 2000));
+    const capped = decisions.slice(0, cap);
+    return ok({ count: decisions.length, returned: capped.length, decisions: capped });
   };
 }
 
@@ -55,9 +61,18 @@ export function registerListDecisions(server: McpServer): void {
       reasonsOnly: z
         .boolean()
         .optional()
+        .default(true)
         .describe(
-          "When true, return the stall funnel (counts of 'no' bars by reason code) instead of the full decision rows.",
+          "Default true → return the stall funnel (counts of 'no' bars by reason code). Set false to get full decision rows (capped by `limit`).",
         ),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(2000)
+        .optional()
+        .default(200)
+        .describe("Max full decision rows when reasonsOnly=false (hard-capped at 2000)."),
     },
     handler,
   );

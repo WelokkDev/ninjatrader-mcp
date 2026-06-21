@@ -20,7 +20,8 @@
     "test:waw": "tsc && node build/private/tests/test-waw.js",
     "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js",
     "dump-bars": "tsc && node build/scripts/dump-bars.js",
-    "audit-bars": "tsc && node build/scripts/audit-bars.js"
+    "audit-bars": "tsc && node build/scripts/audit-bars.js",
+    "backtest:observe": "tsc && shx mkdir -p build/private/waw/strategies build/private/sma/presets && shx cp src/private/waw/strategies/*.json build/private/waw/strategies/ && shx cp src/private/sma/presets/*.json build/private/sma/presets/ && node build/private/scripts/run-backtest-observable.js"
   },
   "files": [
     "build"

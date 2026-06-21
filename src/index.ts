@@ -15,6 +15,11 @@ import { registerScanForTrade } from "./tools/scan-for-trade.js";
 import { registerRunBacktest } from "./tools/run-backtest.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
+import { registerStartExperiment } from "./tools/start-experiment.js";
+import { registerExperimentStatus } from "./tools/experiment-status.js";
+import { registerExperimentResult } from "./tools/experiment-result.js";
+import { registerListExperiments } from "./tools/list-experiments.js";
+import { registerDiffExperiments } from "./tools/diff-experiments.js";
 // import { registerLogTrade } from "./tools/log-trade.js";
 
 const server = new McpServer({
@@ -31,6 +36,13 @@ registerScanForTrade(server);
 registerRunBacktest(server);
 registerListTrades(server);
 registerListDecisions(server);
+
+// Strategy Lab — async experiment orchestration + observability.
+registerStartExperiment(server);
+registerExperimentStatus(server);
+registerExperimentResult(server);
+registerListExperiments(server);
+registerDiffExperiments(server);
 // registerLogTrade(server);
 
 async function main() {

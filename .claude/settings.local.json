@@ -4,7 +4,17 @@
       "mcp__ninjatrader__draw_zone",
       "mcp__ninjatrader__clear_zones",
       "mcp__ninjatrader__get_candles",
-      "mcp__ninjatrader__scan_zones"
+      "mcp__ninjatrader__scan_zones",
+      "mcp__ninjatrader__start_experiment",
+      "mcp__ninjatrader__experiment_status",
+      "mcp__ninjatrader__experiment_result",
+      "mcp__ninjatrader__list_experiments",
+      "mcp__ninjatrader__diff_experiments",
+      "mcp__ninjatrader__get_playing_field",
+      "mcp__ninjatrader__scan_for_trade",
+      "mcp__ninjatrader__run_backtest",
+      "mcp__ninjatrader__list_trades",
+      "mcp__ninjatrader__list_decisions"
     ]
   },
   "enableAllProjectMcpServers": true,
