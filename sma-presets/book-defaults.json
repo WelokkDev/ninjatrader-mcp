@@ -1,0 +1,20 @@
+{
+  "preset": "book-defaults",
+  "periods": [8, 20, 50, 89, 100, 200],
+  "source": "close",
+  "tradingChartColors": {
+    "the8": "Purple",
+    "the20": "Orange",
+    "the50": "Gray",
+    "the89": "Blue"
+  },
+  "dailyChartColors": {
+    "the50": "Gray",
+    "the100": "Yellow",
+    "the200": "HotPink"
+  },
+  "crossovers": {
+    "enabled": false
+  },
+  "version": "1.0"
+}

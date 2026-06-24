@@ -15,7 +15,7 @@ import {
 import { ingestCandles as defaultIngestCandles } from "../bridge/ingest.js";
 
 // Session-day query semantics: startUnix is exclusive, endUnix is inclusive
-const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
+const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume, indicators_json
        FROM candles
       WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?
       ORDER BY timestamp ASC
@@ -23,16 +23,38 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
 
 export interface GetCandlesArgs {
   symbol: string;
-  timeframe: "5m" | "15m" | "30m" | "1h" | "2h" | "4h";
+  timeframe: "1m" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h";
   start: string;
   end: string;
   limit?: number;
 }
 
-// 5m is its own raw stream; everything else derives from
-// 15m via the aggregation chain in ingest.ts.
+// 1m and 5m are independent raw streams. Everything else derives from 15m.
 function fetchTimeframeFor(requested: Timeframe): Timeframe {
-  return requested === "5m" ? "5m" : "15m";
+  if (requested === "1m" || requested === "5m") return requested;
+  return "15m";
+}
+
+// Wilder's RSI(period). Returns null for candles with insufficient prior data.
+function computeRSI(closes: number[], period = 14): (number | null)[] {
+  const result: (number | null)[] = new Array(closes.length).fill(null);
+  if (closes.length <= period) return result;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) avgGain += d; else avgLoss -= d;
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  if (avgLoss === 0) { result[period] = 100; }
+  else { result[period] = 100 - 100 / (1 + avgGain / avgLoss); }
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+    result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return result;
 }
 
 export interface GetCandlesDeps {
@@ -195,7 +217,32 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
 
     // Now query the user's exact range at the requested TF.
     const stmt = deps.db.prepare(QUERY_SQL);
-    const rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+    const rawRows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Array<Candle & { indicators_json?: string | null }>;
+
+    // Merge stored indicators, then fill RSI server-side where absent.
+    const closes = rawRows.map((r) => r.close);
+    const rsiValues = computeRSI(closes);
+    const rows = rawRows.map((r, i) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const out: Record<string, any> = {
+        timestamp: r.timestamp,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+      };
+      if (r.indicators_json) {
+        try {
+          const ind = JSON.parse(r.indicators_json) as Record<string, unknown>;
+          Object.assign(out, ind);
+          if (out.rsi == null && rsiValues[i] !== null) out.rsi = rsiValues[i];
+        } catch { /* malformed JSON — ignore */ }
+      } else if (rsiValues[i] !== null) {
+        out.rsi = rsiValues[i];
+      }
+      return out;
+    });
 
     const validation = validateRequestedRange(
       deps.db,
@@ -256,11 +303,11 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched.",
+    "Fetch OHLCV + indicator candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1m and 5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. Each bar includes RSI(14) computed server-side. Bars enriched by the McpDataExporter NT8 indicator also include eff_vol, eff_vol_total, eff_vol_ema, gex (GEX levels), and ryfvap (Value Area levels).",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
-        .enum(["5m", "15m", "30m", "1h", "2h", "4h"])
+        .enum(["1m", "5m", "15m", "30m", "1h", "2h", "4h"])
         .describe("Candle timeframe"),
       start: z
         .string()

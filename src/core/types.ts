@@ -15,9 +15,12 @@ export interface Candle {
   // the field see no behavior change. The WAW detector should skip
   // pairing logic on partial bars (follow-up — not enforced today).
   partial?: boolean;
+  // Optional per-bar indicator values stored as JSON (GEX, RyFVaP, EffVol, RSI, …).
+  // Present only on 1m bars enriched by the McpDataExporter NT8 indicator.
+  indicators?: Record<string, unknown>;
 }
 
-export type Timeframe = "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
+export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
 
 export type ZoneType = "supply" | "demand";
 

@@ -56,6 +56,18 @@ export interface RequestCandlesMessage {
   tradingHoursTemplate: string;
 }
 
+// Optional per-bar indicator values sent by the McpDataExporter NT8 indicator.
+// Keys match the feature names used in features.py for the ML pipeline.
+export interface IndicatorPayload {
+  [key: string]: unknown;  // index signature for compatibility with Record<string, unknown>
+  rsi?: number | null;
+  eff_vol?: number | null;
+  eff_vol_total?: number | null;
+  eff_vol_ema?: number | null;
+  gex?: Record<string, number> | null;   // {ZG: 19480, CW_1: 19550, ...}
+  ryfvap?: Record<string, number> | null; // {Q1: 19400, Q4: 19600, ...}
+}
+
 export interface CandlePayload {
   timestamp: number;
   open: number;
@@ -63,6 +75,7 @@ export interface CandlePayload {
   low: number;
   close: number;
   volume: number;
+  indicators?: IndicatorPayload;
 }
 
 export interface CandlesResponseMessage {

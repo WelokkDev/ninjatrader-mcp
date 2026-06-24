@@ -1,0 +1,6 @@
+NinjaScript File;Error;Code;Line;Column;
+mcp-smacs;The type or namespace name 'Generated' does not exist in the namespace 'NinjaTraderNinjaScriptIndicators' (are you missing an assembly reference?);CS0234;12;42;
+mcp-smacs;The type or namespace name 'SmaConfig' could not be found (are you missing a using directive or an assembly reference?);CS0246;133;11;
+mcp-smacs;The type or namespace name 'SmaConfig' could not be found (are you missing a using directive or an assembly reference?);CS0246;41;11;
+mcp-smacs;The type or namespace name 'SmaConfig' could not be found (are you missing a using directive or an assembly reference?);CS0246;157;46;
+mcp-smacs;Using the generic type 'Converter<TInput, TOutput>' requires 2 type arguments;CS0305;157;63;

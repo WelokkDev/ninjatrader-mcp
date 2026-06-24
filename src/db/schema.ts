@@ -3,14 +3,15 @@ import type Database from "better-sqlite3";
 export function initializeSchema(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS candles (
-      symbol    TEXT    NOT NULL,
-      timeframe TEXT    NOT NULL,
-      timestamp INTEGER NOT NULL,
-      open      REAL    NOT NULL,
-      high      REAL    NOT NULL,
-      low       REAL    NOT NULL,
-      close     REAL    NOT NULL,
-      volume    REAL    NOT NULL,
+      symbol          TEXT    NOT NULL,
+      timeframe       TEXT    NOT NULL,
+      timestamp       INTEGER NOT NULL,
+      open            REAL    NOT NULL,
+      high            REAL    NOT NULL,
+      low             REAL    NOT NULL,
+      close           REAL    NOT NULL,
+      volume          REAL    NOT NULL,
+      indicators_json TEXT,
       PRIMARY KEY (symbol, timeframe, timestamp)
     );
 
@@ -89,6 +90,9 @@ export function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_trade_decisions_run_id
       ON trade_decisions (run_id);
   `);
+
+  // Forward migrations for columns added after initial schema.
+  ensureColumn(db, "candles", "indicators_json", "TEXT");
 
   // Forward migrations for columns added after a `trades` table already existed.
   // CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table, so the

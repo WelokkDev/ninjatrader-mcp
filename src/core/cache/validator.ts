@@ -4,6 +4,7 @@ import type { Timeframe } from "../types.js";
 
 // "1d" is excluded — the SQLite cache holds only intraday bars; daily bars are sourced on demand
 const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
+  "1m": 60,
   "5m": 300,
   "15m": 900,
   "30m": 1800,

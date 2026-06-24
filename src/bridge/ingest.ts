@@ -83,8 +83,8 @@ export function ingestCandles(
 
   const insertStmt = db.prepare(
     `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (symbol, timeframe, timestamp, open, high, low, close, volume, indicators_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   // Only 15m bars drive the derived-TF aggregation cascade. SELECT all
@@ -101,7 +101,8 @@ export function ingestCandles(
 
   const tx = db.transaction(() => {
     for (const { candle: c } of inSession) {
-      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+      const indJson = c.indicators ? JSON.stringify(c.indicators) : null;
+      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume, indJson);
     }
 
     // 5m is a raw, parallel stream — persisted and stopped. Only 15m
@@ -124,7 +125,7 @@ export function ingestCandles(
           timestampConvention: config.timestampConvention,
         });
         for (const a of aggCandles) {
-          insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume);
+          insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume, null);
         }
         aggregated[tf] += aggCandles.length;
       }

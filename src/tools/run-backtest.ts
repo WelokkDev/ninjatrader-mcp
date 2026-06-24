@@ -80,7 +80,7 @@ export function createRunBacktestHandler(deps: RunBacktestDeps) {
       managementModes,
       configOverrides,
     });
-    if ("error" in result) return err(result.error);
+    if ("error" in result) return err(String(result.error));
     if (result.barsEvaluated === 0) {
       return ok({
         ...result,
