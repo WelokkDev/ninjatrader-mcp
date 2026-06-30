@@ -1,8 +1,23 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, closeSync, readFileSync, existsSync } from "node:fs";
+import {
+  mkdirSync,
+  openSync,
+  closeSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  statSync,
+  existsSync,
+} from "node:fs";
 import path from "node:path";
-import type { BacktestRunner, RunContext, RunHandle } from "../../lab/runner/types.js";
-import type { ExperimentSpec } from "../../lab/types.js";
+import type {
+  BacktestRunner,
+  RunContext,
+  RunHandle,
+  RunProbe,
+  CompletedScan,
+} from "../../lab/runner/types.js";
+import type { ExperimentRecord, ExperimentResult, ExperimentSpec } from "../../lab/types.js";
 import { findBundleDir, mapBundle } from "./map-bundle.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,6 +54,32 @@ function readJsonSafe(file: string): any | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Liveness check for a possibly-detached child by pid. process.kill(pid, 0)
+ *  sends no signal — it only tests existence. ESRCH ⇒ gone; EPERM ⇒ alive but
+ *  not ours (still alive). Interim signal until the engine emits a heartbeat. */
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+/** A bundle is "complete" only if it actually parsed into a usable result. A
+ *  torn summary.json (read mid-write) fails to parse → empty symbol; a real run
+ *  always has a symbol — even a degenerate 0-bar window, which is a valid result
+ *  integrity will flag, not a not-yet-written file. Validate on symbol, NOT
+ *  barsEvaluated (a 0-bar run is complete, just empty). */
+function isCompleteBundle(r: ExperimentResult): boolean {
+  return r.symbol.length > 0;
+}
+
+function readMetaPid(outDir: string): number | null {
+  const meta = readJsonSafe(path.join(outDir, "run-meta.json"));
+  return typeof meta?.pid === "number" ? meta.pid : null;
 }
 
 export class NinjaTraderRunner implements BacktestRunner {
@@ -86,6 +127,21 @@ export class NinjaTraderRunner implements BacktestRunner {
     });
     ctx.tracer.event("runner.spawned", { pid: child.pid ?? -1, outDir });
     child.unref();
+
+    // Make the run dir self-describing (spec + pid on disk) so recovery never
+    // depends on in-memory state: probe reads pid here, scanCompleted reads spec.
+    try {
+      writeFileSync(
+        path.join(outDir, "run-meta.json"),
+        JSON.stringify(
+          { experimentId: ctx.experimentId, pid: child.pid ?? null, startedAt: Date.now(), spec },
+          null,
+          2,
+        ),
+      );
+    } catch {
+      /* non-fatal: probe falls back to the store's pid */
+    }
 
     let settled = false;
     const poll = setInterval(() => {
@@ -144,5 +200,65 @@ export class NinjaTraderRunner implements BacktestRunner {
         }
       },
     };
+  }
+
+  /** Re-derive a run's true state from durable artifacts after a restart:
+   *  a completed bundle on disk ⇒ completed (mapped); else a live pid ⇒ running;
+   *  else ⇒ failed. The run dir is the source of truth, not parent memory. */
+  probe(rec: ExperimentRecord): RunProbe {
+    const outDir = path.join(this.resultsRoot, rec.id);
+    const bundleDir = findBundleDir(outDir);
+    if (bundleDir) {
+      const result = mapBundle(bundleDir, rec.id, {
+        privateShaIntended: this.opts.privateShaResolver?.(rec.spec) ?? null,
+        ntDataPath: this.dataPath,
+      });
+      if (isCompleteBundle(result)) return { state: "completed", result };
+      // summary.json exists but didn't map to a usable result — a torn/partial
+      // read while the child is still writing. Fall through to liveness; NEVER
+      // declare terminal from a possibly-incomplete read.
+    }
+    const pid = readMetaPid(outDir) ?? rec.pid ?? null;
+    if (pid != null && isAlive(pid)) return { state: "running" };
+    if (pid != null) return { state: "failed", detail: `no usable bundle; pid ${pid} not alive` };
+    // No pid known. If the run dir exists, the child was launched but we lost its
+    // pid — treat as running (a later tick / the max-age fail-safe resolves it)
+    // rather than destroy a possibly-live run on uncertainty.
+    if (existsSync(outDir)) return { state: "running" };
+    return { state: "failed", detail: "no run directory — never launched" };
+  }
+
+  /** Disk-as-truth scan: every run dir holding a complete, mappable bundle. The
+   *  lab adopts these against its store (recovering rows lost or wrongly orphaned).
+   *  `spec` comes from run-meta.json, so only lab-launched runs carry it — foreign
+   *  / pre-lab bundles are returned without a spec and the lab ignores them. */
+  scanCompleted(): CompletedScan[] {
+    const out: CompletedScan[] = [];
+    let entries: string[];
+    try {
+      entries = readdirSync(this.resultsRoot);
+    } catch {
+      return out;
+    }
+    for (const name of entries) {
+      const outDir = path.join(this.resultsRoot, name);
+      try {
+        if (!statSync(outDir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      const bundleDir = findBundleDir(outDir);
+      if (!bundleDir) continue;
+      const meta = readJsonSafe(path.join(outDir, "run-meta.json"));
+      const result = mapBundle(bundleDir, name, {
+        // Resolve the intended SHA (as the probe path does) so adopted runs still
+        // get the provenance mismatch blocker — don't hardcode null.
+        privateShaIntended: meta?.spec ? (this.opts.privateShaResolver?.(meta.spec) ?? null) : null,
+        ntDataPath: this.dataPath,
+      });
+      if (!isCompleteBundle(result)) continue;
+      out.push({ id: name, result, spec: meta?.spec });
+    }
+    return out;
   }
 }

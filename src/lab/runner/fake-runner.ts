@@ -1,5 +1,12 @@
-import type { ExperimentResult, Funnel, ModeMetric, Provenance, IntegritySignals } from "../types.js";
-import type { BacktestRunner, RunContext, RunHandle } from "./types.js";
+import type {
+  ExperimentRecord,
+  ExperimentResult,
+  Funnel,
+  ModeMetric,
+  Provenance,
+  IntegritySignals,
+} from "../types.js";
+import type { BacktestRunner, RunContext, RunHandle, RunProbe, CompletedScan } from "./types.js";
 
 // A deterministic in-process runner that simulates a backtest: it emits a few
 // progress ticks then a terminal result, scheduled asynchronously so it
@@ -18,6 +25,13 @@ export interface FakeRunnerOptions {
   perMode?: ModeMetric[];
   provenance?: Partial<Provenance>;
   signals?: Partial<IntegritySignals>;
+  /** If set, start() does NOT report a terminal result (simulates a detached
+   *  child whose exit callback never reached this process). */
+  silent?: boolean;
+  /** What probe() reports — the durable-state read after a "restart". */
+  probeResult?: RunProbe | ((rec: ExperimentRecord) => RunProbe);
+  /** Completed bundles scanCompleted() reports — the disk-as-truth adoption feed. */
+  scanResult?: CompletedScan[];
 }
 
 export class FakeRunner implements BacktestRunner {
@@ -49,6 +63,7 @@ export class FakeRunner implements BacktestRunner {
 
     steps.push(() => {
       span.end({ status: this.opts.fail ? "error" : "ok" });
+      if (this.opts.silent) return;
       if (this.opts.fail) {
         ctx.fail(this.opts.fail);
         return;
@@ -66,6 +81,15 @@ export class FakeRunner implements BacktestRunner {
     setImmediate(run);
 
     return { experimentId: ctx.experimentId };
+  }
+
+  probe(rec: ExperimentRecord): RunProbe {
+    const p = this.opts.probeResult;
+    return typeof p === "function" ? p(rec) : (p ?? { state: "running" });
+  }
+
+  scanCompleted(): CompletedScan[] {
+    return this.opts.scanResult ?? [];
   }
 
   private buildResult(ctx: RunContext, total: number, msPerUnit: number): ExperimentResult {

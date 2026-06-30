@@ -36,6 +36,9 @@ export interface LabOptions {
   perExperimentSink?: (id: string) => Sink | undefined;
   /** If set, ETA calibration is saved here after each completion. */
   calibrationPath?: string;
+  /** A 'running' run with no bundle older than this is failed as a presumed
+   *  hung/dead process (pid-liveness alone has no upper bound). Default 6h. */
+  maxRunningMs?: number;
 }
 
 export interface StartResult {
@@ -104,6 +107,9 @@ export class Lab {
   private readonly extSinks = new Map<string, Sink>();
   private readonly handles = new Map<string, RunHandle>();
   private readonly waiters = new Map<string, Array<(rec: ExperimentRecord) => void>>();
+  private reconcileTimer?: ReturnType<typeof setInterval>;
+  private reconciling = false;
+  private readonly maxRunningMs: number;
 
   constructor(opts: LabOptions) {
     this.store = opts.store;
@@ -115,18 +121,115 @@ export class Lab {
     this.maxConcurrent = Math.max(1, opts.maxConcurrent ?? os.cpus().length - 2);
     this.perExperimentSink = opts.perExperimentSink;
     this.calibrationPath = opts.calibrationPath;
+    this.maxRunningMs = opts.maxRunningMs ?? 6 * 60 * 60 * 1000;
   }
 
-  /** Recover after a restart: orphan in-flight runs, resume the queue. */
-  reconcile(): void {
-    for (const rec of this.store.list({ status: "running" })) {
-      this.store.update(rec.id, {
-        status: "failed",
-        error: "orphaned (lab restarted while running)",
-        finishedAt: this.clock.now(),
-      });
+  /** Recover after a restart by re-deriving each in-flight run's TRUE state from
+   *  durable artifacts (via the runner's probe), instead of blindly orphaning it:
+   *   - completed → map the bundle, run integrity, mark done (recovered)
+   *   - running   → leave running (unless past maxRunningMs — then fail it as a
+   *                 presumed hung/recycled process so it can't hold a slot forever)
+   *   - failed    → mark failed (genuinely crashed: no usable bundle, process gone)
+   *  With { scanDisk }, also adopt completed bundles whose store row is missing or
+   *  was wrongly orphaned — making disk, not lab.db, the source of truth.
+   *  A runner without probe() falls back to the old orphan behavior.
+   *
+   *  Ownership: exactly ONE reconciler (the MCP server) may run this. Observers
+   *  that open the same store/dirs must be READ-ONLY — a second reconciler can
+   *  double-finalize (the store's get→update is not cross-process atomic). */
+  async reconcile(opts: { scanDisk?: boolean } = {}): Promise<void> {
+    if (this.reconciling) return; // no overlapping sweeps
+    this.reconciling = true;
+    try {
+      for (const rec of this.store.list({ status: "running" })) {
+        const probe = await this.runner.probe?.(rec);
+        if (!probe) {
+          this.store.update(rec.id, {
+            status: "failed",
+            error: "orphaned (lab restarted; runner has no probe)",
+            finishedAt: this.clock.now(),
+          });
+          continue;
+        }
+        if (probe.state === "completed" && probe.result) {
+          this.finalizeResult(rec.id, probe.result, { recovered: true });
+        } else if (probe.state === "failed") {
+          this.store.update(rec.id, {
+            status: "failed",
+            error: probe.detail ?? "run failed (no bundle produced)",
+            finishedAt: this.clock.now(),
+          });
+        } else {
+          // Still running. pid-liveness has no upper bound, so fail a run that has
+          // outlived any plausible runtime (hung process or an OS-recycled pid),
+          // so it can't occupy a concurrency slot indefinitely.
+          const startedAt = rec.startedAt ?? rec.createdAt;
+          if (this.clock.now() - startedAt > this.maxRunningMs) {
+            this.store.update(rec.id, {
+              status: "failed",
+              error: `exceeded max running age (~${Math.round(this.maxRunningMs / 3_600_000)}h) with no bundle — presumed hung or dead`,
+              finishedAt: this.clock.now(),
+            });
+          }
+        }
+      }
+      if (opts.scanDisk) await this.adoptOrphanBundles();
+    } finally {
+      this.reconciling = false;
     }
     this.pump();
+  }
+
+  /** Disk-as-truth: scan durable storage for completed bundles and adopt any
+   *  whose store row is missing (lab-launched, row lost) or was wrongly orphaned
+   *  to 'failed'. Re-running integrity on adoption means a genuinely bad bundle
+   *  stays failed; cancelled / integrity-failed rows are left settled. Pre-lab
+   *  foreign bundles (no run metadata) are ignored. */
+  private async adoptOrphanBundles(): Promise<void> {
+    const found = (await this.runner.scanCompleted?.()) ?? [];
+    for (const { id, result, spec } of found) {
+      const rec = this.store.get(id);
+      if (!rec) {
+        if (!spec) continue; // not a lab-launched run — ignore foreign bundles
+        this.store.create({
+          id,
+          status: "running",
+          runner: this.runner.name,
+          spec,
+          createdAt: this.clock.now(),
+          unitsTotal: result.barsEvaluated || undefined,
+        });
+        this.finalizeResult(id, result, { recovered: true });
+      } else if (rec.status === "done") {
+        continue; // already adopted
+      } else if (rec.status === "running") {
+        this.finalizeResult(id, result, { recovered: true });
+      } else if (rec.status === "failed" && /orphan/i.test(rec.error ?? "")) {
+        this.finalizeResult(id, result, { recovered: true, force: true });
+      }
+    }
+  }
+
+  /** Periodically re-derive in-flight run state from disk, so a completion or
+   *  crash is caught even when the in-process exit callback never fires (e.g. the
+   *  parent restarted mid-run). The exit callback stays a low-latency fast-path;
+   *  this is the durable backstop. */
+  startReconcileLoop(intervalMs: number): void {
+    this.stopReconcileLoop();
+    this.reconcileTimer = setInterval(() => {
+      this.reconcile().catch(() => {
+        /* non-fatal; the next tick retries */
+      });
+    }, intervalMs);
+    // Don't keep the process alive solely for the tick.
+    this.reconcileTimer.unref?.();
+  }
+
+  stopReconcileLoop(): void {
+    if (this.reconcileTimer) {
+      clearInterval(this.reconcileTimer);
+      this.reconcileTimer = undefined;
+    }
   }
 
   private key(spec: ExperimentSpec): string {
@@ -247,50 +350,87 @@ export class Lab {
   ): void {
     const rec = this.store.get(id);
     if (!rec || isTerminal(rec.status)) return; // guard double-terminal
-    const finishedAt = this.clock.now();
 
     if (result) {
-      const report = runIntegrity(result, this.checks);
-      result.integrity = report;
-      const blockers = report.verdicts.filter((v) => !v.passed && v.severity === "blocker");
-      const status: ExperimentStatus = report.ok ? "done" : "failed";
+      this.finalizeResult(id, result, { tracer });
+    } else {
       this.store.update(id, {
-        status,
-        result,
-        finishedAt,
-        runId: result.provenance.runId,
-        outDir: result.provenance.outDir,
-        unitsDone: rec.unitsTotal,
-        error: report.ok ? undefined : `integrity: ${blockers.map((b) => b.detail).join("; ")}`,
+        status: "failed",
+        error: error ?? "unknown error",
+        finishedAt: this.clock.now(),
       });
-      // Feed the ETA model (use real engine mode if reported).
-      const engine = result.provenance.engine ?? rec.spec.engine ?? "default";
-      const msPerUnit =
-        result.timing.msPerUnit ??
-        (result.barsEvaluated > 0 ? result.timing.wallClockMs / result.barsEvaluated : undefined);
-      if (msPerUnit) {
-        this.calibrator.record(`${this.runner.name}:${engine}`, msPerUnit);
-        if (this.calibrationPath) {
-          try {
-            this.calibrator.saveFile(this.calibrationPath);
-          } catch {
-            /* non-fatal */
-          }
+      tracer.event("experiment.failed", { error: error ?? "unknown" });
+      this.disposeSinks(id);
+      this.resolveWaiters(id);
+    }
+    this.pump();
+  }
+
+  /** Run integrity, persist the verdict, feed the ETA model, emit the terminal
+   *  event, and release per-run resources. Shared by the live exit-callback path
+   *  (onTerminal) and the durable recovery path (reconcile). Idempotent via the
+   *  isTerminal guard, so the fast-path callback and a reconcile tick race safely. */
+  private finalizeResult(
+    id: string,
+    result: ExperimentResult,
+    opts: { tracer?: ReturnType<typeof createTracer>; recovered?: boolean; force?: boolean } = {},
+  ): void {
+    const rec = this.store.get(id);
+    // force lets disk-as-truth adoption override a wrongly-orphaned 'failed' row.
+    if (!rec || (isTerminal(rec.status) && !opts.force)) return;
+    const finishedAt = this.clock.now();
+
+    const report = runIntegrity(result, this.checks);
+    result.integrity = report;
+    const blockers = report.verdicts.filter((v) => !v.passed && v.severity === "blocker");
+    const status: ExperimentStatus = report.ok ? "done" : "failed";
+    this.store.update(id, {
+      status,
+      result,
+      finishedAt,
+      runId: result.provenance.runId,
+      outDir: result.provenance.outDir,
+      unitsDone: rec.unitsTotal,
+      error: report.ok ? undefined : `integrity: ${blockers.map((b) => b.detail).join("; ")}`,
+    });
+
+    // Feed the ETA model (use real engine mode if reported).
+    const engine = result.provenance.engine ?? rec.spec.engine ?? "default";
+    const msPerUnit =
+      result.timing.msPerUnit ??
+      (result.barsEvaluated > 0 ? result.timing.wallClockMs / result.barsEvaluated : undefined);
+    if (msPerUnit) {
+      this.calibrator.record(`${this.runner.name}:${engine}`, msPerUnit);
+      if (this.calibrationPath) {
+        try {
+          this.calibrator.saveFile(this.calibrationPath);
+        } catch {
+          /* non-fatal */
         }
       }
-      tracer.event(report.ok ? "experiment.completed" : "experiment.failed", {
-        yes: result.funnel.yes,
-        bars: result.barsEvaluated,
-        integrityOk: report.ok,
-      });
-    } else {
-      this.store.update(id, { status: "failed", error: error ?? "unknown error", finishedAt });
-      tracer.event("experiment.failed", { error: error ?? "unknown" });
     }
+
+    const tracer = opts.tracer ?? this.recoveryTracer(id, rec);
+    tracer.event(report.ok ? "experiment.completed" : "experiment.failed", {
+      yes: result.funnel.yes,
+      bars: result.barsEvaluated,
+      integrityOk: report.ok,
+      recovered: opts.recovered ?? false,
+    });
 
     this.disposeSinks(id);
     this.resolveWaiters(id);
-    this.pump();
+  }
+
+  /** A tracer bound to the global sinks, for terminal events emitted during
+   *  recovery (the run's per-experiment sinks died with the previous process). */
+  private recoveryTracer(id: string, rec: ExperimentRecord): ReturnType<typeof createTracer> {
+    return createTracer({
+      traceId: id,
+      clock: this.clock,
+      baseAttrs: { experimentId: id, runner: this.runner.name, symbol: rec.spec.symbol },
+      sinks: this.globalSinks,
+    });
   }
 
   private disposeSinks(id: string): void {

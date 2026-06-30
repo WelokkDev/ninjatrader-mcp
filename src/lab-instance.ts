@@ -48,5 +48,13 @@ export const lab = new Lab({
   perExperimentSink: (id) => jsonlSink(path.join(repoRoot, "backtest-results", id, "events.jsonl")),
 });
 
-// Recover any runs orphaned by a previous server crash, resume the queue.
-lab.reconcile();
+// Recover any runs interrupted by a previous server restart — scanning disk to
+// adopt completed bundles whose row was lost or wrongly orphaned — resume the
+// queue, then keep re-deriving in-flight state from disk on a timer so a
+// completion or crash is caught even when the in-process exit callback never fires.
+// .catch so a startup-scan I/O throw degrades to retry-next-tick instead of an
+// unhandled rejection that could take down the MCP server on boot.
+lab.reconcile({ scanDisk: true }).catch(() => {
+  /* non-fatal; the periodic loop retries */
+});
+lab.startReconcileLoop(20000);

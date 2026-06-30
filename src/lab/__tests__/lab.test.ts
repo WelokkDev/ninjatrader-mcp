@@ -133,3 +133,185 @@ describe("Lab end-to-end (FakeRunner)", () => {
     expect(d.caution).toBeTruthy();
   });
 });
+
+describe("Lab restart recovery (probe)", () => {
+  const runningRec = (id: string, store: MemoryExperimentStore): void =>
+    store.create({
+      id,
+      status: "running",
+      runner: "fake",
+      spec: spec(),
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+      pid: 4242,
+      unitsTotal: 50,
+    });
+
+  const fakeResult = (id: string): ExperimentResult => ({
+    experimentId: id,
+    runner: "fake",
+    symbol: "NQ",
+    barsEvaluated: 50,
+    funnel: { yes: 1, byReason: {} },
+    perMode: [],
+    provenance: { engine: "observe", privateShaIntended: "x", privateShaObserved: "x" },
+    signals: { barsLoaded: 50, causality: { entriesChecked: 1, violations: 0 } },
+    timing: { wallClockMs: 500, msPerUnit: 10 },
+  });
+
+  it("recovers a run that COMPLETED while the parent was gone", async () => {
+    const store = new MemoryExperimentStore();
+    runningRec("exp_a", store);
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ probeResult: { state: "completed", result: fakeResult("exp_a") } }),
+    });
+    await lab.reconcile();
+    expect(store.get("exp_a")!.status).toBe("done");
+    expect(lab.result("exp_a")?.integrity?.ok).toBe(true);
+  });
+
+  it("LEAVES a still-running run running (no false orphan)", async () => {
+    const store = new MemoryExperimentStore();
+    runningRec("exp_b", store);
+    const lab = new Lab({ store, runner: new FakeRunner({ probeResult: { state: "running" } }) });
+    await lab.reconcile();
+    expect(store.get("exp_b")!.status).toBe("running");
+  });
+
+  it("fails a genuinely crashed run", async () => {
+    const store = new MemoryExperimentStore();
+    runningRec("exp_c", store);
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({
+        probeResult: { state: "failed", detail: "no bundle; pid 4242 not alive" },
+      }),
+    });
+    await lab.reconcile();
+    expect(store.get("exp_c")!.status).toBe("failed");
+    expect(store.get("exp_c")!.error).toMatch(/no bundle/);
+  });
+
+  it("a periodic tick catches a completion the exit-callback missed", async () => {
+    const store = new MemoryExperimentStore();
+    let phase: { state: "running" | "completed" | "failed"; result?: ExperimentResult } = {
+      state: "running",
+    };
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ silent: true, probeResult: () => phase }),
+    });
+    const { experimentId } = await lab.start(spec());
+    await flush();
+    expect(store.get(experimentId)!.status).toBe("running");
+
+    phase = { state: "completed", result: fakeResult(experimentId) };
+    lab.startReconcileLoop(5);
+    await new Promise((r) => setTimeout(r, 30));
+    lab.stopReconcileLoop();
+    expect(store.get(experimentId)!.status).toBe("done");
+  });
+
+  it("fails a run that has outlived maxRunningMs (hung or recycled pid)", async () => {
+    const store = new MemoryExperimentStore();
+    store.create({
+      id: "old",
+      status: "running",
+      runner: "fake",
+      spec: spec(),
+      createdAt: 1,
+      startedAt: 1,
+      pid: 4242,
+      unitsTotal: 50,
+    });
+    const lab = new Lab({
+      store,
+      maxRunningMs: 10,
+      runner: new FakeRunner({ probeResult: { state: "running" } }),
+    });
+    await lab.reconcile();
+    expect(store.get("old")!.status).toBe("failed");
+    expect(store.get("old")!.error).toMatch(/max running age/);
+  });
+
+  it("leaves a young still-running run alone", async () => {
+    const store = new MemoryExperimentStore();
+    const now = Date.now();
+    store.create({
+      id: "young",
+      status: "running",
+      runner: "fake",
+      spec: spec(),
+      createdAt: now,
+      startedAt: now,
+      pid: 4242,
+      unitsTotal: 50,
+    });
+    const lab = new Lab({
+      store,
+      maxRunningMs: 60_000,
+      runner: new FakeRunner({ probeResult: { state: "running" } }),
+    });
+    await lab.reconcile();
+    expect(store.get("young")!.status).toBe("running");
+  });
+
+  it("adopts a wrongly-orphaned failed row when a valid bundle is on disk", async () => {
+    const store = new MemoryExperimentStore();
+    store.create({
+      id: "exp_o",
+      status: "failed",
+      error: "orphaned (lab restarted while running)",
+      runner: "fake",
+      spec: spec(),
+      createdAt: 1,
+      finishedAt: 2,
+    });
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ scanResult: [{ id: "exp_o", result: fakeResult("exp_o"), spec: spec() }] }),
+    });
+    await lab.reconcile({ scanDisk: true });
+    expect(store.get("exp_o")!.status).toBe("done");
+  });
+
+  it("does NOT resurrect an integrity-failed row from disk", async () => {
+    const store = new MemoryExperimentStore();
+    store.create({
+      id: "exp_i",
+      status: "failed",
+      error: "integrity: 3 causal (look-ahead) violation(s)",
+      runner: "fake",
+      spec: spec(),
+      createdAt: 1,
+      finishedAt: 2,
+    });
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ scanResult: [{ id: "exp_i", result: fakeResult("exp_i"), spec: spec() }] }),
+    });
+    await lab.reconcile({ scanDisk: true });
+    expect(store.get("exp_i")!.status).toBe("failed");
+  });
+
+  it("creates and finalizes a row for a lab-launched bundle with no store row", async () => {
+    const store = new MemoryExperimentStore();
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ scanResult: [{ id: "exp_new", result: fakeResult("exp_new"), spec: spec() }] }),
+    });
+    await lab.reconcile({ scanDisk: true });
+    expect(store.get("exp_new")?.status).toBe("done");
+  });
+
+  it("ignores a foreign bundle that carries no run metadata (no spec)", async () => {
+    const store = new MemoryExperimentStore();
+    const lab = new Lab({
+      store,
+      runner: new FakeRunner({ scanResult: [{ id: "foreign", result: fakeResult("foreign") }] }),
+    });
+    await lab.reconcile({ scanDisk: true });
+    expect(store.get("foreign")).toBeUndefined();
+  });
+});
