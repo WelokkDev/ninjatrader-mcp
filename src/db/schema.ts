@@ -62,6 +62,8 @@ export function initializeSchema(db: Database.Database): void {
       management_mode TEXT,          -- 'fixed'|'trailing'|'constrained' (backtest exit policy); null for legacy/live
       bars_in_trade   INTEGER,       -- bars held until exit; null while open
       mfe             REAL,          -- max favorable excursion in R; null while open
+      source          TEXT,          -- adapter id for imported trades (e.g. 'ninjatrader'); null for engine trades
+      external_id     TEXT,          -- broker round-trip/exec id; dedupe key for imported trades; null for engine trades
       created_at   INTEGER NOT NULL
     );
 
@@ -98,6 +100,12 @@ export function initializeSchema(db: Database.Database): void {
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");
+  ensureColumn(db, "trades", "source", "TEXT");
+  ensureColumn(db, "trades", "external_id", "TEXT");
+  // Index for idempotent upsert lookup — must come after ensureColumn so the column exists.
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id)",
+  );
 }
 
 // Add `column` to `table` if it isn't already present (a minimal idempotent

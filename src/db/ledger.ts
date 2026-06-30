@@ -41,6 +41,8 @@ interface TradeRow {
   management_mode: string | null;
   bars_in_trade: number | null;
   mfe: number | null;
+  source: string | null;
+  external_id: string | null;
   created_at: number;
 }
 
@@ -77,6 +79,8 @@ function rowToTrade(r: TradeRow): Trade {
     managementMode: (r.management_mode as ManagementMode | null) ?? null,
     barsInTrade: r.bars_in_trade,
     mfe: r.mfe,
+    source: r.source ?? null,
+    externalId: r.external_id ?? null,
     createdAt: r.created_at,
   };
 }
@@ -114,6 +118,13 @@ function computeRMultiple(
 export interface Ledger {
   insertBacktestRun(run: BacktestRun): void;
   insertTrade(trade: Trade): void;
+  /**
+   * Idempotent insert keyed on `external_id`: no-op if a row with the same
+   * `external_id` already exists, otherwise inserts. Imported/external rows must
+   * use this — `insertTrade` does NOT deduplicate (the `external_id` index is
+   * non-unique).
+   */
+  upsertTradeByExternalId(trade: Trade): void;
   updateTradeExit(
     tradeId: string,
     exit: {
@@ -148,10 +159,16 @@ export function createLedger(db: Database.Database): Ledger {
     `INSERT INTO trades
        (trade_id, run_id, mode, symbol, direction, entry_time, entry_price,
         stop_price, target_price, exit_time, exit_price, exit_reason,
-        r_multiple, zone_ref, decision_ref, management_mode, bars_in_trade, mfe, created_at)
+        r_multiple, zone_ref, decision_ref, management_mode, bars_in_trade, mfe,
+        source, external_id, created_at)
      VALUES (@trade_id, @run_id, @mode, @symbol, @direction, @entry_time, @entry_price,
         @stop_price, @target_price, @exit_time, @exit_price, @exit_reason,
-        @r_multiple, @zone_ref, @decision_ref, @management_mode, @bars_in_trade, @mfe, @created_at)`,
+        @r_multiple, @zone_ref, @decision_ref, @management_mode, @bars_in_trade, @mfe,
+        @source, @external_id, @created_at)`,
+  );
+
+  const findByExternalIdStmt = db.prepare(
+    `SELECT 1 FROM trades WHERE external_id = ? LIMIT 1`,
   );
 
   const updateExitStmt = db.prepare(
@@ -173,6 +190,36 @@ export function createLedger(db: Database.Database): Ledger {
 
   const getTradeStmt = db.prepare(`SELECT * FROM trades WHERE trade_id = ?`);
 
+  // Shared insert body — used by both insertTrade and upsertTradeByExternalId.
+  // Extracted as a closure so the factory (which has no `this`) can share it.
+  function insertTradeRow(trade: Trade): void {
+    insertTradeStmt.run({
+      trade_id: trade.tradeId,
+      run_id: trade.runId,
+      mode: trade.mode,
+      symbol: trade.symbol,
+      direction: trade.direction,
+      entry_time: trade.entryTime,
+      entry_price: trade.entryPrice,
+      stop_price: trade.stopPrice,
+      target_price: trade.targetPrice,
+      exit_time: trade.exitTime,
+      exit_price: trade.exitPrice,
+      exit_reason: trade.exitReason,
+      r_multiple: trade.rMultiple,
+      zone_ref: trade.zoneRef ? JSON.stringify(trade.zoneRef) : null,
+      decision_ref: trade.decisionRef
+        ? JSON.stringify(trade.decisionRef)
+        : null,
+      management_mode: trade.managementMode,
+      bars_in_trade: trade.barsInTrade,
+      mfe: trade.mfe,
+      source: trade.source,
+      external_id: trade.externalId,
+      created_at: trade.createdAt,
+    });
+  }
+
   return {
     insertBacktestRun(run: BacktestRun): void {
       insertRunStmt.run({
@@ -188,29 +235,18 @@ export function createLedger(db: Database.Database): Ledger {
     },
 
     insertTrade(trade: Trade): void {
-      insertTradeStmt.run({
-        trade_id: trade.tradeId,
-        run_id: trade.runId,
-        mode: trade.mode,
-        symbol: trade.symbol,
-        direction: trade.direction,
-        entry_time: trade.entryTime,
-        entry_price: trade.entryPrice,
-        stop_price: trade.stopPrice,
-        target_price: trade.targetPrice,
-        exit_time: trade.exitTime,
-        exit_price: trade.exitPrice,
-        exit_reason: trade.exitReason,
-        r_multiple: trade.rMultiple,
-        zone_ref: trade.zoneRef ? JSON.stringify(trade.zoneRef) : null,
-        decision_ref: trade.decisionRef
-          ? JSON.stringify(trade.decisionRef)
-          : null,
-        management_mode: trade.managementMode,
-        bars_in_trade: trade.barsInTrade,
-        mfe: trade.mfe,
-        created_at: trade.createdAt,
-      });
+      insertTradeRow(trade);
+    },
+
+    upsertTradeByExternalId(trade: Trade): void {
+      if (trade.externalId === null) {
+        throw new Error(
+          "upsertTradeByExternalId: trade.externalId must be non-null",
+        );
+      }
+      const existing = findByExternalIdStmt.get(trade.externalId);
+      if (existing) return;
+      insertTradeRow(trade);
     },
 
     updateTradeExit(

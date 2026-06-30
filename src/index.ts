@@ -15,6 +15,7 @@ import { registerScanForTrade } from "./tools/scan-for-trade.js";
 import { registerRunBacktest } from "./tools/run-backtest.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
+import { registerGetTrades, registerSyncTrades } from "./tools/get-trades.js";
 import { registerStartExperiment } from "./tools/start-experiment.js";
 import { registerExperimentStatus } from "./tools/experiment-status.js";
 import { registerExperimentResult } from "./tools/experiment-result.js";
@@ -36,6 +37,8 @@ registerScanForTrade(server);
 registerRunBacktest(server);
 registerListTrades(server);
 registerListDecisions(server);
+registerGetTrades(server);
+registerSyncTrades(server);
 
 // Strategy Lab — async experiment orchestration + observability.
 registerStartExperiment(server);
