@@ -34,7 +34,7 @@ export function registerListTrades(server: McpServer): void {
 
   server.tool(
     "list_trades",
-    "List persisted trades from the ledger, optionally filtered by runId (a run_backtest run), mode (backtest/paper/live), and/or managementMode (fixed/trailing/constrained). Each trade carries entry/stop/target/exit prices, exitReason, r_multiple, barsInTrade, and mfe.",
+    "List persisted trades from the ledger, optionally filtered by runId (a run_backtest run), mode (backtest/paper/live), and/or managementMode (fixed/trailing/constrained). Each trade carries entry/stop/target/exit prices, exitReason, r_multiple, barsInTrade, and mfe. Note: for 'live'/imported trades, mfe carries the broker's realized P&L (dollars), not max-favorable-excursion-in-R, until a dedicated realized_pnl column lands.",
     {
       runId: z
         .string()

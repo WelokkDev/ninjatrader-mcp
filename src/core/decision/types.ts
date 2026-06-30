@@ -91,6 +91,11 @@ export interface Trade {
   // (updateTradeExit); null while open.
   barsInTrade: number | null;
   mfe: number | null;
+  // Ingestion provenance. null for engine-generated (backtest/paper/live) rows.
+  // For imported trades: source = originating system (e.g. "ibkr-flex"),
+  // externalId = the source-system's own trade identifier.
+  source: string | null;
+  externalId: string | null;
   createdAt: number;
 }
 
