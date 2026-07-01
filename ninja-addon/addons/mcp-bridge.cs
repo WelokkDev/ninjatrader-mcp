@@ -59,6 +59,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public string    Label;     // style companion label (null => none)
 	}
 
+	// One retained drawing in the AddOn's persistence store. Exactly one of
+	// Zone/Draw is non-null (legacy draw_zone vs generic draw).
+	public class StoredDraw
+	{
+		public string          Id;
+		public DrawZoneCommand Zone;
+		public DrawCommand     Draw;
+	}
+
 	public class McpBridge : NinjaTrader.NinjaScript.AddOnBase
 	{
 		private const int    HeartbeatIntervalMs = 10_000;
@@ -88,6 +97,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private readonly ConcurrentDictionary<string, byte> registeredSymbols
 			= new ConcurrentDictionary<string, byte>();
 
+		// Authoritative store of active drawings, keyed by symbol.
+		private readonly Dictionary<string, List<StoredDraw>> drawStore
+			= new Dictionary<string, List<StoredDraw>>(StringComparer.Ordinal);
+		private readonly object drawStoreLock = new object();
+
 		// Indicators register here so the AddOn can include them in `hello`.
 		public void RegisterSymbol(string symbol)
 		{
@@ -100,6 +114,68 @@ namespace NinjaTrader.NinjaScript.AddOns
 			byte _;
 			registeredSymbols.TryRemove(symbol, out _);
 			Log("indicator unregistered symbol: " + symbol);
+		}
+
+		// ---------- draw persistence store ----------
+		// Retain active drawings on the AddOn (which outlives chart reloads) so the
+		// renderer can replay them after a data-series/timeframe change re-creates it.
+
+		private void StoreUpsert(string symbol, StoredDraw entry)
+		{
+			if (string.IsNullOrEmpty(symbol) || entry == null || string.IsNullOrEmpty(entry.Id)) return;
+			lock (drawStoreLock)
+			{
+				List<StoredDraw> list;
+				if (!drawStore.TryGetValue(symbol, out list))
+				{
+					list = new List<StoredDraw>();
+					drawStore[symbol] = list;
+				}
+				// Same id => replace in place (latest geometry wins); else append.
+				for (int i = 0; i < list.Count; i++)
+				{
+					if (list[i].Id == entry.Id) { list[i] = entry; return; }
+				}
+				list.Add(entry);
+			}
+		}
+
+		private void StoreClear(string symbol, string id, List<string> ids)
+		{
+			lock (drawStoreLock)
+			{
+				// Empty symbol = every symbol (mirrors the "all charts" clear semantics).
+				var symbols = string.IsNullOrEmpty(symbol)
+					? new List<string>(drawStore.Keys)
+					: new List<string> { symbol };
+
+				foreach (var s in symbols)
+				{
+					List<StoredDraw> list;
+					if (!drawStore.TryGetValue(s, out list)) continue;
+
+					if (ids != null && ids.Count > 0)
+						list.RemoveAll(e => ids.Contains(e.Id));
+					else if (!string.IsNullOrEmpty(id))
+						list.RemoveAll(e => e.Id == id);
+					else
+						list.Clear();
+
+					if (list.Count == 0) drawStore.Remove(s);
+				}
+			}
+		}
+
+		// Snapshot copy so the renderer can drain without holding the lock.
+		public List<StoredDraw> GetDraws(string symbol)
+		{
+			lock (drawStoreLock)
+			{
+				List<StoredDraw> list;
+				if (string.IsNullOrEmpty(symbol) || !drawStore.TryGetValue(symbol, out list))
+					return new List<StoredDraw>();
+				return new List<StoredDraw>(list);
+			}
 		}
 
 		protected override void OnStateChange()
@@ -459,6 +535,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						+ " p=" + cmd.Proximal + " d=" + cmd.Distal
 						+ " from=" + (fromTime.HasValue ? fromTime.Value.ToString("yyyy-MM-dd HH:mm") : "<bar-anchor>")
 						+ " to="   + (toTime.HasValue   ? toTime.Value.ToString("yyyy-MM-dd HH:mm")   : "<current-bar>"));
+					StoreUpsert(cmd.Symbol, new StoredDraw { Id = cmd.Id, Zone = cmd });
 					var handler = DrawZoneReceived;
 					if (handler != null) handler(cmd);
 					break;
@@ -500,6 +577,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						Label    = style != null ? GetString(style, "label") : null,
 					};
 					Log("draw " + cmd.Symbol + " id=" + cmd.Id + " kind=" + cmd.Kind);
+					StoreUpsert(cmd.Symbol, new StoredDraw { Id = cmd.Id, Draw = cmd });
 					var dh = DrawReceived;
 					if (dh != null) dh(cmd);
 					break;
@@ -519,6 +597,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					else if (!string.IsNullOrEmpty(cmd.Id))   idDesc = " id=" + cmd.Id;
 					else                                       idDesc = " (all)";
 					Log("clear_zones " + symbolDesc + idDesc);
+					StoreClear(cmd.Symbol, cmd.Id, cmd.Ids);
 					var handler = ClearZonesReceived;
 					if (handler != null) handler(cmd);
 					break;

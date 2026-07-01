@@ -57,20 +57,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 					return;
 				}
 
-				// Adopt any pre-existing mcp_* draw objects so a reload of this
-				// indicator doesn't orphan rectangles drawn by the previous instance.
-				try
-				{
-					foreach (var d in DrawObjects)
-					{
-						if (d == null || string.IsNullOrEmpty(d.Tag)) continue;
-						if (d.Tag.StartsWith(TagPrefix)) myTags.Add(d.Tag);
-					}
-					if (myTags.Count > 0)
-						Log("adopted " + myTags.Count + " existing mcp_* draw objects on " + symbolKey);
-				}
-				catch (Exception ex) { Log("tag adoption failed: " + ex.Message); }
-
 				McpBridge.DrawZoneReceived   += OnDrawZoneReceived;
 				McpBridge.DrawReceived       += OnDrawReceived;
 				McpBridge.ClearZonesReceived += OnClearZonesReceived;
@@ -78,6 +64,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				TryRegister();
 				if (!registered)
 					Log("McpBridge not loaded yet; will register on next event");
+				ReplayFromStore();
 			}
 			else if (State == State.Terminated)
 			{
@@ -103,6 +90,28 @@ namespace NinjaTrader.NinjaScript.Indicators
 			if (bridge == null) return;
 			bridge.RegisterSymbol(symbolKey);
 			registered = true;
+		}
+
+		// Pull the AddOn's retained drawings for our symbol and queue them for (re)drawing.
+		// Called on DataLoaded so drawings persist across chart data-series and timeframe changes.
+		private void ReplayFromStore()
+		{
+			var bridge = McpBridge.Instance;
+			if (bridge == null || symbolKey == null) return;
+			try
+			{
+				var pending = bridge.GetDraws(symbolKey);
+				if (pending == null || pending.Count == 0) return;
+				foreach (var s in pending)
+				{
+					if (s == null) continue;
+					if (s.Zone != null)      drawQueue.Enqueue(s.Zone);
+					else if (s.Draw != null) drawCmdQueue.Enqueue(s.Draw);
+				}
+				TriggerCustomEvent(_ => DrainQueues(), null);
+				Log("replayed " + pending.Count + " stored draw(s) for " + symbolKey);
+			}
+			catch (Exception ex) { Log("replay failed: " + ex.Message); }
 		}
 
 		// Bridge fires these on the WS reader thread — queue and marshal onto
