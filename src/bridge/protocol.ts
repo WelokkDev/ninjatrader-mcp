@@ -32,6 +32,29 @@ export interface DrawZoneMessage {
   toTs?: number;
 }
 
+export interface DrawStyle {
+  color?: string; // "#rrggbb"
+  opacity?: number; // 0..1 fill opacity (rectangles)
+  label?: string; // optional companion text rendered at the shape's anchor
+}
+
+/** Discriminated chart primitives. Timestamps are unix seconds (ET calendar
+ *  dates per the draw_zone timezone convention). */
+export type DrawShape =
+  | { kind: "rectangle"; proximal: number; distal: number; fromTs?: number; toTs?: number }
+  | { kind: "hline"; price: number; fromTs?: number; toTs?: number }
+  | { kind: "vline"; ts: number }
+  | { kind: "text"; ts: number; price: number; text: string };
+
+export interface DrawMessage {
+  v: 1;
+  type: "draw";
+  id: string;
+  symbol: string;
+  shape: DrawShape;
+  style?: DrawStyle;
+}
+
 export interface ClearZonesMessage {
   v: 1;
   type: "clear_zones";
@@ -98,6 +121,7 @@ export type InboundMessage =
 export type OutboundMessage =
   | HelloAckMessage
   | DrawZoneMessage
+  | DrawMessage
   | ClearZonesMessage
   | RequestCandlesMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;

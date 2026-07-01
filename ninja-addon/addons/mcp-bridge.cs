@@ -42,6 +42,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public List<string> Ids;    // batch form; takes priority over Id when present
 	}
 
+	public class DrawCommand
+	{
+		public string    Id;
+		public string    Symbol;
+		public string    Kind;      // "rectangle" | "hline" | "vline" | "text"
+		public double    Proximal;  // rectangle
+		public double    Distal;    // rectangle
+		public double    Price;     // hline / text y
+		public string    Text;      // text content
+		public DateTime? FromTime;  // rectangle / hline start (null => bar-anchor fallback)
+		public DateTime? ToTime;    // rectangle / hline end   (null => current bar)
+		public DateTime? AtTime;    // vline / text x
+		public string    Color;     // style "#rrggbb" (null => default)
+		public double?   Opacity;   // style 0..1 (null => default)
+		public string    Label;     // style companion label (null => none)
+	}
+
 	public class McpBridge : NinjaTrader.NinjaScript.AddOnBase
 	{
 		private const int    HeartbeatIntervalMs = 10_000;
@@ -52,6 +69,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public  static McpBridge Instance { get; private set; }
 
 		public  static event Action<DrawZoneCommand>  DrawZoneReceived;
+		public  static event Action<DrawCommand>      DrawReceived;
 		public  static event Action<ClearZonesCommand> ClearZonesReceived;
 
 		private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -381,6 +399,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return list.Count > 0 ? list : null;
 		}
 
+		private static IDictionary<string, object> GetDict(IDictionary<string, object> obj, string key)
+		{
+			object v;
+			if (obj == null || !obj.TryGetValue(key, out v) || v == null) return null;
+			return v as IDictionary<string, object>;
+		}
+
 		private void HandleMessage(string raw)
 		{
 			Dictionary<string, object> obj;
@@ -436,6 +461,47 @@ namespace NinjaTrader.NinjaScript.AddOns
 						+ " to="   + (toTime.HasValue   ? toTime.Value.ToString("yyyy-MM-dd HH:mm")   : "<current-bar>"));
 					var handler = DrawZoneReceived;
 					if (handler != null) handler(cmd);
+					break;
+				}
+
+				case "draw":
+				{
+					var shape = GetDict(obj, "shape");
+					var style = GetDict(obj, "style");
+					if (shape == null) { Log("draw: missing shape"); break; }
+					var kind = GetString(shape, "kind");
+
+					var fromTs = GetLong(shape, "fromTs");
+					var toTs   = GetLong(shape, "toTs");
+					var ts     = GetLong(shape, "ts");
+					DateTime? fromTime = null, toTime = null, atTime = null;
+					try
+					{
+						if (fromTs.HasValue) fromTime = UnixSecondsToExchangeTime(fromTs.Value);
+						if (toTs.HasValue)   toTime   = UnixSecondsToExchangeTime(toTs.Value);
+						if (ts.HasValue)     atTime   = UnixSecondsToExchangeTime(ts.Value);
+					}
+					catch (Exception ex) { Log("draw bad timestamp: " + ex.Message); fromTime = toTime = atTime = null; }
+
+					var cmd = new DrawCommand
+					{
+						Id       = GetString(obj, "id"),
+						Symbol   = GetString(obj, "symbol"),
+						Kind     = kind,
+						Proximal = GetDouble(shape, "proximal"),
+						Distal   = GetDouble(shape, "distal"),
+						Price    = GetDouble(shape, "price"),
+						Text     = GetString(shape, "text"),
+						FromTime = fromTime,
+						ToTime   = toTime,
+						AtTime   = atTime,
+						Color    = style != null ? GetString(style, "color") : null,
+						Opacity  = style != null && style.ContainsKey("opacity") ? (double?) GetDouble(style, "opacity") : null,
+						Label    = style != null ? GetString(style, "label") : null,
+					};
+					Log("draw " + cmd.Symbol + " id=" + cmd.Id + " kind=" + cmd.Kind);
+					var dh = DrawReceived;
+					if (dh != null) dh(cmd);
 					break;
 				}
 

@@ -59,7 +59,7 @@ export function registerClearZones(server: McpServer): void {
 
   server.tool(
     "clear_zones",
-    "Remove zone rectangles previously drawn via draw_zone. Omit symbol to clear on every chart with the renderer attached. Provide ids to clear specific zones; omit ids to clear all zones for the matched chart(s).",
+    "Remove drawings previously created via draw or draw_zone (cleared by id/tag; works for any shape). Omit symbol to clear on every chart with the renderer attached. Provide ids to clear specific drawings; omit ids to clear all.",
     {
       symbol: z
         .string()

@@ -14,7 +14,8 @@
       "mcp__ninjatrader__scan_for_trade",
       "mcp__ninjatrader__run_backtest",
       "mcp__ninjatrader__list_trades",
-      "mcp__ninjatrader__list_decisions"
+      "mcp__ninjatrader__list_decisions",
+      "mcp__ninjatrader__draw"
     ]
   },
   "enableAllProjectMcpServers": true,
