@@ -56,6 +56,21 @@ export interface RequestCandlesMessage {
   tradingHoursTemplate: string;
 }
 
+export interface SubscribeBarsMessage {
+  v: 1;
+  type: "subscribe_bars";
+  symbol: string;
+  timeframe: string;
+  tradingHoursTemplate: string;
+}
+
+export interface UnsubscribeBarsMessage {
+  v: 1;
+  type: "unsubscribe_bars";
+  symbol: string;
+  timeframe: string;
+}
+
 export interface CandlePayload {
   timestamp: number;
   open: number;
@@ -99,7 +114,9 @@ export type OutboundMessage =
   | HelloAckMessage
   | DrawZoneMessage
   | ClearZonesMessage
-  | RequestCandlesMessage;
+  | RequestCandlesMessage
+  | SubscribeBarsMessage
+  | UnsubscribeBarsMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

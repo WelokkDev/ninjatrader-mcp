@@ -1,0 +1,16 @@
+{
+  "description": "Drawing conventions the LLM consults for under-specified requests. Explicit requests (e.g. 'hline at 2000') ignore this.",
+  "roles": {
+    "entry": { "shape": "rectangle", "color": "#22c55e", "opacity": 0.25, "label": "ENTRY" },
+    "goal":  { "shape": "rectangle", "color": "#3b82f6", "opacity": 0.18, "label": "GOAL" },
+    "waw":   { "shape": "rectangle", "color": "#f59e0b", "opacity": 0.15, "label": "WAW" }
+  },
+  "views": {
+    "playing-field": { "roles": ["entry", "goal"], "aka": ["the zones", "the two zones", "the playing field"] },
+    "waw": { "roles": ["waw"], "aka": ["waw zones"] }
+  },
+  "defaults": { "hline": { "color": "#9ca3af" }, "rectangle": { "opacity": 0.15 } },
+  "strategies": {
+    "pullback-to-supply-demand": { "views": { "playing-field": { "roles": ["entry", "goal"] } } }
+  }
+}

@@ -9,6 +9,8 @@ import { registerLiveIngestHandler } from "./bridge/ingest.js";
 import { registerGetCandles } from "./tools/get-candles.js";
 import { registerScanZones } from "./tools/scan-zones.js";
 import { registerDrawZone } from "./tools/draw-zone.js";
+import { registerLiveFeedTools } from "./tools/live-feed.js";
+import { registerLiveBarRecorder } from "./live/bar-recorder.js";
 import { registerClearZones } from "./tools/clear-zones.js";
 import { registerGetPlayingField } from "./tools/get-playing-field.js";
 import { registerScanForTrade } from "./tools/scan-for-trade.js";
@@ -31,6 +33,7 @@ const server = new McpServer({
 registerGetCandles(server);
 registerScanZones(server);
 registerDrawZone(server);
+registerLiveFeedTools(server);
 registerClearZones(server);
 registerGetPlayingField(server);
 registerScanForTrade(server);
@@ -55,6 +58,7 @@ async function main() {
 
   await startBridge();
   registerLiveIngestHandler();
+  registerLiveBarRecorder();
 }
 
 const shutdown = async (signal: string) => {

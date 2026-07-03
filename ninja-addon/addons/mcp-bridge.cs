@@ -42,6 +42,32 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public List<string> Ids;    // batch form; takes priority over Id when present
 	}
 
+	public class DrawCommand
+	{
+		public string    Id;
+		public string    Symbol;
+		public string    Kind;      // "rectangle" | "hline" | "vline" | "text"
+		public double    Proximal;  // rectangle
+		public double    Distal;    // rectangle
+		public double    Price;     // hline / text y
+		public string    Text;      // text content
+		public DateTime? FromTime;  // rectangle / hline start (null => bar-anchor fallback)
+		public DateTime? ToTime;    // rectangle / hline end   (null => current bar)
+		public DateTime? AtTime;    // vline / text x
+		public string    Color;     // style "#rrggbb" (null => default)
+		public double?   Opacity;   // style 0..1 (null => default)
+		public string    Label;     // style companion label (null => none)
+	}
+
+	// One retained drawing in the AddOn's persistence store. Exactly one of
+	// Zone/Draw is non-null (legacy draw_zone vs generic draw).
+	public class StoredDraw
+	{
+		public string          Id;
+		public DrawZoneCommand Zone;
+		public DrawCommand     Draw;
+	}
+
 	public class McpBridge : NinjaTrader.NinjaScript.AddOnBase
 	{
 		private const int    HeartbeatIntervalMs = 10_000;
@@ -52,6 +78,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public  static McpBridge Instance { get; private set; }
 
 		public  static event Action<DrawZoneCommand>  DrawZoneReceived;
+		public  static event Action<DrawCommand>      DrawReceived;
 		public  static event Action<ClearZonesCommand> ClearZonesReceived;
 
 		private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -70,6 +97,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private readonly ConcurrentDictionary<string, byte> registeredSymbols
 			= new ConcurrentDictionary<string, byte>();
 
+		// Authoritative store of active drawings, keyed by symbol,.
+		private readonly Dictionary<string, List<StoredDraw>> drawStore
+			= new Dictionary<string, List<StoredDraw>>(StringComparer.Ordinal);
+		private readonly object drawStoreLock = new object();
+
 		// Indicators register here so the AddOn can include them in `hello`.
 		public void RegisterSymbol(string symbol)
 		{
@@ -82,6 +114,68 @@ namespace NinjaTrader.NinjaScript.AddOns
 			byte _;
 			registeredSymbols.TryRemove(symbol, out _);
 			Log("indicator unregistered symbol: " + symbol);
+		}
+
+		// ---------- draw persistence store ----------
+		// Retain active drawings on the AddOn (which outlives chart reloads) so the
+		// renderer can replay them after a data-series/timeframe change re-creates it.
+
+		private void StoreUpsert(string symbol, StoredDraw entry)
+		{
+			if (string.IsNullOrEmpty(symbol) || entry == null || string.IsNullOrEmpty(entry.Id)) return;
+			lock (drawStoreLock)
+			{
+				List<StoredDraw> list;
+				if (!drawStore.TryGetValue(symbol, out list))
+				{
+					list = new List<StoredDraw>();
+					drawStore[symbol] = list;
+				}
+				// Same id => replace in place (latest geometry wins); else append.
+				for (int i = 0; i < list.Count; i++)
+				{
+					if (list[i].Id == entry.Id) { list[i] = entry; return; }
+				}
+				list.Add(entry);
+			}
+		}
+
+		private void StoreClear(string symbol, string id, List<string> ids)
+		{
+			lock (drawStoreLock)
+			{
+				// Empty symbol = every symbol (mirrors the "all charts" clear semantics).
+				var symbols = string.IsNullOrEmpty(symbol)
+					? new List<string>(drawStore.Keys)
+					: new List<string> { symbol };
+
+				foreach (var s in symbols)
+				{
+					List<StoredDraw> list;
+					if (!drawStore.TryGetValue(s, out list)) continue;
+
+					if (ids != null && ids.Count > 0)
+						list.RemoveAll(e => ids.Contains(e.Id));
+					else if (!string.IsNullOrEmpty(id))
+						list.RemoveAll(e => e.Id == id);
+					else
+						list.Clear();
+
+					if (list.Count == 0) drawStore.Remove(s);
+				}
+			}
+		}
+
+		// Snapshot copy so the renderer can drain without holding the lock.
+		public List<StoredDraw> GetDraws(string symbol)
+		{
+			lock (drawStoreLock)
+			{
+				List<StoredDraw> list;
+				if (string.IsNullOrEmpty(symbol) || !drawStore.TryGetValue(symbol, out list))
+					return new List<StoredDraw>();
+				return new List<StoredDraw>(list);
+			}
 		}
 
 		protected override void OnStateChange()
@@ -381,6 +475,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return list.Count > 0 ? list : null;
 		}
 
+		private static IDictionary<string, object> GetDict(IDictionary<string, object> obj, string key)
+		{
+			object v;
+			if (obj == null || !obj.TryGetValue(key, out v) || v == null) return null;
+			return v as IDictionary<string, object>;
+		}
+
 		private void HandleMessage(string raw)
 		{
 			Dictionary<string, object> obj;
@@ -434,8 +535,51 @@ namespace NinjaTrader.NinjaScript.AddOns
 						+ " p=" + cmd.Proximal + " d=" + cmd.Distal
 						+ " from=" + (fromTime.HasValue ? fromTime.Value.ToString("yyyy-MM-dd HH:mm") : "<bar-anchor>")
 						+ " to="   + (toTime.HasValue   ? toTime.Value.ToString("yyyy-MM-dd HH:mm")   : "<current-bar>"));
+					StoreUpsert(cmd.Symbol, new StoredDraw { Id = cmd.Id, Zone = cmd });
 					var handler = DrawZoneReceived;
 					if (handler != null) handler(cmd);
+					break;
+				}
+
+				case "draw":
+				{
+					var shape = GetDict(obj, "shape");
+					var style = GetDict(obj, "style");
+					if (shape == null) { Log("draw: missing shape"); break; }
+					var kind = GetString(shape, "kind");
+
+					var fromTs = GetLong(shape, "fromTs");
+					var toTs   = GetLong(shape, "toTs");
+					var ts     = GetLong(shape, "ts");
+					DateTime? fromTime = null, toTime = null, atTime = null;
+					try
+					{
+						if (fromTs.HasValue) fromTime = UnixSecondsToExchangeTime(fromTs.Value);
+						if (toTs.HasValue)   toTime   = UnixSecondsToExchangeTime(toTs.Value);
+						if (ts.HasValue)     atTime   = UnixSecondsToExchangeTime(ts.Value);
+					}
+					catch (Exception ex) { Log("draw bad timestamp: " + ex.Message); fromTime = toTime = atTime = null; }
+
+					var cmd = new DrawCommand
+					{
+						Id       = GetString(obj, "id"),
+						Symbol   = GetString(obj, "symbol"),
+						Kind     = kind,
+						Proximal = GetDouble(shape, "proximal"),
+						Distal   = GetDouble(shape, "distal"),
+						Price    = GetDouble(shape, "price"),
+						Text     = GetString(shape, "text"),
+						FromTime = fromTime,
+						ToTime   = toTime,
+						AtTime   = atTime,
+						Color    = style != null ? GetString(style, "color") : null,
+						Opacity  = style != null && style.ContainsKey("opacity") ? (double?) GetDouble(style, "opacity") : null,
+						Label    = style != null ? GetString(style, "label") : null,
+					};
+					Log("draw " + cmd.Symbol + " id=" + cmd.Id + " kind=" + cmd.Kind);
+					StoreUpsert(cmd.Symbol, new StoredDraw { Id = cmd.Id, Draw = cmd });
+					var dh = DrawReceived;
+					if (dh != null) dh(cmd);
 					break;
 				}
 
@@ -453,6 +597,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					else if (!string.IsNullOrEmpty(cmd.Id))   idDesc = " id=" + cmd.Id;
 					else                                       idDesc = " (all)";
 					Log("clear_zones " + symbolDesc + idDesc);
+					StoreClear(cmd.Symbol, cmd.Id, cmd.Ids);
 					var handler = ClearZonesReceived;
 					if (handler != null) handler(cmd);
 					break;
