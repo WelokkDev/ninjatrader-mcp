@@ -3,7 +3,14 @@
  *
  * Reads executed fills from NinjaTrader.sqlite, decodes each row into a
  * RawExecution, FIFO-pairs them into round-trip RawTrades using pairExecutions,
- * stamps the source id, and range-filters the result.
+ * and stamps the source id.
+ *
+ * Pairing ALWAYS runs over the full execution history — never a time window.
+ * pairExecutions assumes every stream starts flat, so pairing a window that
+ * opens mid-position fabricates trades: a sell closing a long opened before
+ * the window looks like a fresh short entry (direction flip) and then pairs
+ * against the next real entry (phantom round-trip). The [from, to] range only
+ * selects which paired trades are returned, by entryTime.
  *
  * Real NT8 schema is NORMALIZED: Executions stores INTEGER foreign keys for
  * Instrument and Account (not text values). Side comes from Orders.OrderAction
@@ -41,7 +48,7 @@ export const NT_SCHEMA = {
     instrument:  "Instrument",     // INTEGER FK → Instruments.Id
     price:       "Price",
     quantity:    "Quantity",
-    marketPos:   "MarketPosition", // position BEFORE fill; NOT the side (see Orders.OrderAction)
+    marketPos:   "MarketPosition", // observed 0=Long fill / 1=Short fill (2 samples); unpinned — side comes from Orders.OrderAction
     time:        "Time",           // .NET ticks, UTC
     commission:  "Commission",
     fee:         "Fee",
@@ -50,7 +57,7 @@ export const NT_SCHEMA = {
   },
   orders: {
     orderId:     "OrderId",
-    orderAction: "OrderAction",    // 0=Buy, 1=Sell, 2=SellShort, 3=BuyToCover
+    orderAction: "OrderAction",    // 0=Buy, 1=Sell, 2=SellShort, 3=BuyToCover (a chart "Close" sell is stored as 2)
   },
   instr: {
     id:               "Id",
@@ -126,7 +133,7 @@ export interface NinjaTraderSourceOptions {
 export class NinjaTraderSource implements TradeSource {
   readonly id = "ninjatrader";
   readonly capabilities = {
-    serverSideRange: true,   // fills are fetched in [from, to] tick range via SQL
+    serverSideRange: false,  // pairing needs the full fill history; [from, to] filters paired trades post-hoc
     realizedPnl:     false,  // NT stores fills, not round-trip P&L; we derive trades
     commission:      true,
   };
@@ -136,9 +143,6 @@ export class NinjaTraderSource implements TradeSource {
   async fetchTrades(range: { from: number; to: number }): Promise<RawTrade[]> {
     const { db, dir } = openSnapshot(this.opts.dbPath);
     try {
-      const lo = NT_SCHEMA.unixToTicks(range.from);
-      const hi = NT_SCHEMA.unixToTicks(range.to);
-
       // Aliases from NT_SCHEMA so every table/column name in the query is a constant.
       const T  = NT_SCHEMA.tables;
       const EC = NT_SCHEMA.exec;
@@ -147,9 +151,6 @@ export class NinjaTraderSource implements TradeSource {
       const MI = NT_SCHEMA.masterInstr;
       const AC = NT_SCHEMA.acct;
 
-      // Four-table join to resolve symbol and account names, and to read side
-      // from Orders.OrderAction. e.* is included so the full Executions row is
-      // preserved in raw (audit / no-data-loss guarantee).
       const sql = [
         `SELECT`,
         `  e.${EC.execId}       AS execId,`,
@@ -166,16 +167,30 @@ export class NinjaTraderSource implements TradeSource {
         `JOIN ${T.masterInstruments} mi ON mi.${MI.id} = i.${IN.masterInstrument}`,
         `LEFT JOIN ${T.orders}       o  ON o.${OR.orderId} = e.${EC.orderId}`,
         `LEFT JOIN ${T.accounts}     a  ON a.${AC.id} = e.${EC.account}`,
-        `WHERE e.${EC.time} BETWEEN ? AND ?`,
-        ...(this.opts.account ? [`AND a.${AC.name} = ?`] : []),
+        ...(this.opts.account ? [`WHERE a.${AC.name} = ?`] : []),
         `ORDER BY e.${EC.time} ASC, e.${EC.execId} ASC`,
       ].join("\n");
 
       const rows = (
         this.opts.account
-          ? db.prepare(sql).all(lo, hi, this.opts.account)
-          : db.prepare(sql).all(lo, hi)
+          ? db.prepare(sql).all(this.opts.account)
+          : db.prepare(sql).all()
       ) as Array<Record<string, unknown>>;
+
+      // Orders is LEFT JOINed, so a purged/missing Orders row (or a NULLOrderAction) leaves no way to know the fill's side. 
+      // Number(null) would coerce to 0 (= Buy) below — refuse to guess: one flipped side corrupts every pairing after it.
+      const noSide = rows.filter((r) => r["orderAction"] == null);
+      if (noSide.length > 0) {
+        const sample = noSide
+          .slice(0, 3)
+          .map((r) => `ExecutionId=${String(r["execId"])} OrderId=${String(r["OrderId"])}`)
+          .join(", ");
+        throw new Error(
+          `NinjaTraderSource: ${noSide.length} execution(s) have no resolvable ` +
+            `Orders.OrderAction (order row missing or NULL) — cannot determine ` +
+            `trade side. ${sample}`,
+        );
+      }
 
       const execs: RawExecution[] = rows.map((r) => ({
         externalId: String(r["execId"]),
@@ -189,6 +204,7 @@ export class NinjaTraderSource implements TradeSource {
         raw:        r,
       }));
 
+      // Range selects paired trades by entryTime; pairing saw the full history.
       return pairExecutions(execs)
         .map((t) => ({ ...t, source: this.id }))
         .filter((t) => t.entryTime >= range.from && t.entryTime <= range.to);

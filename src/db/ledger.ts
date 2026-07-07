@@ -119,12 +119,13 @@ export interface Ledger {
   insertBacktestRun(run: BacktestRun): void;
   insertTrade(trade: Trade): void;
   /**
-   * Idempotent insert keyed on `external_id`: no-op if a row with the same
-   * `external_id` already exists, otherwise inserts. Imported/external rows must
+   * Idempotent insert keyed on (`source`, `external_id`): no-op if a row with
+   * the same source + external_id already exists, otherwise inserts. NOT an
+   * upsert — an existing row is never updated. Imported/external rows must
    * use this — `insertTrade` does NOT deduplicate (the `external_id` index is
    * non-unique).
    */
-  upsertTradeByExternalId(trade: Trade): void;
+  insertTradeIfAbsent(trade: Trade): void;
   updateTradeExit(
     tradeId: string,
     exit: {
@@ -167,8 +168,8 @@ export function createLedger(db: Database.Database): Ledger {
         @source, @external_id, @created_at)`,
   );
 
-  const findByExternalIdStmt = db.prepare(
-    `SELECT 1 FROM trades WHERE external_id = ? LIMIT 1`,
+  const findBySourceExternalIdStmt = db.prepare(
+    `SELECT 1 FROM trades WHERE source = ? AND external_id = ? LIMIT 1`,
   );
 
   const updateExitStmt = db.prepare(
@@ -190,7 +191,7 @@ export function createLedger(db: Database.Database): Ledger {
 
   const getTradeStmt = db.prepare(`SELECT * FROM trades WHERE trade_id = ?`);
 
-  // Shared insert body — used by both insertTrade and upsertTradeByExternalId.
+  // Shared insert body — used by both insertTrade and insertTradeIfAbsent.
   // Extracted as a closure so the factory (which has no `this`) can share it.
   function insertTradeRow(trade: Trade): void {
     insertTradeStmt.run({
@@ -238,13 +239,13 @@ export function createLedger(db: Database.Database): Ledger {
       insertTradeRow(trade);
     },
 
-    upsertTradeByExternalId(trade: Trade): void {
-      if (trade.externalId === null) {
+    insertTradeIfAbsent(trade: Trade): void {
+      if (trade.source === null || trade.externalId === null) {
         throw new Error(
-          "upsertTradeByExternalId: trade.externalId must be non-null",
+          "insertTradeIfAbsent: trade.source and trade.externalId must be non-null",
         );
       }
-      const existing = findByExternalIdStmt.get(trade.externalId);
+      const existing = findBySourceExternalIdStmt.get(trade.source, trade.externalId);
       if (existing) return;
       insertTradeRow(trade);
     },

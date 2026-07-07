@@ -7,11 +7,11 @@ function toTrade(rt: RawTrade): Trade {
     tradeId: `${rt.source}:${rt.externalId}`,
     runId: null, mode: "live", symbol: rt.symbol, direction: rt.direction,
     entryTime: rt.entryTime, entryPrice: rt.entryPrice,
-    stopPrice: rt.entryPrice, targetPrice: rt.entryPrice,   // unknown for imported trades; NOT NULL placeholders
+    stopPrice: rt.entryPrice, targetPrice: rt.entryPrice,
     exitTime: rt.exitTime, exitPrice: rt.exitPrice,
     exitReason: rt.exitTime === null ? null : "manual",
-    rMultiple: null,                                         // no stop known; win/loss uses realizedPnl
-    zoneRef: null, decisionRef: null,                       // no scoring in this layer
+    rMultiple: null,
+    zoneRef: null, decisionRef: null,
     managementMode: null, barsInTrade: null,
     // mfe reuses the broker realizedPnl for ingested trades. A dedicated
     // realized_pnl column (Task 6) will replace this interim mapping once the
@@ -23,9 +23,8 @@ function toTrade(rt: RawTrade): Trade {
   };
 }
 
-// Pull from a source over a range and upsert into the ledger. Idempotent
-// (dedupe on externalId). Returns counts. Open trades (exitTime null) are
-// skipped in v1 — only completed round-trips are ingested.
+// Pull from a source over a range and insert-if-absent into the ledger. Idempotent (dedupe on (source, externalId)).
+// Returns counts. Open trades (exitTime null) are skipped in v1 — only completed round-trips are ingested.
 export async function ingestTrades(
   source: TradeSource, ledger: Ledger, range: { from: number; to: number },
 ): Promise<{ fetched: number; inserted: number }> {
@@ -34,7 +33,7 @@ export async function ingestTrades(
   let inserted = 0;
   for (const rt of closed) {
     const before = ledger.getTrade(`${rt.source}:${rt.externalId}`);
-    ledger.upsertTradeByExternalId(toTrade(rt));
+    ledger.insertTradeIfAbsent(toTrade(rt));
     if (!before) inserted++;
   }
   return { fetched: raw.length, inserted };

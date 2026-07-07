@@ -17,6 +17,7 @@ const dbPath = path.join(dataPath, "candles.db");
 const db: DatabaseType = new Database(dbPath);
 
 db.pragma("journal_mode = WAL");
+db.pragma("busy_timeout = 5000");
 
 initializeSchema(db);
 

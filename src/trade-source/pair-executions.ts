@@ -2,12 +2,14 @@ import type { RawExecution, RawTrade } from "./types.js";
 
 /**
  * Folds a flat list of broker fills (RawExecution[]) into round-trip trades
- * (RawTrade[]) using per-symbol FIFO position-segment tracking.
+ * (RawTrade[]) using per-(account, symbol) FIFO position-segment tracking.
  *
  * Algorithm
  * ---------
- * - Fills are grouped by symbol; each symbol runs an independent state machine.
- * - Within a symbol, fills are stable-sorted by time ascending; same-second
+ * - Fills are grouped by (account, symbol) — a position is a per-account
+ *   reality, so fills from different accounts must never cross-pair. Fills
+ *   with a null account group together under one stream.
+ * - Within a stream, fills are stable-sorted by time ascending; same-second
  *   ties retain their original input order (Array.prototype.sort is stable).
  * - Running signed position: buy = +quantity, sell = −quantity.
  *
@@ -31,7 +33,7 @@ import type { RawExecution, RawTrade } from "./types.js";
  * ------------
  * Trades are returned sorted by entryTime ascending.  Same-entryTime ties are
  * broken by the original input-array index of the trade's opening fill (stable
- * tiebreak across all symbols).  Tests may rely on this ordering.
+ * tiebreak across all streams).  Tests may rely on this ordering.
  *
  * Pure: no I/O, no Date, no mutation of the input array.
  *
@@ -123,28 +125,31 @@ function closeSegment(seg: OpenSegment, exitTime: number | null): RawTrade {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function pairExecutions(execs: RawExecution[]): RawTrade[] {
-  // Group fills by symbol, tagging each with its original input index.
-  const bySymbol = new Map<string, Array<{ fill: RawExecution; origIdx: number }>>();
+  // Group fills into independent pairing streams by (account, symbol), tagging
+  // each with its original input index. \x1F (unit separator) keeps the
+  // composite key collision-free for any realistic account/symbol name.
+  const byStream = new Map<string, Array<{ fill: RawExecution; origIdx: number }>>();
   for (let i = 0; i < execs.length; i++) {
     const fill = execs[i];
-    let bucket = bySymbol.get(fill.symbol);
+    const key = `${fill.account ?? ""}\x1F${fill.symbol}`;
+    let bucket = byStream.get(key);
     if (bucket === undefined) {
       bucket = [];
-      bySymbol.set(fill.symbol, bucket);
+      byStream.set(key, bucket);
     }
     bucket.push({ fill, origIdx: i });
   }
 
-  // Stable-sort each symbol's bucket by fill time.
+  // Stable-sort each stream's bucket by fill time.
   // Array.prototype.sort is stable per the ECMAScript spec (ES2019+) and all
   // modern engines — same-second ties retain their original input order.
-  for (const bucket of bySymbol.values()) {
+  for (const bucket of byStream.values()) {
     bucket.sort((a, b) => a.fill.time - b.fill.time);
   }
 
   const emitted: Array<{ trade: RawTrade; openOrdinal: number }> = [];
 
-  for (const bucket of bySymbol.values()) {
+  for (const bucket of byStream.values()) {
     let position = 0;
     let seg: OpenSegment | null = null;
 
