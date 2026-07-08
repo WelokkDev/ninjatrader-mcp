@@ -96,7 +96,7 @@ export function registerRunBacktest(server: McpServer): void {
 
   server.tool(
     "run_backtest",
-    "Walk the decision engine over a [rangeStart, rangeEnd] window of 5m closes, open a trade on each 'yes' (entry = next-bar open), and simulate the exit under each requested management mode (fixed / trailing / constrained) over the SAME entry set. Writes trades + every decision (the stall funnel) to the ledger and returns a per-mode summary (nTrades, winRate, sumR, avgR/expectancy, avgMfe, ambiguousExitTrades). Read-through over the 5m cache — call get_candles first.",
+    "Walk the decision engine over a [rangeStart, rangeEnd] window of 5m closes, open a trade on each 'yes' (entry = next-bar open), and simulate the exit under each requested management mode (fixed / trailing / constrained) over the SAME entry set. Writes trades + every decision (the stall funnel) to the ledger and returns a per-mode summary (nTrades, winRate, sumR, avgR/expectancy, avgMfe, ambiguousExitTrades). Read-through over the 5m cache — call get_candles first. A backtest window is a bounded range: resolve rangeStart/rangeEnd via resolve_session_days (it returns exact session-day unix bounds) and confirm the resolved dates with the operator before running.",
     {
       symbol: z
         .string()

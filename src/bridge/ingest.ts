@@ -1,3 +1,4 @@
+import type { Database } from "better-sqlite3";
 import db from "../db/connection.js";
 import { aggregateCandles } from "../core/aggregator.js";
 import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
@@ -8,6 +9,7 @@ import {
 } from "../core/sessions/session-day.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
+import type { CandlesResponseMessage } from "./protocol.js";
 
 // TFs that are aggregated from 15m on the 15m ingest path. 5m bars do
 // not feed this chain (5m is a parallel raw stream).
@@ -36,6 +38,8 @@ export function ingestCandles(
   symbol: string,
   timeframe: Timeframe,
   candles: Candle[],
+  // Injectable for tests; production callers use the shared connection.
+  database: Database = db,
 ): IngestResult {
   if (!RAW_TIMEFRAMES.includes(timeframe)) {
     throw new Error(
@@ -81,7 +85,7 @@ export function ingestCandles(
 
   if (inSession.length === 0) return { inserted: 0, aggregated };
 
-  const insertStmt = db.prepare(
+  const insertStmt = database.prepare(
     `INSERT OR REPLACE INTO candles
        (symbol, timeframe, timestamp, open, high, low, close, volume)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -91,7 +95,7 @@ export function ingestCandles(
   // 15m bars within a session-day's (startUnix, endUnix] range for
   // re-aggregation. Half-open in SQL maps to `> ? AND <= ?` per the
   // session-day boundary convention
-  const selectSessionStmt = db.prepare(
+  const selectSessionStmt = database.prepare(
     `SELECT timestamp, open, high, low, close, volume
        FROM candles
       WHERE symbol = ? AND timeframe = '15m'
@@ -99,7 +103,7 @@ export function ingestCandles(
       ORDER BY timestamp ASC`,
   );
 
-  const tx = db.transaction(() => {
+  const tx = database.transaction(() => {
     for (const { candle: c } of inSession) {
       insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
     }
@@ -134,6 +138,40 @@ export function ingestCandles(
   tx();
 
   return { inserted: inSession.length, aggregated };
+}
+
+/**
+ * Global ingest for candles_response messages — the single owner of
+ * historical-candle persistence (B1). Runs on EVERY candles_response,
+ * whether or not a request is still pending: a response that arrives
+ * after its request timed out (NT8 downloading history from the
+ * provider) still lands in the cache, so the next query reclassifies
+ * those days complete instead of refetching from zero. Idempotent via
+ * INSERT OR REPLACE on PK (symbol, timeframe, timestamp).
+ */
+export function createCandlesResponseHandler(database: Database = db) {
+  return (msg: CandlesResponseMessage): void => {
+    try {
+      const result = ingestCandles(
+        msg.symbol,
+        msg.timeframe as Timeframe,
+        msg.candles,
+        database,
+      );
+      console.error(
+        `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} agg=${JSON.stringify(result.aggregated)}`,
+      );
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[ingest] candles_response ingest failed for ${msg.symbol} ${msg.timeframe}: ${m}`,
+      );
+    }
+  };
+}
+
+export function registerCandlesResponseHandler(): void {
+  onMessage("candles_response", createCandlesResponseHandler());
 }
 
 export function registerLiveIngestHandler(): void {

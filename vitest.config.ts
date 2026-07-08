@@ -9,6 +9,8 @@ export default defineConfig({
       "src/lab/**/*.test.ts",
       "src/adapters/**/*.test.ts",
       "src/tools/**/*.test.ts",
+      "src/core/**/*.test.ts",
+      "src/bridge/**/*.test.ts",
     ],
     // Default DB path used by importing src/db/connection.ts at module load.
     // Tests inject in-memory DBs into handler factories where they actually

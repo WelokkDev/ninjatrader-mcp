@@ -106,7 +106,7 @@ export class ConnectionManager {
         if (this.pending.delete(id)) {
           reject(
             new Error(
-              `Request ${type} (${id}) timed out after ${timeoutMs}ms — is NinjaTrader running?`,
+              `Request ${type} (${id}) timed out after ${timeoutMs}ms — NT8 may still be downloading history; it will heal on the next query.`,
             ),
           );
         }

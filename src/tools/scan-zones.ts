@@ -375,7 +375,7 @@ export function registerScanZones(server: McpServer): void {
 
   server.tool(
     "scan_zones",
-    "Run the configured detection pipeline on cached candles for a symbol/timeframe/session-day range. Returns matching zones with their metadata. Read-only over the cache — call get_candles first to populate it.",
+    "Run the configured detection pipeline on cached candles for a symbol/timeframe/session-day range. Returns matching zones with their metadata. Read-only over the cache — call get_candles first to populate it. For a bounded/specific date range, resolve and confirm the dates via resolve_session_days before scanning; for exploratory scans, prefer padding the range over precision.",
     {
       symbol: z
         .string()

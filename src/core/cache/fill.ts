@@ -1,5 +1,5 @@
 import type { Database } from "better-sqlite3";
-import type { Candle, Timeframe } from "../types.js";
+import type { Timeframe } from "../types.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDaysOverlapping } from "../sessions/session-day.js";
 import { validateSessionDay } from "./validator.js";
@@ -43,52 +43,45 @@ export interface FetchWindow {
 }
 
 /**
- * Groups consecutive non-complete session-days into contiguous fetch
- * windows. Complete days act as separators — a complete day between
- * two incomplete days produces two windows, not one merged window.
+ * One fetch window per non-complete session-day — deliberately NOT
+ * merged (D-B2). A fresh month becomes ~22 small, sub-timeout,
+ * independently-healable requests instead of one mega-request that blows
+ * the bridge timeout when NT8 must first download history from the
+ * provider; one slow or failed day no longer poisons the whole range.
  *
  * Non-session calendar days (Saturdays, etc.) are already absent from
  * the input list because `sessionDaysOverlapping` only yields valid
- * session-days. The maintenance gap between adjacent session-days
- * (17:00→18:00 ET on CME ETH) is absorbed into the merged window —
- * NT8 returns no bars for that hour anyway.
+ * session-days.
  */
 export function planFetchWindows(
   classifications: DayClassification[],
 ): FetchWindow[] {
   const windows: FetchWindow[] = [];
-  let current: FetchWindow | null = null;
-
   for (const { day, class: cls } of classifications) {
-    const needsFetch = cls !== "complete";
-    if (needsFetch) {
-      if (current === null) {
-        current = {
-          startUnix: day.startUnix,
-          endUnix: day.endUnix,
-          labels: [day.label],
-        };
-      } else {
-        current.endUnix = day.endUnix;
-        current.labels.push(day.label);
-      }
-    } else if (current !== null) {
-      windows.push(current);
-      current = null;
+    if (cls !== "complete") {
+      windows.push({
+        startUnix: day.startUnix,
+        endUnix: day.endUnix,
+        labels: [day.label],
+      });
     }
   }
-  if (current !== null) windows.push(current);
   return windows;
 }
 
+// Candle fetches get a wider timeout than the 10s bridge default: a cold
+// window can force NT8 to download history from the data provider first.
+// Even a fetch that outlives this timeout is not wasted — the late
+// candles_response is ingested by the global handler in bridge/ingest.ts.
+export const CANDLE_FETCH_TIMEOUT_MS = 30_000;
+
 export interface EnsureCachedDeps {
   isConnected: () => boolean;
-  request: (type: string, payload: Record<string, unknown>) => Promise<unknown>;
-  ingestCandles: (
-    symbol: string,
-    timeframe: Timeframe,
-    candles: Candle[],
-  ) => unknown;
+  request: (
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => Promise<unknown>;
 }
 
 export interface EnsureCachedResult {
@@ -104,9 +97,11 @@ export interface EnsureCachedResult {
 }
 
 /**
- * Validate → plan → fetch → ingest orchestrator for the raw timeframe
- * that backs a `get_candles` request. Called BEFORE the terminal SELECT
- * so the cache reflects every requested session-day at the raw TF.
+ * Validate → plan → fetch orchestrator for the raw timeframe that backs
+ * a `get_candles` request. Called BEFORE the terminal SELECT so the
+ * cache reflects every requested session-day at the raw TF. Persistence
+ * itself lives in the global candles_response handler (bridge/ingest.ts);
+ * this loop only tracks which windows succeeded or failed.
  *
  * Day-aligned fetches: regardless of the user's intra-day window, the
  * fetch always covers `(sessionDay.startUnix, sessionDay.endUnix]` for
@@ -159,23 +154,23 @@ export async function ensureCached(
 
   for (const window of windows) {
     try {
-      const response = (await deps.request("request_candles", {
-        symbol,
-        timeframe: rawTimeframe,
-        from: window.startUnix,
-        to: window.endUnix,
-        tradingHoursTemplate: template.name,
-      })) as { candles?: Candle[] };
-
-      const fetched: Candle[] = (response.candles ?? []).map((c) => ({
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume,
-      }));
-      deps.ingestCandles(symbol, rawTimeframe, fetched);
+      // Pure success/fail signal. Ingest is owned by the global
+      // candles_response handler (bridge/ingest.ts), which runs
+      // synchronously inside the bridge's message dispatch — the cache is
+      // already populated by the time this await resumes. On timeout the
+      // request rejects, but a late response still heals via that same
+      // handler, so the next query sees those days complete.
+      await deps.request(
+        "request_candles",
+        {
+          symbol,
+          timeframe: rawTimeframe,
+          from: window.startUnix,
+          to: window.endUnix,
+          tradingHoursTemplate: template.name,
+        },
+        CANDLE_FETCH_TIMEOUT_MS,
+      );
       result.windowsFetched++;
       result.fetchedDays.push(...window.labels);
     } catch (err) {

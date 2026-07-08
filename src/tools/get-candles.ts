@@ -4,15 +4,17 @@ import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
-import { sessionDayRange } from "../core/sessions/session-day.js";
+import {
+  sessionDayRange,
+  sessionDaysOverlapping,
+} from "../core/sessions/session-day.js";
 import type { Candle, Timeframe } from "../core/types.js";
-import { validateSessionDay } from "../core/cache/validator.js";
+import { expectedBarCount, validateSessionDay } from "../core/cache/validator.js";
 import { ensureCached } from "../core/cache/fill.js";
 import {
   isConnected as defaultIsConnected,
   request as defaultRequest,
 } from "../bridge/index.js";
-import { ingestCandles as defaultIngestCandles } from "../bridge/ingest.js";
 
 // Session-day query semantics: startUnix is exclusive, endUnix is inclusive
 const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
@@ -39,7 +41,6 @@ export interface GetCandlesDeps {
   db: Database;
   isConnected: () => boolean;
   request: typeof defaultRequest;
-  ingestCandles: typeof defaultIngestCandles;
 }
 
 type ToolResult = {
@@ -167,6 +168,22 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       };
     }
 
+    const requestedDays = sessionDaysOverlapping(startTs, endTs, config.session);
+    const matched = requestedDays.reduce(
+      (acc, day) => acc + expectedBarCount(day, timeframe),
+      0,
+    );
+    if (matched > limit) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. Narrow the range or pass limit >= ${matched}.`,
+          },
+        ],
+      };
+    }
+
     // Fill any gaps in the cache at the raw TF that backs this request.
     // Day-aligned: any session-day that is empty, partial, or in-progress
     // triggers a fetch covering the entire session-day window.
@@ -182,7 +199,6 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       {
         isConnected: deps.isConnected,
         request: deps.request,
-        ingestCandles: deps.ingestCandles,
       },
       nowUnix,
     );
@@ -236,6 +252,10 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
             symbol,
             timeframe,
             count: rows.length,
+            // Expected bar count for the full range from session geometry —
+            // count < matched means bars are genuinely absent (gap/holiday),
+            // never silently clipped.
+            matched,
             candles: rows,
             validation,
             ...(warning && { warning }),
@@ -251,12 +271,11 @@ export function registerGetCandles(server: McpServer): void {
     db: defaultDb,
     isConnected: defaultIsConnected,
     request: defaultRequest,
-    ingestCandles: defaultIngestCandles,
   });
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
@@ -276,7 +295,9 @@ export function registerGetCandles(server: McpServer): void {
         .number()
         .optional()
         .default(500)
-        .describe("Maximum number of candles to return (default 500)"),
+        .describe(
+          "Maximum number of candles to return (default 500). The tool refuses fail-closed when the range's expected bar count exceeds this; size it up front with resolve_session_days.barCountEstimate.",
+        ),
     },
     handler,
   );

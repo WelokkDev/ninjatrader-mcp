@@ -158,6 +158,15 @@ export function sessionDayRange(
   const closeMo = parseInt(m[2]);
   const closeD = parseInt(m[3]);
 
+  const rt = new Date(Date.UTC(closeY, closeMo - 1, closeD));
+  if (
+    rt.getUTCFullYear() !== closeY ||
+    rt.getUTCMonth() !== closeMo - 1 ||
+    rt.getUTCDate() !== closeD
+  ) {
+    throw new Error(`impossible calendar date: "${label}"`);
+  }
+
   // Determine the close-date weekday in the template's timezone. We probe
   // at noon local time on the close date to avoid any DST edge weirdness.
   const closeNoonUnix = tzInstantToUnix(closeY, closeMo, closeD, 12, 0, 0, template.timezone);

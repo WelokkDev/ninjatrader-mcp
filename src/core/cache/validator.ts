@@ -12,6 +12,22 @@ const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "4h": 14400,
 };
 
+/**
+ * Expected bar count for one (session-day, timeframe) from pure session
+ * geometry: full periods within (startUnix, endUnix] plus a trailing stub
+ * bar when the period doesn't evenly divide the session duration. Shared
+ * by validateSessionDay, the get_candles fail-closed gate, and
+ * resolve_session_days' barCountEstimate so all three speak the same geometry.
+ */
+export function expectedBarCount(
+  sd: Pick<SessionDay, "startUnix" | "endUnix">,
+  tf: Exclude<Timeframe, "1d">,
+): number {
+  const period = SECONDS_PER_TIMEFRAME[tf];
+  const duration = sd.endUnix - sd.startUnix;
+  return Math.floor(duration / period) + (duration % period !== 0 ? 1 : 0);
+}
+
 export type ValidationStatus = "ok" | "mismatch" | "skipped";
 
 export interface ValidationResult {
@@ -86,8 +102,9 @@ export function validateSessionDay(
 
   const periodSeconds = SECONDS_PER_TIMEFRAME[timeframe];
   const duration = sessionDay.endUnix - sessionDay.startUnix;
-  const fullBarCount = Math.floor(duration / periodSeconds);
   const hasStub = duration % periodSeconds !== 0;
+  const fullBarCount =
+    expectedBarCount(sessionDay, timeframe) - (hasStub ? 1 : 0);
 
   const expected: number[] = [];
   for (let i = 1; i <= fullBarCount; i++) {

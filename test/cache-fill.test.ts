@@ -11,7 +11,7 @@ import {
 import { CME_US_INDEX_FUTURES_ETH } from "../src/core/sessions/templates.js";
 import { sessionDayRange } from "../src/core/sessions/session-day.js";
 import type { SessionDay } from "../src/core/sessions/types.js";
-import type { Candle, Timeframe } from "../src/core/types.js";
+import type { Timeframe } from "../src/core/types.js";
 
 const NOW_FUTURE = 2_000_000_000;
 
@@ -98,40 +98,35 @@ describe("planFetchWindows", () => {
     expect(w).toEqual([]);
   });
 
-  it("all empty → one merged window", () => {
+  it("all empty → one window per day (per-day fetches, no merging)", () => {
     const w = planFetchWindows([c(d1, "empty"), c(d2, "empty"), c(d3, "empty")]);
-    expect(w).toHaveLength(1);
+    expect(w).toHaveLength(3);
+    expect(w.map((x) => x.labels)).toEqual([[d1.label], [d2.label], [d3.label]]);
     expect(w[0].startUnix).toBe(d1.startUnix);
-    expect(w[0].endUnix).toBe(d3.endUnix);
-    expect(w[0].labels).toEqual([d1.label, d2.label, d3.label]);
+    expect(w[0].endUnix).toBe(d1.endUnix);
   });
 
-  it("front gap only → one window at front", () => {
+  it("front gap only → one window per missing front day", () => {
     const w = planFetchWindows([c(d1, "empty"), c(d2, "empty"), c(d3, "complete"), c(d4, "complete")]);
-    expect(w).toHaveLength(1);
-    expect(w[0].labels).toEqual([d1.label, d2.label]);
+    expect(w.map((x) => x.labels)).toEqual([[d1.label], [d2.label]]);
   });
 
-  it("back gap only → one window at back", () => {
+  it("back gap only → one window per missing back day", () => {
     const w = planFetchWindows([c(d1, "complete"), c(d2, "complete"), c(d3, "empty"), c(d4, "empty")]);
-    expect(w).toHaveLength(1);
-    expect(w[0].labels).toEqual([d3.label, d4.label]);
+    expect(w.map((x) => x.labels)).toEqual([[d3.label], [d4.label]]);
   });
 
-  it("middle gap (complete around empty) → one window for the gap", () => {
+  it("middle gap (complete around empty) → one window per gap day", () => {
     const w = planFetchWindows([c(d1, "complete"), c(d2, "empty"), c(d3, "empty"), c(d4, "complete")]);
-    expect(w).toHaveLength(1);
-    expect(w[0].labels).toEqual([d2.label, d3.label]);
+    expect(w.map((x) => x.labels)).toEqual([[d2.label], [d3.label]]);
   });
 
-  it("non-contiguous gaps → multiple windows", () => {
+  it("non-contiguous gaps → one window per missing day", () => {
     const w = planFetchWindows([
       c(d1, "empty"), c(d2, "complete"), c(d3, "complete"),
       c(d4, "empty"), c(d5, "empty"),
     ]);
-    expect(w).toHaveLength(2);
-    expect(w[0].labels).toEqual([d1.label]);
-    expect(w[1].labels).toEqual([d4.label, d5.label]);
+    expect(w.map((x) => x.labels)).toEqual([[d1.label], [d4.label], [d5.label]]);
   });
 
   it("partial day → fetched (overwrites on re-ingest)", () => {
@@ -168,7 +163,6 @@ describe("ensureCached", () => {
       {
         isConnected: () => true,
         request: async () => { requested = true; return { candles: [] }; },
-        ingestCandles: () => { throw new Error("unreachable"); },
       },
       NOW_FUTURE,
     );
@@ -179,13 +173,12 @@ describe("ensureCached", () => {
     expect(result.classifications.every((c) => c.class === "complete")).toBe(true);
   });
 
-  it("fetches the missing window when cache has a gap", async () => {
+  it("fetches each missing day when cache has a gap", async () => {
     const db = makeDb();
     seedFull(db, "NQ", "15m", d1);
     // d2 and d3 are empty
 
     const requests: Array<Record<string, unknown>> = [];
-    const ingested: Array<{ tf: Timeframe; count: number }> = [];
     const result = await ensureCached(
       db, "NQ", d1.startUnix, d3.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
       {
@@ -194,21 +187,18 @@ describe("ensureCached", () => {
           requests.push(payload as Record<string, unknown>);
           return { candles: [] };
         },
-        ingestCandles: (_sym, tf, candles) => {
-          ingested.push({ tf, count: candles.length });
-        },
       },
       NOW_FUTURE,
     );
 
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(requests[0].timeframe).toBe("15m");
     expect(requests[0].from).toBe(d2.startUnix);
-    expect(requests[0].to).toBe(d3.endUnix);
+    expect(requests[0].to).toBe(d2.endUnix);
+    expect(requests[1].from).toBe(d3.startUnix);
+    expect(requests[1].to).toBe(d3.endUnix);
     expect(requests[0].tradingHoursTemplate).toBe(CME_US_INDEX_FUTURES_ETH.name);
-    expect(ingested).toHaveLength(1);
-    expect(ingested[0].tf).toBe("15m");
-    expect(result.windowsFetched).toBe(1);
+    expect(result.windowsFetched).toBe(2);
     expect(result.fetchedDays).toEqual([d2.label, d3.label]);
   });
 
@@ -226,7 +216,6 @@ describe("ensureCached", () => {
           requests.push(payload as Record<string, unknown>);
           return { candles: [] };
         },
-        ingestCandles: () => undefined,
       },
       NOW_FUTURE,
     );
@@ -246,7 +235,6 @@ describe("ensureCached", () => {
       {
         isConnected: () => false,
         request: async () => { requested = true; return { candles: [] }; },
-        ingestCandles: () => { throw new Error("unreachable"); },
       },
       NOW_FUTURE,
     );
@@ -275,7 +263,6 @@ describe("ensureCached", () => {
           requests.push(payload as Record<string, unknown>);
           return { candles: [] };
         },
-        ingestCandles: () => undefined,
       },
       nowMidD3,
     );
@@ -299,7 +286,6 @@ describe("ensureCached", () => {
           requests.push(payload as Record<string, unknown>);
           return { candles: [] };
         },
-        ingestCandles: () => undefined,
       },
       NOW_FUTURE,
     );
@@ -316,7 +302,6 @@ describe("ensureCached", () => {
       {
         isConnected: () => true,
         request: async () => { throw new Error("bridge timeout"); },
-        ingestCandles: () => undefined,
       },
       NOW_FUTURE,
     );
