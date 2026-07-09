@@ -105,6 +105,29 @@ export interface BarCloseMessage {
   candle: CandlePayload;
 }
 
+export interface RequestSessionCalendarMessage {
+  v: 1;
+  id: string;
+  type: "request_session_calendar";
+  // Internal session-template name (e.g. "cme_us_index_futures_eth").
+  tradingHoursTemplate: string;
+}
+
+export interface SessionCalendarResponseMessage {
+  v: 1;
+  id: string;
+  type: "session_calendar_response";
+  // NT8 TradingHours.Holidays — fully-closed dates (YYYY-MM-DD).
+  holidays: Array<{ date: string; description: string }>;
+  // NT8 TradingHours.PartialHolidays — dates only; NT8 exposes no times.
+  partialHolidays: Array<{
+    date: string;
+    isEarlyClose: boolean;
+    isLateBegin: boolean;
+    description: string;
+  }>;
+}
+
 export interface ErrorMessage {
   v: 1;
   id: string;
@@ -117,13 +140,15 @@ export type InboundMessage =
   | HeartbeatMessage
   | CandlesResponseMessage
   | BarCloseMessage
+  | SessionCalendarResponseMessage
   | ErrorMessage;
 export type OutboundMessage =
   | HelloAckMessage
   | DrawZoneMessage
   | DrawMessage
   | ClearZonesMessage
-  | RequestCandlesMessage;
+  | RequestCandlesMessage
+  | RequestSessionCalendarMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =
@@ -224,6 +249,44 @@ export function parseMessage(raw: string): ParseResult {
           symbol: obj.symbol,
           timeframe: obj.timeframe,
           candle: obj.candle,
+        },
+      };
+    }
+    case "session_calendar_response": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "session_calendar_response: missing id" };
+      }
+      const isHoliday = (v: unknown): v is { date: string; description: string } => {
+        if (!v || typeof v !== "object") return false;
+        const h = v as Record<string, unknown>;
+        return typeof h.date === "string" && typeof h.description === "string";
+      };
+      const isPartial = (
+        v: unknown,
+      ): v is { date: string; isEarlyClose: boolean; isLateBegin: boolean; description: string } => {
+        if (!v || typeof v !== "object") return false;
+        const p = v as Record<string, unknown>;
+        return (
+          typeof p.date === "string" &&
+          typeof p.isEarlyClose === "boolean" &&
+          typeof p.isLateBegin === "boolean" &&
+          typeof p.description === "string"
+        );
+      };
+      if (!Array.isArray(obj.holidays) || !obj.holidays.every(isHoliday)) {
+        return { ok: false, reason: "session_calendar_response: bad holidays" };
+      }
+      if (!Array.isArray(obj.partialHolidays) || !obj.partialHolidays.every(isPartial)) {
+        return { ok: false, reason: "session_calendar_response: bad partialHolidays" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "session_calendar_response",
+          id: obj.id,
+          holidays: obj.holidays,
+          partialHolidays: obj.partialHolidays,
         },
       };
     }

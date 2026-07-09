@@ -83,6 +83,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
+		// Raw timeframes this bridge will serve via request_candles. Keep in
+		// sync with RAW_TIMEFRAMES in the server's src/core/constants.ts.
+		private static readonly HashSet<string> ALLOWED_RAW_TIMEFRAMES =
+			new HashSet<string>(StringComparer.Ordinal) { "15s", "5m", "15m" };
+
 		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
 			new Dictionary<string, string>(StringComparer.Ordinal)
 		{
@@ -607,6 +612,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 					HandleRequestCandles(obj);
 					break;
 
+				case "request_session_calendar":
+					HandleRequestSessionCalendar(obj);
+					break;
+
 				default:
 					Log("unknown message type: " + type);
 					break;
@@ -773,6 +782,91 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
+		// Serialize a template's NT8-declared holidays (fully closed) and
+		// partial holidays (early close / late begin). NT8 exposes dates
+		// only, never times — the server observes those from real fetches.
+		private void HandleRequestSessionCalendar(IDictionary<string, object> obj)
+		{
+			var id                   = GetString(obj, "id");
+			var tradingHoursTemplate = GetString(obj, "tradingHoursTemplate");
+
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_session_calendar missing id; dropping");
+				return;
+			}
+			if (string.IsNullOrEmpty(tradingHoursTemplate))
+			{
+				SendErrorResponse(id, "request_session_calendar missing required field: tradingHoursTemplate");
+				return;
+			}
+
+			string nt8TemplateName;
+			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
+			{
+				SendErrorResponse(id, "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
+					+ "'. Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.");
+				return;
+			}
+
+			TradingHours nt8TradingHours;
+			try
+			{
+				nt8TradingHours = TradingHours.Get(nt8TemplateName);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message);
+				return;
+			}
+			if (nt8TradingHours == null)
+			{
+				SendErrorResponse(id, "NT8 has no TradingHours template named '" + nt8TemplateName + "'");
+				return;
+			}
+
+			var holidays = new List<object>();
+			if (nt8TradingHours.Holidays != null)
+			{
+				foreach (var kvp in nt8TradingHours.Holidays)
+				{
+					holidays.Add(new Dictionary<string, object>
+					{
+						{ "date",        kvp.Key.ToString("yyyy-MM-dd") },
+						{ "description", kvp.Value ?? "" },
+					});
+				}
+			}
+
+			var partialHolidays = new List<object>();
+			if (nt8TradingHours.PartialHolidays != null)
+			{
+				foreach (var kvp in nt8TradingHours.PartialHolidays)
+				{
+					var partial = kvp.Value;
+					partialHolidays.Add(new Dictionary<string, object>
+					{
+						{ "date",         kvp.Key.ToString("yyyy-MM-dd") },
+						{ "isEarlyClose", partial != null && partial.IsEarlyClose },
+						{ "isLateBegin",  partial != null && partial.IsLateBegin },
+						{ "description",  partial != null && partial.Description != null ? partial.Description : "" },
+					});
+				}
+			}
+
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",               1 },
+				{ "id",              id },
+				{ "type",            "session_calendar_response" },
+				{ "holidays",        holidays },
+				{ "partialHolidays", partialHolidays },
+			};
+			SendFireAndForget(Json.Serialize(payload),
+				"session_calendar_response id=" + id
+				+ " holidays=" + holidays.Count + " partial=" + partialHolidays.Count);
+		}
+
 		private void HandleRequestCandles(IDictionary<string, object> obj)
 		{
 			var id                   = GetString(obj, "id");
@@ -802,23 +896,30 @@ namespace NinjaTrader.NinjaScript.AddOns
 			BarsPeriodType barsPeriodType;
 			int            barsPeriodValue;
 			string         resolvedTimeframe;
-			if (string.IsNullOrEmpty(timeframe) || timeframe == "15m")
+			if (string.IsNullOrEmpty(timeframe))
 			{
 				barsPeriodType    = BarsPeriodType.Minute;
 				barsPeriodValue   = 15;
 				resolvedTimeframe = "15m";
 			}
-			else if (timeframe == "5m")
+			else if (!ALLOWED_RAW_TIMEFRAMES.Contains(timeframe))
 			{
-				barsPeriodType    = BarsPeriodType.Minute;
-				barsPeriodValue   = 5;
-				resolvedTimeframe = "5m";
+				SendErrorResponse(id, "Unsupported timeframe for request_candles: '"
+					+ timeframe + "'. Supported raw TFs: " + string.Join(", ", ALLOWED_RAW_TIMEFRAMES) + ".");
+				return;
 			}
 			else
 			{
-				SendErrorResponse(id, "Unsupported timeframe for request_candles: '"
-					+ timeframe + "'. Supported raw TFs: 5m, 15m.");
-				return;
+				var unit = timeframe[timeframe.Length - 1];
+				int n;
+				if (!int.TryParse(timeframe.Substring(0, timeframe.Length - 1), out n) || n <= 0)
+				{
+					SendErrorResponse(id, "Malformed timeframe for request_candles: '" + timeframe + "'");
+					return;
+				}
+				barsPeriodType    = unit == 's' ? BarsPeriodType.Second : BarsPeriodType.Minute;
+				barsPeriodValue   = n;
+				resolvedTimeframe = timeframe;
 			}
 
 			string nt8TemplateName;

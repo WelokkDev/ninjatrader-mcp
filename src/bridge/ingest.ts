@@ -7,6 +7,7 @@ import {
   sessionDayContaining,
   sessionDayRange,
 } from "../core/sessions/session-day.js";
+import { loadCalendar } from "../core/sessions/calendar.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import type { CandlesResponseMessage } from "./protocol.js";
@@ -65,6 +66,9 @@ export function ingestCandles(
   if (valid.length === 0) return { inserted: 0, aggregated };
 
   const config = getInstrumentConfig(symbol);
+  // Bars after an early close are out-of-session and dropped; the
+  // derived-TF re-aggregation below stays holiday-correct.
+  const calendar = loadCalendar(database, config.session.name);
 
   // Map each incoming bar to its session-day. Bars outside any session-day
   // (in maintenance breaks, weekend gaps, or pre-session) are dropped with
@@ -72,7 +76,7 @@ export function ingestCandles(
   const inSession: Array<{ candle: Candle; sessionDayLabel: string }> = [];
   const affectedSessionDays = new Set<string>();
   for (const c of valid) {
-    const sd = sessionDayContaining(c.timestamp, config.session);
+    const sd = sessionDayContaining(c.timestamp, config.session, calendar);
     if (sd === null) {
       console.error(
         `[ingest] dropping bar for ${symbol} ${timeframe} at unix=${c.timestamp} — not in any session-day for template "${config.session.name}"`,
@@ -113,7 +117,7 @@ export function ingestCandles(
     if (timeframe !== "15m") return;
 
     for (const label of affectedSessionDays) {
-      const range = sessionDayRange(label, config.session);
+      const range = sessionDayRange(label, config.session, calendar);
       const sessionCandles = selectSessionStmt.all(
         symbol,
         range.startUnix,
@@ -126,6 +130,7 @@ export function ingestCandles(
           session: config.session,
           alignment: config.alignment,
           timestampConvention: config.timestampConvention,
+          calendar,
         });
         for (const a of aggCandles) {
           insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume);
@@ -142,7 +147,7 @@ export function ingestCandles(
 
 /**
  * Global ingest for candles_response messages — the single owner of
- * historical-candle persistence (B1). Runs on EVERY candles_response,
+ * historical-candle persistence. Runs on EVERY candles_response,
  * whether or not a request is still pending: a response that arrives
  * after its request timed out (NT8 downloading history from the
  * provider) still lands in the cache, so the next query reclassifies

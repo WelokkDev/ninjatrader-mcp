@@ -9,6 +9,7 @@ import {
   type DayClassification,
 } from "../src/core/cache/fill.js";
 import { CME_US_INDEX_FUTURES_ETH } from "../src/core/sessions/templates.js";
+import { loadCalendar } from "../src/core/sessions/calendar.js";
 import { sessionDayRange } from "../src/core/sessions/session-day.js";
 import type { SessionDay } from "../src/core/sessions/types.js";
 import type { Timeframe } from "../src/core/types.js";
@@ -309,5 +310,143 @@ describe("ensureCached", () => {
     expect(result.windowsFetched).toBe(0);
     expect(result.windowsFailed).toBe(1);
     expect(result.errors[0].message).toBe("bridge timeout");
+  });
+});
+
+describe("calendar-aware ensureCached (holidays + observed close)", () => {
+  const d1 = dayFor("2026-05-04");
+  const d2 = dayFor("2026-05-05");
+  const d3 = dayFor("2026-05-06");
+  const TPL = CME_US_INDEX_FUTURES_ETH.name;
+
+  function calFor(db: DatabaseType) {
+    // Fresh read of the session_calendar table (plus bootstrap seed).
+    return loadCalendar(db, TPL);
+  }
+
+  it("closed days vanish from enumeration — never classified, never fetched", async () => {
+    const db = makeDb();
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-05', 'closed', 'nt8')`,
+    ).run(TPL);
+    seedFull(db, "NQ", "15m", d1);
+    seedFull(db, "NQ", "15m", d3);
+
+    const requests: unknown[] = [];
+    const result = await ensureCached(
+      db, "NQ", d1.startUnix, d3.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
+      { isConnected: () => true, request: async (_t, p) => { requests.push(p); return {}; } },
+      NOW_FUTURE,
+      calFor(db),
+    );
+    expect(requests).toHaveLength(0);
+    expect(result.classifications.map((c) => c.day.label)).toEqual(["2026-05-04", "2026-05-06"]);
+    expect(result.windowsFailed).toBe(0);
+  });
+
+  it("a declared early-close day with a recorded time classifies complete (refetch loop ends)", async () => {
+    const db = makeDb();
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, close_time, source) VALUES (?, '2026-05-05', 'modified', '13:00', 'nt8-observed')`,
+    ).run(TPL);
+    const cal = calFor(db);
+    const adjusted = { label: "2026-05-05", ...sessionDayRange("2026-05-05", CME_US_INDEX_FUTURES_ETH, cal) };
+    seedFull(db, "NQ", "15m", d1);
+    seedFull(db, "NQ", "15m", adjusted); // 76 bars ending 13:00 EDT
+
+    let requested = false;
+    const result = await ensureCached(
+      db, "NQ", d1.startUnix, adjusted.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
+      { isConnected: () => true, request: async () => { requested = true; return {}; } },
+      NOW_FUTURE,
+      cal,
+    );
+    expect(requested).toBe(false);
+    expect(result.classifications.every((c) => c.class === "complete")).toBe(true);
+  });
+
+  it("re-classifies at execute time and skips days healed while queued", async () => {
+    const db = makeDb();
+    // Both days empty; the FIRST request heals BOTH days (simulating a
+    // concurrent background job landing while this window waited its turn).
+    let requests = 0;
+    const result = await ensureCached(
+      db, "NQ", d1.startUnix, d2.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
+      {
+        isConnected: () => true,
+        request: async () => {
+          requests++;
+          seedFull(db, "NQ", "15m", d1);
+          seedFull(db, "NQ", "15m", d2);
+          return {};
+        },
+      },
+      NOW_FUTURE,
+    );
+    expect(requests).toBe(1);
+    expect(result.windowsFetched).toBe(2);
+    expect(result.fetchedDays).toEqual([d1.label, d2.label]);
+    expect(result.windowsFailed).toBe(0);
+  });
+
+  it("observed-close interlock records the close from a trimmed fetch of a declared untimed day", async () => {
+    const db = makeDb();
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-05', 'modified', 'nt8')`,
+    ).run(TPL);
+    const cal = calFor(db);
+    // NT8 returns a clean 13:00-EDT-trimmed session (76 bars).
+    const trimmedEnd = d2.startUnix + 76 * 900;
+    const result = await ensureCached(
+      db, "NQ", d2.startUnix, d2.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
+      {
+        isConnected: () => true,
+        request: async () => {
+          seedFull(db, "NQ", "15m", { ...d2, endUnix: trimmedEnd });
+          return {};
+        },
+      },
+      NOW_FUTURE,
+      cal,
+    );
+    expect(result.calendarUpdated).toBe(true);
+    const after = loadCalendar(db, TPL).get("2026-05-05");
+    expect(after).toMatchObject({ closeTime: "13:00", source: "nt8-observed" });
+  });
+
+  it("interlock refuses a gap-riddled prefix and a normal-length day", async () => {
+    const db = makeDb();
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-04', 'modified', 'nt8')`,
+    ).run(TPL);
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-05', 'modified', 'nt8')`,
+    ).run(TPL);
+    const cal = calFor(db);
+    const trimmedEnd = d1.startUnix + 76 * 900;
+    const result = await ensureCached(
+      db, "NQ", d1.startUnix, d2.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
+      {
+        isConnected: () => true,
+        request: async (_t, p) => {
+          const from = (p as Record<string, unknown>).from;
+          if (from === d1.startUnix) {
+            // Trimmed prefix WITH an internal gap → must not be blessed.
+            seedFull(db, "NQ", "15m", { ...d1, endUnix: trimmedEnd });
+            db.prepare(`DELETE FROM candles WHERE symbol='NQ' AND timeframe='15m' AND timestamp = ?`).run(d1.startUnix + 10 * 900);
+          } else {
+            // Full normal session → observed close == template close → no write.
+            seedFull(db, "NQ", "15m", d2);
+          }
+          return {};
+        },
+      },
+      NOW_FUTURE,
+      cal,
+    );
+    expect(result.calendarUpdated).toBe(false);
+    const after = loadCalendar(db, TPL);
+    expect(after.get("2026-05-04")!.closeTime).toBeUndefined();
+    expect(after.get("2026-05-05")!.closeTime).toBeUndefined();
   });
 });

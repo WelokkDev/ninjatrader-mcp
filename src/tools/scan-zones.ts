@@ -17,6 +17,7 @@ import type {
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
+import { loadCalendar } from "../core/sessions/calendar.js";
 import type { Candle } from "../core/types.js";
 import { formatLocalISO } from "../core/time.js";
 import { detectWaws } from "../private/waw/detector.js";
@@ -180,11 +181,13 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     }
 
     const config = getInstrumentConfig(symbol);
+    // Closed holidays throw SessionClosedError; its message surfaces below.
+    const calendar = loadCalendar(deps.db, config.session.name);
     let startTs: number;
     let endTs: number;
     try {
-      startTs = sessionDayRange(start, config.session).startUnix;
-      endTs = sessionDayRange(end, config.session).endUnix;
+      startTs = sessionDayRange(start, config.session, calendar).startUnix;
+      endTs = sessionDayRange(end, config.session, calendar).endUnix;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       return err(`Invalid session-day for ${symbol}: ${m}`);

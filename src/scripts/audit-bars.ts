@@ -11,12 +11,13 @@
 // the response's `validation` field.
 
 import db from "../db/connection.js";
-import { SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   sessionDayContaining,
   sessionDayRange,
 } from "../core/sessions/session-day.js";
+import { loadCalendar, type SessionCalendar } from "../core/sessions/calendar.js";
 import { formatExchangeTime } from "../core/time.js";
 import {
   validateSessionDay,
@@ -49,7 +50,19 @@ function main(): void {
     .prepare(`SELECT DISTINCT symbol, timestamp FROM candles`)
     .all() as Array<{ symbol: string; timestamp: number }>;
 
+  // Session calendars per template (holiday / early-close exceptions).
+  const calendars = new Map<string, SessionCalendar>();
+  const calendarFor = (templateName: string): SessionCalendar => {
+    let cal = calendars.get(templateName);
+    if (!cal) {
+      cal = loadCalendar(db, templateName);
+      calendars.set(templateName, cal);
+    }
+    return cal;
+  };
+
   const pairs = new Map<string, { symbol: string; label: string }>();
+  let orphanClosedDayBars = 0;
   for (const row of distinctRows) {
     let config;
     try {
@@ -57,8 +70,13 @@ function main(): void {
     } catch {
       continue; // unknown symbol in the DB — skip
     }
-    const sd = sessionDayContaining(row.timestamp, config.session);
-    if (sd === null) continue;
+    const sd = sessionDayContaining(row.timestamp, config.session, calendarFor(config.session.name));
+    if (sd === null) {
+      // Bars on closed holidays or after an early close map to no
+      // session-day — count them as orphans rather than skip silently.
+      orphanClosedDayBars++;
+      continue;
+    }
     pairs.set(`${row.symbol}|${sd.label}`, {
       symbol: row.symbol,
       label: sd.label,
@@ -75,15 +93,29 @@ function main(): void {
   let skipped = 0;
   const issues: ValidationResult[] = [];
 
+  const countStmt = db.prepare(
+    `SELECT COUNT(*) AS c FROM candles
+      WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+  );
+
   for (const pair of sortedPairs) {
     const config = getInstrumentConfig(pair.symbol);
-    const range = sessionDayRange(pair.label, config.session);
+    const range = sessionDayRange(pair.label, config.session, calendarFor(config.session.name));
     const sessionDay: SessionDay = {
       label: pair.label,
       startUnix: range.startUnix,
       endUnix: range.endUnix,
     };
+    const rowsAt = (tf: string): number =>
+      (countStmt.get(pair.symbol, tf, range.startUnix, range.endUnix) as { c: number }).c;
+    const has15m = rowsAt("15m") > 0;
     for (const tf of SUPPORTED_TIMEFRAMES) {
+      // Raw streams are opt-in: never-ingested is not a finding. Derived
+      // TFs are expected whenever their 15m source exists, and still
+      // checked when they hold orphan rows without one.
+      const rows = rowsAt(tf);
+      if (RAW_TIMEFRAMES.includes(tf) && rows === 0) continue;
+      if (!RAW_TIMEFRAMES.includes(tf) && !has15m && rows === 0) continue;
       const result = validateSessionDay(
         db,
         pair.symbol,
@@ -132,19 +164,23 @@ function main(): void {
   }
 
   console.log(
-    `Audit: ${ok} ok, ${mismatch} mismatch, ${skipped} skipped (in-progress)`,
+    `Audit: ${ok} ok, ${mismatch} mismatch, ${skipped} skipped (in-progress)` +
+      (orphanClosedDayBars > 0
+        ? `, ${orphanClosedDayBars} orphan timestamp(s) outside any session-day`
+        : ""),
   );
   if (mismatch > 0) {
     console.log();
     console.log(
-      "NOTE: Half-day / holiday early closes will appear as mismatches.",
+      "NOTE: The session calendar models holidays/early closes — a mismatch",
     );
     console.log(
-      "      Audit only covers session-days that have ≥1 cached bar.",
+      "      is a REAL finding. Declared-untimed early closes heal on the",
     );
     console.log(
-      "      Use get_candles for empty-range detection on demand.",
+      "      next get_candles/prefetch of that day (observed-close interlock).",
     );
+    console.log("      Audit only covers session-days that have ≥1 cached bar.");
   }
   process.exit(mismatch > 0 ? 1 : 0);
 }

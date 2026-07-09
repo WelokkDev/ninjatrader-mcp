@@ -8,9 +8,11 @@ import {
   registerCandlesResponseHandler,
   registerLiveIngestHandler,
 } from "./bridge/ingest.js";
+import { registerCalendarSyncOnHello } from "./bridge/calendar-sync.js";
 
 import { registerGetCandles } from "./tools/get-candles.js";
 import { registerResolveSessionDays } from "./tools/resolve-session-days.js";
+import { registerPrefetchTools } from "./tools/prefetch-candles.js";
 import { registerScanZones } from "./tools/scan-zones.js";
 import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerDraw } from "./tools/draw.js";
@@ -35,6 +37,7 @@ const server = new McpServer({
 
 registerGetCandles(server);
 registerResolveSessionDays(server);
+registerPrefetchTools(server);
 registerScanZones(server);
 registerDrawZone(server);
 registerDraw(server);
@@ -63,6 +66,7 @@ async function main() {
   await startBridge();
   registerLiveIngestHandler();
   registerCandlesResponseHandler();
+  registerCalendarSyncOnHello();
 }
 
 const shutdown = async (signal: string) => {

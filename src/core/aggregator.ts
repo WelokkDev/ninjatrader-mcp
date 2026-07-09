@@ -1,11 +1,11 @@
 import type { Candle, Timeframe } from "./types.js";
 import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
+import type { SessionCalendar } from "./sessions/calendar.js";
 import { sessionDayContaining } from "./sessions/session-day.js";
 
-// "1d" is excluded, the intraday aggregator does not produce daily bars (see core/constants.ts header).
-const PERIOD_MINUTES: Record<Exclude<Timeframe, "1d">, number> = {
-  "5m": 5,
-  "15m": 15,
+// Derived targets only: "1d" is excluded (see core/constants.ts header)
+// and the raw streams (15s/5m/15m) short-circuit before this map is read.
+const PERIOD_MINUTES: Record<Exclude<Timeframe, "15s" | "5m" | "15m" | "1d">, number> = {
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -19,6 +19,9 @@ export interface AggregateOptions {
   // Used to mark partial bars. Defaults to Date.now()/1000. Tests can pin
   // it for deterministic partial-bar behavior.
   now?: number;
+  // Session-calendar exceptions: affects bucket origin on late-begin days
+  // and partial-marking on early-close days.
+  calendar?: SessionCalendar;
 }
 
 /**
@@ -41,7 +44,7 @@ export function aggregateCandles(
       `aggregateCandles: target "1d" is not supported by the intraday aggregator. Use src/private/sma/rollup/daily-aggregator.ts for session-aligned daily bars.`,
     );
   }
-  if (targetTimeframe === "5m" || targetTimeframe === "15m") {
+  if (targetTimeframe === "15s" || targetTimeframe === "5m" || targetTimeframe === "15m") {
     return markPartial([...candles].map(stripPartial), options);
   }
 
@@ -60,7 +63,7 @@ export function aggregateCandles(
   const buckets = new Map<string, Candle[]>();
 
   for (const candle of candles) {
-    const sd = sessionDayContaining(candle.timestamp, options.session);
+    const sd = sessionDayContaining(candle.timestamp, options.session, options.calendar);
     if (sd === null) {
       console.error(
         `[aggregator] dropping bar at ${candle.timestamp} — not in any session-day for template "${options.session.name}"`,
@@ -119,7 +122,7 @@ function stripPartial(c: Candle): Candle {
 function markPartial(sorted: Candle[], options: AggregateOptions): Candle[] {
   if (sorted.length === 0) return sorted;
   const last = sorted[sorted.length - 1];
-  const sd = sessionDayContaining(last.timestamp, options.session);
+  const sd = sessionDayContaining(last.timestamp, options.session, options.calendar);
   if (sd === null) return sorted;
   const now = options.now ?? Math.floor(Date.now() / 1000);
   if (sd.endUnix > now) {

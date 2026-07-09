@@ -340,3 +340,81 @@ describe("aggregateCandles — partial flag on most-recent bar", () => {
     expect(out.every((c) => c.partial === undefined)).toBe(true);
   });
 });
+
+describe("calendar-aware aggregation (holiday early close)", () => {
+  const FEB16_CAL = new Map([
+    [
+      "2026-02-16",
+      {
+        date: "2026-02-16",
+        kind: "modified" as const,
+        closeTime: "13:00",
+        source: "bootstrap" as const,
+        description: "Presidents Day",
+      },
+    ],
+  ]);
+
+  it("does not mark the 13:00 final bar partial once the adjusted close has passed", () => {
+    const input: Candle[] = [
+      bar("2026-02-16T12:45", [100, 101, 99, 100]),
+      bar("2026-02-16T13:00", [100, 102, 100, 101]),
+    ];
+    const out = aggregateCandles(input, "15m", {
+      ...ETH_OPTS,
+      calendar: FEB16_CAL,
+      now: et("2026-02-16T14:00"), // after the 13:00 early close, before 17:00
+    });
+    // Without the calendar the template's 17:00 close makes this bar look
+    // mid-session and wrongly partial.
+    expect(out[out.length - 1].partial).toBeUndefined();
+  });
+
+  it("derived stamps on an early-close day satisfy the validator's adjusted geometry", async () => {
+    const { default: Database } = await import("better-sqlite3");
+    const { initializeSchema } = await import("../src/db/schema.js");
+    const { validateSessionDay } = await import("../src/core/cache/validator.js");
+
+    const start = et("2026-02-15T18:00");
+    const end = et("2026-02-16T13:00"); // 68,400s session = 76 x 15m
+    const input: Candle[] = [];
+    for (let ts = start + 900; ts <= end; ts += 900) {
+      input.push({ timestamp: ts, open: 100, high: 100, low: 100, close: 100, volume: 1 });
+    }
+    expect(input).toHaveLength(76);
+
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const insert = db.prepare(
+      "INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume) VALUES ('NQ', ?, ?, 1, 1, 1, 1, 1)",
+    );
+    const adjustedDay = { label: "2026-02-16", startUnix: start, endUnix: end };
+
+    for (const tf of ["30m", "1h", "2h", "4h"] as const) {
+      const derived = aggregateCandles(input, tf, {
+        ...ETH_OPTS,
+        calendar: FEB16_CAL,
+        now: et("2026-03-01T00:00"),
+      });
+      for (const c of derived) insert.run(tf, c.timestamp);
+      const v = validateSessionDay(db, "NQ", adjustedDay, tf, et("2026-03-01T00:00"));
+      expect(v.status, `${tf}: missing=${v.missing.join(",")} extra=${v.extra.join(",")}`).toBe("ok");
+    }
+  });
+});
+
+describe("15s raw passthrough", () => {
+  it("short-circuits like the other raw streams (no bucketing, partial-marking only)", () => {
+    const input: Candle[] = [
+      { timestamp: et("2026-04-21T10:00:15"), open: 1, high: 2, low: 1, close: 2, volume: 5 },
+      { timestamp: et("2026-04-21T10:00:30"), open: 2, high: 3, low: 2, close: 3, volume: 7 },
+    ];
+    const out = aggregateCandles(input, "15s", {
+      ...ETH_OPTS,
+      now: et("2026-04-22T10:00:00"), // session closed — no partial flag
+    });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ timestamp: input[0].timestamp, volume: 5 });
+    expect(out.every((c) => c.partial === undefined)).toBe(true);
+  });
+});

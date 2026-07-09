@@ -32,6 +32,21 @@ export function initializeSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_draw_commands_status
       ON draw_commands (status);
 
+    -- Session-calendar exceptions per template. 'closed' = no session that
+    -- date; 'modified' = non-template close_time/open_time (wall-clock
+    -- HH:MM in the template tz). Times may be NULL on 'modified' rows —
+    -- declared but not yet observed from a real fetch.
+    CREATE TABLE IF NOT EXISTS session_calendar (
+      template    TEXT NOT NULL,
+      date        TEXT NOT NULL,
+      kind        TEXT NOT NULL CHECK (kind IN ('closed','modified')),
+      close_time  TEXT,
+      open_time   TEXT,
+      source      TEXT NOT NULL,
+      description TEXT,
+      PRIMARY KEY (template, date)
+    );
+
     CREATE TABLE IF NOT EXISTS backtest_runs (
       run_id        TEXT    PRIMARY KEY,
       strategy_name TEXT    NOT NULL,

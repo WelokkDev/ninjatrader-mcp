@@ -2,7 +2,12 @@ import type { Database } from "better-sqlite3";
 import type { Timeframe } from "../types.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDaysOverlapping } from "../sessions/session-day.js";
-import { validateSessionDay } from "./validator.js";
+import {
+  recordObservedClose,
+  wallClockHHMM,
+  type SessionCalendar,
+} from "../sessions/calendar.js";
+import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 
 // Classification of a single session-day's cache state at a given raw TF.
 //   complete    — bars match expected geometry, nothing to do
@@ -32,8 +37,7 @@ export function classifySessionDay(
   const r = validateSessionDay(db, symbol, day, rawTimeframe, nowUnix);
   if (r.status === "skipped") return "in_progress";
   if (r.status === "ok") return "complete";
-  if (r.actual.length === 0) return "empty";
-  return "partial";
+  return mismatchIsEmpty(r) ? "empty" : "partial";
 }
 
 export interface FetchWindow {
@@ -44,7 +48,7 @@ export interface FetchWindow {
 
 /**
  * One fetch window per non-complete session-day — deliberately NOT
- * merged (D-B2). A fresh month becomes ~22 small, sub-timeout,
+ * merged. A fresh month becomes ~22 small, sub-timeout,
  * independently-healable requests instead of one mega-request that blows
  * the bridge timeout when NT8 must first download history from the
  * provider; one slow or failed day no longer poisons the whole range.
@@ -94,6 +98,9 @@ export interface EnsureCachedResult {
   // disconnected. Callers use this to surface the canonical "start
   // NT8 with the McpBridge addon" guidance in the response warning.
   bridgeDisconnected: boolean;
+  // True iff a new early-close time was recorded in session_calendar this
+  // call — callers must reload the calendar before validating geometry.
+  calendarUpdated: boolean;
 }
 
 /**
@@ -121,8 +128,11 @@ export async function ensureCached(
   template: SessionTemplate,
   deps: EnsureCachedDeps,
   nowUnix: number,
+  calendar?: SessionCalendar,
 ): Promise<EnsureCachedResult> {
-  const days = sessionDaysOverlapping(startTs, endTs, template);
+  // Calendar-aware enumeration: closed days don't exist; timed early-close
+  // days carry adjusted geometry so they can classify complete.
+  const days = sessionDaysOverlapping(startTs, endTs, template, calendar);
   const classifications: DayClassification[] = days.map((day) => ({
     day,
     class: classifySessionDay(db, symbol, day, rawTimeframe, nowUnix),
@@ -136,6 +146,7 @@ export async function ensureCached(
     fetchedDays: [],
     errors: [],
     bridgeDisconnected: false,
+    calendarUpdated: false,
   };
 
   if (windows.length === 0) return result;
@@ -152,14 +163,23 @@ export async function ensureCached(
     return result;
   }
 
+  const fetchedWindows: FetchWindow[] = [];
   for (const window of windows) {
+    const day: SessionDay = {
+      label: window.labels[0],
+      startUnix: window.startUnix,
+      endUnix: window.endUnix,
+    };
+    if (classifySessionDay(db, symbol, day, rawTimeframe, nowUnix) === "complete") {
+      result.windowsFetched++;
+      result.fetchedDays.push(...window.labels);
+      continue;
+    }
+
     try {
-      // Pure success/fail signal. Ingest is owned by the global
-      // candles_response handler (bridge/ingest.ts), which runs
-      // synchronously inside the bridge's message dispatch — the cache is
-      // already populated by the time this await resumes. On timeout the
-      // request rejects, but a late response still heals via that same
-      // handler, so the next query sees those days complete.
+      // Pure success/fail signal — ingest is owned by the candles_response
+      // handler (bridge/ingest.ts), which runs before this await resumes.
+      // A timed-out request still heals late through that same handler.
       await deps.request(
         "request_candles",
         {
@@ -173,6 +193,7 @@ export async function ensureCached(
       );
       result.windowsFetched++;
       result.fetchedDays.push(...window.labels);
+      fetchedWindows.push(window);
     } catch (err) {
       result.windowsFailed++;
       const msg = err instanceof Error ? err.message : String(err);
@@ -180,5 +201,70 @@ export async function ensureCached(
     }
   }
 
+  // For each fetched day, record a trimmed session's close time when the
+  // calendar declares the date but no time is known yet.
+  if (calendar) {
+    for (const window of fetchedWindows) {
+      const day: SessionDay = {
+        label: window.labels[0],
+        startUnix: window.startUnix,
+        endUnix: window.endUnix,
+      };
+      if (observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)) {
+        result.calendarUpdated = true;
+      }
+    }
+  }
+
   return result;
+}
+
+/**
+ * Record an observed early close for a declared-but-untimed modified day
+ * whose cached bars end before the template close. Only declared dates,
+ * only closed sessions, only a structurally clean prefix — internal gaps
+ * stay loud mismatches. Returns true iff a time was recorded; callers must
+ * then reload the calendar before re-deriving geometry.
+ */
+export function observeEarlyClose(
+  db: Database,
+  symbol: string,
+  rawTimeframe: Timeframe,
+  day: SessionDay,
+  template: SessionTemplate,
+  calendar: SessionCalendar,
+  nowUnix: number,
+): boolean {
+  const entry = calendar.get(day.label);
+  if (
+    entry?.kind !== "modified" ||
+    entry.closeTime ||
+    entry.openTime ||
+    day.endUnix > nowUnix
+  ) {
+    return false;
+  }
+  const { m } = db
+    .prepare(
+      `SELECT MAX(timestamp) AS m FROM candles
+        WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+    )
+    .get(symbol, rawTimeframe, day.startUnix, day.endUnix) as { m: number | null };
+  if (m === null || m >= day.endUnix) return false; // empty or normal-length
+  const probe = validateSessionDay(
+    db,
+    symbol,
+    { label: day.label, startUnix: day.startUnix, endUnix: m },
+    rawTimeframe,
+    nowUnix,
+  );
+  if (probe.status !== "ok") return false; // gap-riddled prefix — stay loud
+  const closeHHMM = wallClockHHMM(m, template.timezone);
+  const recorded = recordObservedClose(db, template.name, day.label, closeHHMM);
+  if (recorded) {
+    console.error(
+      `[fill] observed early close for ${template.name} ${day.label}: ${closeHHMM} (recorded)`,
+    );
+  }
+  return recorded;
 }

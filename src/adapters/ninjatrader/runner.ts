@@ -46,6 +46,10 @@ export interface NinjaTraderRunnerOptions {
   pollMs?: number;
   /** Optional: resolve the intended private-branch SHA for provenance cross-check. */
   privateShaResolver?: (spec: ExperimentSpec) => string | null;
+  /** Data preflight, run before anything is spawned or written. Return a
+   *  refusal message to fail the run instantly, or null to proceed.
+   *  Injected so the adapter stays free of DB knowledge. */
+  preflight?: (spec: ExperimentSpec) => string | null;
 }
 
 function readJsonSafe(file: string): any | undefined {
@@ -103,6 +107,17 @@ export class NinjaTraderRunner implements BacktestRunner {
 
   start(ctx: RunContext): RunHandle {
     const spec = ctx.spec;
+
+    // A detached run must never launch on dates that don't resolve or a
+    // cache that's missing bars — the child would walk partial data to a
+    // plausible verdict.
+    const preflightError = this.opts.preflight?.(spec) ?? null;
+    if (preflightError) {
+      ctx.tracer.event("runner.preflight_failed", { reason: preflightError });
+      ctx.fail(`data preflight failed: ${preflightError}`);
+      return { experimentId: ctx.experimentId };
+    }
+
     const outDir = path.join(this.resultsRoot, ctx.experimentId);
     mkdirSync(outDir, { recursive: true });
 

@@ -1,9 +1,12 @@
 import type { Database } from "better-sqlite3";
-import type { SessionDay } from "../sessions/types.js";
+import type { SessionDay, SessionTemplate } from "../sessions/types.js";
+import type { SessionCalendar } from "../sessions/calendar.js";
 import type { Timeframe } from "../types.js";
+import { sessionDaysOverlapping } from "../sessions/session-day.js";
 
 // "1d" is excluded — the SQLite cache holds only intraday bars; daily bars are sourced on demand
 const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
+  "15s": 15,
   "5m": 300,
   "15m": 900,
   "30m": 1800,
@@ -26,6 +29,97 @@ export function expectedBarCount(
   const period = SECONDS_PER_TIMEFRAME[tf];
   const duration = sd.endUnix - sd.startUnix;
   return Math.floor(duration / period) + (duration % period !== 0 ? 1 : 0);
+}
+
+export interface RangeCompleteness {
+  /** True iff no CLOSED session-day in the range is empty or incomplete. */
+  ok: boolean;
+  /** Session-days overlapping the range (closed + in-progress). */
+  daysChecked: number;
+  badDays: Array<{
+    label: string;
+    status: "empty" | "incomplete";
+    missing: number;
+    extra: number;
+  }>;
+  /** Days still open (endUnix > nowUnix) — not validatable; callers must
+   *  surface them. */
+  inProgressDays: string[];
+}
+
+/** A mismatched day with zero cached bars is "empty"; anything else is
+ *  "incomplete"/"partial". Single home so consumers can't drift. */
+export function mismatchIsEmpty(r: Pick<ValidationResult, "actual">): boolean {
+  return r.actual.length === 0;
+}
+
+/**
+ * Range-level completeness: every closed session-day overlapping
+ * [startUnix, endUnix] must structurally validate at `timeframe`. The
+ * preflight primitive for consumers that read the cache directly.
+ *
+ * Fast path: an index-only COUNT per day; stamp-level validateSessionDay
+ * runs only when the count is off. A count match with offsetting
+ * missing+extra stamps is possible (orphan rows) — that residue is caught
+ * by get_candles' stamp-level validation, not here.
+ */
+export function validateRangeComplete(
+  db: Database,
+  symbol: string,
+  timeframe: Exclude<Timeframe, "1d">,
+  startUnix: number,
+  endUnix: number,
+  template: SessionTemplate,
+  nowUnix: number,
+  calendar?: SessionCalendar,
+): RangeCompleteness {
+  const days = sessionDaysOverlapping(startUnix, endUnix, template, calendar);
+  const badDays: RangeCompleteness["badDays"] = [];
+  const inProgressDays: string[] = [];
+  const countStmt = db.prepare(
+    `SELECT COUNT(*) AS c FROM candles
+      WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+  );
+
+  for (const day of days) {
+    if (day.endUnix > nowUnix) {
+      inProgressDays.push(day.label);
+      continue;
+    }
+    const { c } = countStmt.get(symbol, timeframe, day.startUnix, day.endUnix) as { c: number };
+    if (c === expectedBarCount(day, timeframe)) continue;
+    const r = validateSessionDay(db, symbol, day, timeframe, nowUnix);
+    if (r.status !== "mismatch") continue;
+    badDays.push({
+      label: day.label,
+      status: mismatchIsEmpty(r) ? "empty" : "incomplete",
+      missing: r.missing.length,
+      extra: r.extra.length,
+    });
+  }
+
+  return {
+    ok: badDays.length === 0,
+    daysChecked: days.length,
+    badDays,
+    inProgressDays,
+  };
+}
+
+/** Shared refusal copy for incomplete ranges. */
+export function describeBadDays(
+  badDays: RangeCompleteness["badDays"],
+  timeframe: string,
+): string {
+  const head = badDays
+    .slice(0, 5)
+    .map(
+      (d) =>
+        `${d.label} (${d.status}${d.status === "incomplete" ? `, ${d.missing} missing` : ""})`,
+    )
+    .join(", ");
+  const more = badDays.length > 5 ? ` …and ${badDays.length - 5} more` : "";
+  return `${badDays.length} session-day(s) incomplete at ${timeframe}: ${head}${more}`;
 }
 
 export type ValidationStatus = "ok" | "mismatch" | "skipped";

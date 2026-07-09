@@ -3,6 +3,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
+import { getInstrumentConfig } from "../core/sessions/registry.js";
+import { loadCalendar } from "../core/sessions/calendar.js";
+import { backtestRangePreflight } from "../core/cache/preflight.js";
 import {
   DEFAULT_STRATEGY,
   DEFAULT_SMA_PRESET,
@@ -37,10 +40,14 @@ export interface RunBacktestArgs {
   lookbackDays?: number;
   managementModes?: Array<(typeof MODES)[number]>;
   configOverrides?: unknown;
+  allowIncompleteData?: boolean;
 }
 
 export interface RunBacktestDeps {
   db: Database;
+  compose: typeof composeBacktest;
+  /** Injectable clock (unix seconds) so tests pin in-progress days. */
+  now?: () => number;
 }
 
 export function createRunBacktestHandler(deps: RunBacktestDeps) {
@@ -53,6 +60,7 @@ export function createRunBacktestHandler(deps: RunBacktestDeps) {
     lookbackDays = DEFAULT_LOOKBACK_DAYS,
     managementModes = [...MODES],
     configOverrides,
+    allowIncompleteData = false,
   }: RunBacktestArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
       return err(
@@ -69,7 +77,39 @@ export function createRunBacktestHandler(deps: RunBacktestDeps) {
       return err(`managementModes must name at least one of: ${MODES.join(", ")}.`);
     }
 
-    const result = composeBacktest({
+    // The walker SELECTs whatever 5m rows exist over
+    // [rangeStart − lookback, rangeEnd] and walks them — a half-cached
+    // range or lookback window silently skews results. Refuse unless every
+    // closed session-day in both windows is complete; allowIncompleteData
+    // bypasses with a stamped warning.
+    const config = getInstrumentConfig(symbol);
+    const calendar = loadCalendar(deps.db, config.session.name);
+    const nowUnix = (deps.now ?? (() => Math.floor(Date.now() / 1000)))();
+    const preflight = backtestRangePreflight(
+      deps.db,
+      symbol,
+      config.session,
+      rangeStart,
+      rangeEnd,
+      lookbackDays,
+      nowUnix,
+      calendar,
+    );
+    let dataWarning: string | undefined;
+    if (!preflight.ok) {
+      if (!allowIncompleteData) {
+        return err(
+          `${preflight.detail} A backtest over partial data silently produces wrong results. Fill the cache first (get_candles or prefetch_candles for ${symbol} over the range), then retry — or pass allowIncompleteData: true to run anyway.`,
+        );
+      }
+      dataWarning = `${preflight.detail} allowIncompleteData=true — results reflect only the bars actually cached; treat with suspicion.`;
+    }
+    if (preflight.inProgressDays.length > 0) {
+      const note = `Range includes in-progress session-day(s) ${preflight.inProgressDays.join(", ")} — today's bars are partial by definition; results over them shift as the session evolves.`;
+      dataWarning = dataWarning ? `${dataWarning} ${note}` : note;
+    }
+
+    const result = deps.compose({
       db: deps.db,
       symbol,
       rangeStart,
@@ -85,18 +125,19 @@ export function createRunBacktestHandler(deps: RunBacktestDeps) {
       return ok({
         ...result,
         note: `No 5m bars evaluated in the range. Call get_candles for ${symbol} over [${rangeStart}, ${rangeEnd}] first.`,
+        ...(dataWarning && { dataWarning }),
       });
     }
-    return ok(result);
+    return ok({ ...result, ...(dataWarning && { dataWarning }) });
   };
 }
 
 export function registerRunBacktest(server: McpServer): void {
-  const handler = createRunBacktestHandler({ db: defaultDb });
+  const handler = createRunBacktestHandler({ db: defaultDb, compose: composeBacktest });
 
   server.tool(
     "run_backtest",
-    "Walk the decision engine over a [rangeStart, rangeEnd] window of 5m closes, open a trade on each 'yes' (entry = next-bar open), and simulate the exit under each requested management mode (fixed / trailing / constrained) over the SAME entry set. Writes trades + every decision (the stall funnel) to the ledger and returns a per-mode summary (nTrades, winRate, sumR, avgR/expectancy, avgMfe, ambiguousExitTrades). Read-through over the 5m cache — call get_candles first. A backtest window is a bounded range: resolve rangeStart/rangeEnd via resolve_session_days (it returns exact session-day unix bounds) and confirm the resolved dates with the operator before running.",
+    "Walk the decision engine over a [rangeStart, rangeEnd] window of 5m closes, open a trade on each 'yes' (entry = next-bar open), and simulate the exit under each requested management mode (fixed / trailing / constrained) over the SAME entry set. Writes trades + every decision (the stall funnel) to the ledger and returns a per-mode summary (nTrades, winRate, sumR, avgR/expectancy, avgMfe, ambiguousExitTrades). Reads the 5m cache and FAILS CLOSED if any closed session-day in range is structurally incomplete — fill the cache first (get_candles / prefetch_candles); allowIncompleteData overrides with a stamped dataWarning. A backtest window is a bounded range: resolve rangeStart/rangeEnd via resolve_session_days (it returns exact session-day unix bounds) and confirm the resolved dates with the operator before running.",
     {
       symbol: z
         .string()
@@ -136,6 +177,13 @@ export function registerRunBacktest(server: McpServer): void {
         .optional()
         .describe(
           'Partial overrides deep-merged onto the flat strategy config before each decision (e.g. { "trade": { "minRR": 2 } } to loosen the gate for a first ≥20-trade sanity run).',
+        ),
+      allowIncompleteData: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe(
+          "Escape hatch: run even when the data preflight finds incomplete session-days. The result carries a dataWarning naming them — results reflect only the cached bars.",
         ),
     },
     handler,

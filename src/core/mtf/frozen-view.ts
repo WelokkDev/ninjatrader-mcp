@@ -6,6 +6,7 @@ import { sessionDayContaining } from "../sessions/session-day.js";
 // Intraday period lengths in seconds. "1d" is intentionally absent, daily bars come from the private session-aligned daily aggregator, 
 // not here (mirrors core/aggregator.ts, which likewise refuses "1d").
 export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
+  "15s": 15,
   "5m": 5 * 60,
   "15m": 15 * 60,
   "30m": 30 * 60,

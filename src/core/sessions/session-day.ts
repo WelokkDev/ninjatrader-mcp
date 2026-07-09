@@ -4,6 +4,22 @@ import type {
   SessionTemplate,
   Weekday,
 } from "./types.js";
+import type { SessionCalendar } from "./calendar.js";
+
+/** Thrown by sessionDayRange when the calendar declares the date fully
+ *  closed (market holiday). Distinct from the "No session span" weekend
+ *  error so callers can render holiday-specific guidance. */
+export class SessionClosedError extends Error {
+  constructor(
+    readonly label: string,
+    readonly description?: string,
+  ) {
+    super(
+      `No session on ${label} — market holiday${description ? ` (${description})` : ""}`,
+    );
+    this.name = "SessionClosedError";
+  }
+}
 
 // ---------- Intl helpers (DST-safe wall-clock arithmetic) ----------
 
@@ -147,10 +163,13 @@ function addDays(
 // Compute (startUnix, endUnix] for the session-day labeled by `label`
 // (a YYYY-MM-DD calendar date in template.timezone, representing the
 // session's CLOSE date). Throws if no span has a matching closeWeekday
-// for that date.
+// for that date. With a `calendar`, declared-closed dates throw
+// SessionClosedError and `modified` dates override the close/open
+// wall-clock times.
 export function sessionDayRange(
   label: string,
   template: SessionTemplate,
+  calendar?: SessionCalendar,
 ): { startUnix: number; endUnix: number } {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(label);
   if (!m) throw new Error(`bad session-day label: "${label}"`);
@@ -179,7 +198,16 @@ export function sessionDayRange(
     );
   }
 
-  const closeT = parseTime(span.closeTime);
+  const calEntry = calendar?.get(label);
+  if (calEntry?.kind === "closed") {
+    throw new SessionClosedError(label, calEntry.description);
+  }
+  const closeOverride =
+    calEntry?.kind === "modified" && calEntry.closeTime ? calEntry.closeTime : null;
+  const openOverride =
+    calEntry?.kind === "modified" && calEntry.openTime ? calEntry.openTime : null;
+
+  const closeT = parseTime(closeOverride ?? span.closeTime);
   let endUnix: number;
   if (closeT.nextDay) {
     // "24:00" — endUnix lands at 00:00:00 of the next calendar day.
@@ -197,7 +225,9 @@ export function sessionDayRange(
   // openWeekday == closeWeekday, else 7 - difference, etc.).
   const dayOffset = (span.closeWeekday - span.openWeekday + 7) % 7;
   const openDate = addDays(closeY, closeMo, closeD, -dayOffset);
-  const openT = parseTime(span.openTime);
+  // A late-begin override keeps the template's open calendar date and
+  // replaces only the wall-clock time.
+  const openT = parseTime(openOverride ?? span.openTime);
   // openTime "24:00" would also push to next day, but "24:00" makes no
   // sense as an open boundary — reject.
   if (openT.nextDay) {
@@ -208,6 +238,12 @@ export function sessionDayRange(
     openT.hour, openT.minute, openT.second,
     template.timezone,
   );
+
+  if (endUnix <= startUnix) {
+    throw new Error(
+      `calendar-modified session for "${label}" has close not after open (open ${openOverride ?? span.openTime}, close ${closeOverride ?? span.closeTime})`,
+    );
+  }
 
   return { startUnix, endUnix };
 }
@@ -229,6 +265,7 @@ function findSpanByCloseWeekday(
 export function sessionDayContaining(
   unixSec: number,
   template: SessionTemplate,
+  calendar?: SessionCalendar,
 ): SessionDay | null {
   // A session-day's close calendar date may be the day before, of, or
   // after the input's local calendar date (most can be at most ±1, but
@@ -239,9 +276,11 @@ export function sessionDayContaining(
     const label = `${cand.year}-${pad2(cand.month)}-${pad2(cand.day)}`;
     let range: { startUnix: number; endUnix: number };
     try {
-      range = sessionDayRange(label, template);
+      range = sessionDayRange(label, template, calendar);
     } catch {
-      continue; // no span closes on that weekday (e.g. Sat/Sun for ETH)
+      // No span closes on that weekday (Sat/Sun for ETH), or the calendar
+      // declares the date closed — either way, not a session-day.
+      continue;
     }
     if (unixSec > range.startUnix && unixSec <= range.endUnix) {
       // Within-span break check (none of the production templates use
@@ -286,6 +325,7 @@ export function sessionDaysOverlapping(
   fromUnix: number,
   toUnix: number,
   template: SessionTemplate,
+  calendar?: SessionCalendar,
 ): SessionDay[] {
   if (toUnix < fromUnix) return [];
   // Pad ±2 calendar days on each side so we catch sessions that span
@@ -303,13 +343,13 @@ export function sessionDaysOverlapping(
     const label = `${cur.year}-${pad2(cur.month)}-${pad2(cur.day)}`;
     let range: { startUnix: number; endUnix: number };
     try {
-      range = sessionDayRange(label, template);
+      range = sessionDayRange(label, template, calendar);
       // Overlap test: (a, b] and [c, d] overlap iff a < d && b >= c.
       if (range.startUnix < toUnix && range.endUnix >= fromUnix) {
         result.push({ label, startUnix: range.startUnix, endUnix: range.endUnix });
       }
     } catch {
-      // No span for this weekday; skip.
+      // No span for this weekday, or calendar-closed date; skip.
     }
     if (cur.year === endCal.year && cur.month === endCal.month && cur.day === endCal.day) break;
     cur = addDays(cur.year, cur.month, cur.day, 1);

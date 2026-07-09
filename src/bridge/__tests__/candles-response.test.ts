@@ -68,6 +68,42 @@ describe("candles_response heal handler", () => {
     expect(countRows(db, "30m")).toBeGreaterThanOrEqual(1);
   });
 
+  it("ingests 15s as a parallel raw stream with no derived cascade", () => {
+    const db = memDb();
+    const handler = createCandlesResponseHandler(db);
+    handler({
+      v: 1,
+      id: "req-15s",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "15s",
+      candles: candlesAt([DAY_START + 15, DAY_START + 30, DAY_START + 45]),
+    });
+    expect(countRows(db, "15s")).toBe(3);
+    // 15s must NOT feed the 15m-driven aggregation chain.
+    expect(countRows(db, "30m")).toBe(0);
+    expect(countRows(db, "15m")).toBe(0);
+  });
+
+  it("drops bars stamped after a calendar early close", async () => {
+    const db = memDb();
+    const { loadCalendar } = await import("../../core/sessions/calendar.js");
+    loadCalendar(db, "cme_us_index_futures_eth"); // seeds 2026-02-16 → 13:00 close
+    const handler = createCandlesResponseHandler(db);
+    handler({
+      v: 1,
+      id: "req-hol",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "15m",
+      candles: candlesAt([
+        unix(2026, 2, 16, 18),
+        unix(2026, 2, 16, 19),
+      ]),
+    });
+    expect(countRows(db, "15m")).toBe(1);
+  });
+
   it("never throws — a bad message is logged and dropped", () => {
     const db = memDb();
     const handler = createCandlesResponseHandler(db);

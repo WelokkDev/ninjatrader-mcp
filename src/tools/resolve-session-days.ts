@@ -1,12 +1,20 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Database } from "better-sqlite3";
+import defaultDb from "../db/connection.js";
 import { SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
+  SessionClosedError,
   sessionDayContaining,
   sessionDayRange,
   sessionDaysOverlapping,
 } from "../core/sessions/session-day.js";
+import {
+  EMPTY_CALENDAR,
+  loadCalendar,
+  type SessionCalendar,
+} from "../core/sessions/calendar.js";
 import type { SessionDay, SessionTemplate } from "../core/sessions/types.js";
 import type { Timeframe } from "../core/types.js";
 import { expectedBarCount } from "../core/cache/validator.js";
@@ -32,6 +40,9 @@ export interface ResolveSessionDaysArgs {
 export interface ResolveSessionDaysDeps {
   // Injectable so tests pin "today" deterministically (same pattern as AggregateOptions.now). Unix seconds.
   now?: () => number;
+  // Backing store for the session calendar (holidays / early closes).
+  // Without it the tool runs calendar-blind and reports holidaysModeled:false.
+  db?: Database;
 }
 
 type ToolResult = {
@@ -118,13 +129,24 @@ function isNoSpanError(err: unknown): boolean {
 function tryRange(
   label: string,
   template: SessionTemplate,
+  calendar: SessionCalendar,
 ): { startUnix: number; endUnix: number } | null {
   try {
-    return sessionDayRange(label, template);
+    return sessionDayRange(label, template, calendar);
   } catch (err) {
-    if (isNoSpanError(err)) return null;
+    // Weekends and calendar-closed holidays both mean "not a session-day".
+    if (isNoSpanError(err) || err instanceof SessionClosedError) return null;
     throw err;
   }
+}
+
+// Flag copy: a holiday (with description) beats the generic weekday reason.
+function nonSessionReason(label: string, calendar: SessionCalendar): string {
+  const entry = calendar.get(label);
+  if (entry?.kind === "closed") {
+    return `market holiday${entry.description ? ` (${entry.description})` : ""}`;
+  }
+  return `${labelWeekdayName(label)} (no session)`;
 }
 
 // Nearest real session-days around a non-session label, formatted
@@ -133,15 +155,16 @@ function tryRange(
 function nearestSessionDays(
   label: string,
   template: SessionTemplate,
+  calendar: SessionCalendar,
 ): { prev?: string; next?: string } {
   const nearest: { prev?: string; next?: string } = {};
   for (let k = 1; k <= 7 && nearest.prev === undefined; k++) {
     const cand = addDaysToLabel(label, -k);
-    if (tryRange(cand, template)) nearest.prev = `${cand} (${labelWeekdayName(cand)})`;
+    if (tryRange(cand, template, calendar)) nearest.prev = `${cand} (${labelWeekdayName(cand)})`;
   }
   for (let k = 1; k <= 7 && nearest.next === undefined; k++) {
     const cand = addDaysToLabel(label, k);
-    if (tryRange(cand, template)) nearest.next = `${cand} (${labelWeekdayName(cand)})`;
+    if (tryRange(cand, template, calendar)) nearest.next = `${cand} (${labelWeekdayName(cand)})`;
   }
   return nearest;
 }
@@ -158,21 +181,22 @@ function resolveEndpoint(
   label: string,
   template: SessionTemplate,
   kind: "start" | "end",
+  calendar: SessionCalendar,
 ): ResolvedEndpoint {
-  const direct = tryRange(label, template);
+  const direct = tryRange(label, template, calendar);
   if (direct) return { day: { label, ...direct } };
 
   const step = kind === "start" ? 1 : -1;
   for (let k = 1; k <= 7; k++) {
     const cand = addDaysToLabel(label, step * k);
-    const range = tryRange(cand, template);
+    const range = tryRange(cand, template, calendar);
     if (range) {
       return {
         day: { label: cand, ...range },
         flag: {
           input: label,
-          reason: `${labelWeekdayName(label)} (no session)`,
-          nearest: nearestSessionDays(label, template),
+          reason: nonSessionReason(label, calendar),
+          nearest: nearestSessionDays(label, template, calendar),
         },
       };
     }
@@ -185,14 +209,15 @@ function resolveEndpoint(
 function currentOrPreviousSessionDay(
   nowUnix: number,
   template: SessionTemplate,
+  calendar: SessionCalendar,
 ): { day: SessionDay; inGap: boolean } {
-  const containing = sessionDayContaining(nowUnix, template);
+  const containing = sessionDayContaining(nowUnix, template, calendar);
   if (containing) return { day: containing, inGap: false };
 
   const todayLabel = formatLocalDateTime(nowUnix, template.timezone).slice(0, 10);
   for (let k = 0; k <= 7; k++) {
     const label = addDaysToLabel(todayLabel, -k);
-    const range = tryRange(label, template);
+    const range = tryRange(label, template, calendar);
     if (range && range.startUnix < nowUnix) {
       return { day: { label, ...range }, inGap: true };
     }
@@ -202,10 +227,14 @@ function currentOrPreviousSessionDay(
   );
 }
 
-function previousSessionDay(day: SessionDay, template: SessionTemplate): SessionDay {
+function previousSessionDay(
+  day: SessionDay,
+  template: SessionTemplate,
+  calendar: SessionCalendar,
+): SessionDay {
   for (let k = 1; k <= 7; k++) {
     const label = addDaysToLabel(day.label, -k);
-    const range = tryRange(label, template);
+    const range = tryRange(label, template, calendar);
     if (range) return { label, ...range };
   }
   throw new Error(
@@ -226,11 +255,12 @@ function mondayOfWeek(label: string): string {
 function weekSessionDays(
   mondayLabel: string,
   template: SessionTemplate,
+  calendar: SessionCalendar,
 ): SessionDay[] {
   const days: SessionDay[] = [];
   for (let k = 0; k < 5; k++) {
     const label = addDaysToLabel(mondayLabel, k);
-    const range = tryRange(label, template);
+    const range = tryRange(label, template, calendar);
     if (range) days.push({ label, ...range });
   }
   return days;
@@ -276,6 +306,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     const template = config.session;
     const tz = template.timezone;
     const nowUnix = now();
+    const calendar = deps.db ? loadCalendar(deps.db, template.name) : EMPTY_CALENDAR;
 
     const todayLabel = formatLocalDateTime(nowUnix, tz).slice(0, 10);
     const today = {
@@ -291,8 +322,8 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     try {
       if (hasExplicit) {
         requested = { mode: "explicit", start, end };
-        const startEp = resolveEndpoint(start!, template, "start");
-        const endEp = resolveEndpoint(end!, template, "end");
+        const startEp = resolveEndpoint(start!, template, "start", calendar);
+        const endEp = resolveEndpoint(end!, template, "end", calendar);
         if (startEp.flag) flags.push(startEp.flag);
         if (endEp.flag && endEp.flag.input !== startEp.flag?.input) flags.push(endEp.flag);
 
@@ -301,9 +332,9 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
             `start session-day ${start} is not before end session-day ${end}`,
           );
         }
-        days = sessionDaysOverlapping(startEp.day.startUnix, endEp.day.endUnix, template);
+        days = sessionDaysOverlapping(startEp.day.startUnix, endEp.day.endUnix, template, calendar);
       } else {
-        const anchor = currentOrPreviousSessionDay(nowUnix, template);
+        const anchor = currentOrPreviousSessionDay(nowUnix, template, calendar);
         if (anchor.inGap) {
           flags.push({
             input: todayLabel,
@@ -322,17 +353,17 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
             days = [anchor.day];
             break;
           case "yesterday":
-            days = [previousSessionDay(anchor.day, template)];
+            days = [previousSessionDay(anchor.day, template, calendar)];
             break;
           case "last-n-sessions": {
             days = [anchor.day];
             while (days.length < n!) {
-              days.unshift(previousSessionDay(days[0], template));
+              days.unshift(previousSessionDay(days[0], template, calendar));
             }
             break;
           }
           case "this-week":
-            days = weekSessionDays(mondayOfWeek(anchor.day.label), template).filter(
+            days = weekSessionDays(mondayOfWeek(anchor.day.label), template, calendar).filter(
               (d) => d.startUnix <= nowUnix,
             );
             break;
@@ -340,6 +371,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
             days = weekSessionDays(
               addDaysToLabel(mondayOfWeek(anchor.day.label), -7),
               template,
+              calendar,
             );
             break;
         }
@@ -347,6 +379,29 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
       return err(`Could not resolve session-days for ${symbol}: ${m}`);
+    }
+
+    // Surface calendar-closed dates inside the resolved window as flags —
+    // they are absent from `days` and that absence must be explained.
+    if (calendar.size > 0) {
+      const lo = hasExplicit ? start! : days.length > 0 ? days[0].label : undefined;
+      const hi = hasExplicit ? end! : days.length > 0 ? days[days.length - 1].label : undefined;
+      if (lo !== undefined && hi !== undefined) {
+        for (const [date, entry] of calendar) {
+          if (
+            entry.kind === "closed" &&
+            date >= lo &&
+            date <= hi &&
+            !flags.some((f) => f.input === date)
+          ) {
+            flags.push({
+              input: date,
+              reason: nonSessionReason(date, calendar),
+              nearest: nearestSessionDays(date, template, calendar),
+            });
+          }
+        }
+      }
     }
 
     const sessionDays: SessionDayOut[] = days.map((d) => ({
@@ -377,9 +432,9 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
             requested,
             sessionDays,
             flags,
-            // Honesty flag: exchange holidays are NOT modeled. A holiday
-            // (or early close) can appear here as a normal session-day.
-            holidaysModeled: false,
+            // False = calendar-blind for this template: holidays may
+            // appear as normal session-days.
+            holidaysModeled: calendar.size > 0,
             barCountEstimate,
           }),
         },
@@ -389,7 +444,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
 }
 
 export function registerResolveSessionDays(server: McpServer): void {
-  const handler = createResolveSessionDaysHandler();
+  const handler = createResolveSessionDaysHandler({ db: defaultDb });
 
   server.tool(
     "resolve_session_days",

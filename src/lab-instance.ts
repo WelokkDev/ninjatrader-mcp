@@ -6,6 +6,8 @@ import { SqliteExperimentStore, openLabDatabase } from "./lab/store/sqlite-store
 import { EtaCalibrator } from "./lab/eta/calibrator.js";
 import { consoleSink, jsonlSink } from "./lab/obs/sinks.js";
 import { NinjaTraderRunner } from "./adapters/ninjatrader/index.js";
+import candlesDb from "./db/connection.js";
+import { backtestDataPreflight } from "./core/cache/preflight.js";
 
 // The single Lab instance the MCP server exposes. This is the one place the
 // generic lab is bound to THIS project's engine + storage. Swap the runner or
@@ -35,6 +37,15 @@ const runner = new NinjaTraderRunner({
   repoRoot,
   dataPath: dataDir,
   privateShaResolver: () => resolvePrivateSha(),
+  // Fail experiments before spawn on unresolvable dates, an in-progress
+  // end day, or an incomplete 5m cache (range + lookback window).
+  preflight: (spec) =>
+    backtestDataPreflight(candlesDb, {
+      symbol: spec.symbol,
+      startDay: spec.startDay,
+      endDay: spec.endDay,
+      lookbackDays: spec.lookbackDays,
+    }),
 });
 
 export const lab = new Lab({
