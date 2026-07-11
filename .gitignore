@@ -21,8 +21,8 @@ data/*.db-wal
 src/private/
 build/
 
-# User-local drawing config (role→style presets + named views); machine-specific
 drawing.config.json
+draw.md
 
 # Backtest output bundles (one folder per run; regenerable, can be large)
 backtest-results/

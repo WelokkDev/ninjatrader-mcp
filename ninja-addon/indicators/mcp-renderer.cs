@@ -22,12 +22,20 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private string symbolKey;
 		private bool   registered;
 
-		private readonly ConcurrentQueue<DrawZoneCommand>  drawQueue
-			= new ConcurrentQueue<DrawZoneCommand>();
-		private readonly ConcurrentQueue<DrawCommand> drawCmdQueue
-			= new ConcurrentQueue<DrawCommand>();
-		private readonly ConcurrentQueue<ClearZonesCommand> clearQueue
-			= new ConcurrentQueue<ClearZonesCommand>();
+		private enum RenderKind { Zone, Draw, Clear }
+
+		// One command in arrival order; exactly one payload field is set per Kind.
+		private sealed class RenderCommand
+		{
+			public RenderKind        Kind;
+			public DrawZoneCommand   Zone;   // Kind == Zone
+			public DrawCommand       Draw;   // Kind == Draw
+			public ClearZonesCommand Clear;  // Kind == Clear
+		}
+
+		// Single FIFO of all render commands: draws and clears must apply in arrival
+		// order. Producer = WS-reader thread (static events); consumer = NinjaScript thread.
+		private readonly ConcurrentQueue<RenderCommand> queue = new ConcurrentQueue<RenderCommand>();
 
 		private readonly HashSet<string> myTags = new HashSet<string>();
 
@@ -105,8 +113,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 				foreach (var s in pending)
 				{
 					if (s == null) continue;
-					if (s.Zone != null)      drawQueue.Enqueue(s.Zone);
-					else if (s.Draw != null) drawCmdQueue.Enqueue(s.Draw);
+					if (s.Zone != null)      queue.Enqueue(new RenderCommand { Kind = RenderKind.Zone, Zone = s.Zone });
+					else if (s.Draw != null) queue.Enqueue(new RenderCommand { Kind = RenderKind.Draw, Draw = s.Draw });
 				}
 				TriggerCustomEvent(_ => DrainQueues(), null);
 				Log("replayed " + pending.Count + " stored draw(s) for " + symbolKey);
@@ -120,7 +128,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		{
 			if (cmd == null || cmd.Symbol != symbolKey) return;
 			TryRegister();
-			drawQueue.Enqueue(cmd);
+			queue.Enqueue(new RenderCommand { Kind = RenderKind.Zone, Zone = cmd });
 			TriggerCustomEvent(_ => DrainQueues(), null);
 		}
 
@@ -128,7 +136,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		{
 			if (cmd == null || cmd.Symbol != symbolKey) return;
 			TryRegister();
-			drawCmdQueue.Enqueue(cmd);
+			queue.Enqueue(new RenderCommand { Kind = RenderKind.Draw, Draw = cmd });
 			TriggerCustomEvent(_ => DrainQueues(), null);
 		}
 
@@ -138,7 +146,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			// Empty/missing symbol means "apply to every chart that has the renderer".
 			if (!string.IsNullOrEmpty(cmd.Symbol) && cmd.Symbol != symbolKey) return;
 			TryRegister();
-			clearQueue.Enqueue(cmd);
+			queue.Enqueue(new RenderCommand { Kind = RenderKind.Clear, Clear = cmd });
 			TriggerCustomEvent(_ => DrainQueues(), null);
 		}
 
@@ -147,148 +155,158 @@ namespace NinjaTrader.NinjaScript.Indicators
 			DrainQueues();
 		}
 
-		private void DrainQueues()
+		// Render one legacy draw_zone rectangle.
+		private void RenderZone(DrawZoneCommand draw)
 		{
-			if (CurrentBar < 0) return;
-
-			DrawZoneCommand draw;
-			while (drawQueue.TryDequeue(out draw))
+			try
 			{
-				try
+				var tag = TagPrefix + draw.Id;
+
+				DateTime fromTime;
+				if (draw.FromTime.HasValue)
 				{
-					var tag = TagPrefix + draw.Id;
-
-					DateTime fromTime;
-					if (draw.FromTime.HasValue)
-					{
-						fromTime = draw.FromTime.Value;
-					}
-					else
-					{
-						var startBar = Math.Min(AnchorBarsBack, CurrentBar);
-						fromTime = Time[startBar];
-					}
-
-					var toTime = draw.ToTime.HasValue ? draw.ToTime.Value : Time[0];
-
-					Brush brush;
-					if (draw.Distal < draw.Proximal)      brush = Brushes.LimeGreen;
-					else if (draw.Distal > draw.Proximal) brush = Brushes.OrangeRed;
-					else                                   brush = Brushes.DodgerBlue;
-
-					Draw.Rectangle(
-						this,
-						tag,
-						false,
-						fromTime, draw.Proximal,
-						toTime,   draw.Distal,
-						brush,
-						brush,
-						30);
-					myTags.Add(tag);
-					Log("drew " + tag + " " + draw.Proximal + "/" + draw.Distal
-						+ " " + fromTime.ToString("yyyy-MM-dd HH:mm")
-						+ "→" + toTime.ToString("yyyy-MM-dd HH:mm"));
+					fromTime = draw.FromTime.Value;
 				}
-				catch (Exception ex) { Log("draw failed: " + ex.Message); }
-			}
-
-			DrawCommand dc;
-			while (drawCmdQueue.TryDequeue(out dc))
-			{
-				try
+				else
 				{
-					var tag = TagPrefix + dc.Id;
-					var fromTime = dc.FromTime.HasValue ? dc.FromTime.Value : Time[Math.Min(AnchorBarsBack, CurrentBar)];
-					var toTime   = dc.ToTime.HasValue   ? dc.ToTime.Value   : Time[0];
-					var atTime   = dc.AtTime.HasValue   ? dc.AtTime.Value   : Time[0];
-
-					// Default rectangle color preserves the legacy direction heuristic
-					// (demand=green, supply=red, neutral=blue) when no style.color is set.
-					Brush dirBrush;
-					if (dc.Distal < dc.Proximal)      dirBrush = Brushes.LimeGreen;
-					else if (dc.Distal > dc.Proximal) dirBrush = Brushes.OrangeRed;
-					else                               dirBrush = Brushes.DodgerBlue;
-
-					var brush      = BrushFromHex(dc.Color, dc.Kind == "rectangle" ? dirBrush : Brushes.DodgerBlue);
-					var areaOpacity = dc.Opacity.HasValue
-						? Math.Max(0, Math.Min(100, (int) Math.Round(dc.Opacity.Value * 100)))
-						: 30;
-
-					switch (dc.Kind)
-					{
-						case "rectangle":
-							Draw.Rectangle(this, tag, false, fromTime, dc.Proximal, toTime, dc.Distal, brush, brush, areaOpacity);
-							break;
-						case "hline":
-							// The 4-arg overload defaults drawOnPricePanel to false, which
-							// leaves the line unrendered on the price panel. Pass it explicitly.
-							// isAutoScale=false so a distant line doesn't hijack the y-axis scale.
-							Draw.HorizontalLine(this, tag, false, dc.Price, brush, true);
-							break;
-						case "vline":
-							Draw.VerticalLine(this, tag, atTime, brush);
-							break;
-						case "text":
-							Draw.Text(this, tag, dc.Text ?? "", BarsAgoFor(atTime), dc.Price, brush);
-							break;
-						default:
-							Log("draw: unknown kind '" + dc.Kind + "'");
-							continue;
-					}
-					myTags.Add(tag);
-
-					// Optional companion label (skip for text, whose content IS the label).
-					if (!string.IsNullOrEmpty(dc.Label) && dc.Kind != "text")
-					{
-						var lblTag   = tag + "__lbl";
-						var lblTime  = dc.Kind == "vline" ? atTime : fromTime;
-						var lblPrice = dc.Kind == "rectangle" ? Math.Max(dc.Proximal, dc.Distal)
-							: dc.Kind == "hline" ? dc.Price : High[0];
-						Draw.Text(this, lblTag, dc.Label, BarsAgoFor(lblTime), lblPrice, brush);
-						myTags.Add(lblTag);
-					}
-					Log("drew " + dc.Kind + " " + tag);
+					var startBar = Math.Min(AnchorBarsBack, CurrentBar);
+					fromTime = Time[startBar];
 				}
-				catch (Exception ex) { Log("draw(generic) failed: " + ex.Message); }
-			}
 
-			ClearZonesCommand clr;
-			while (clearQueue.TryDequeue(out clr))
+				var toTime = draw.ToTime.HasValue ? draw.ToTime.Value : Time[0];
+
+				Brush brush;
+				if (draw.Distal < draw.Proximal)      brush = Brushes.LimeGreen;
+				else if (draw.Distal > draw.Proximal) brush = Brushes.OrangeRed;
+				else                                   brush = Brushes.DodgerBlue;
+
+				Draw.Rectangle(
+					this,
+					tag,
+					false,
+					fromTime, draw.Proximal,
+					toTime,   draw.Distal,
+					brush,
+					brush,
+					30);
+				myTags.Add(tag);
+				Log("drew " + tag + " " + draw.Proximal + "/" + draw.Distal
+					+ " " + fromTime.ToString("yyyy-MM-dd HH:mm")
+					+ "→" + toTime.ToString("yyyy-MM-dd HH:mm"));
+			}
+			catch (Exception ex) { Log("draw failed: " + ex.Message); }
+		}
+
+		// Render one generic draw primitive (rectangle|hline|vline|text) + optional label.
+		private void RenderDraw(DrawCommand dc)
+		{
+			try
 			{
-				try
+				var tag = TagPrefix + dc.Id;
+				var fromTime = dc.FromTime.HasValue ? dc.FromTime.Value : Time[Math.Min(AnchorBarsBack, CurrentBar)];
+				var toTime   = dc.ToTime.HasValue   ? dc.ToTime.Value   : Time[0];
+				var atTime   = dc.AtTime.HasValue   ? dc.AtTime.Value   : Time[0];
+
+				// Default rectangle color preserves the legacy direction heuristic
+				// (demand=green, supply=red, neutral=blue) when no style.color is set.
+				Brush dirBrush;
+				if (dc.Distal < dc.Proximal)      dirBrush = Brushes.LimeGreen;
+				else if (dc.Distal > dc.Proximal) dirBrush = Brushes.OrangeRed;
+				else                               dirBrush = Brushes.DodgerBlue;
+
+				var brush      = BrushFromHex(dc.Color, dc.Kind == "rectangle" ? dirBrush : Brushes.DodgerBlue);
+				var areaOpacity = dc.Opacity.HasValue
+					? Math.Max(0, Math.Min(100, (int) Math.Round(dc.Opacity.Value * 100)))
+					: 30;
+
+				switch (dc.Kind)
 				{
-					if (clr.Ids != null && clr.Ids.Count > 0)
+					case "rectangle":
+						Draw.Rectangle(this, tag, false, fromTime, dc.Proximal, toTime, dc.Distal, brush, brush, areaOpacity);
+						break;
+					case "hline":
+						// The 4-arg overload defaults drawOnPricePanel to false, which
+						// leaves the line unrendered on the price panel. Pass it explicitly.
+						// isAutoScale=false so a distant line doesn't hijack the y-axis scale.
+						Draw.HorizontalLine(this, tag, false, dc.Price, brush, true);
+						break;
+					case "vline":
+						Draw.VerticalLine(this, tag, atTime, brush);
+						break;
+					case "text":
+						Draw.Text(this, tag, dc.Text ?? "", BarsAgoFor(atTime), dc.Price, brush);
+						break;
+					default:
+						Log("draw: unknown kind '" + dc.Kind + "'");
+						return;
+				}
+				myTags.Add(tag);
+
+				// Optional companion label (skip for text, whose content IS the label).
+				if (!string.IsNullOrEmpty(dc.Label) && dc.Kind != "text")
+				{
+					var lblTag   = tag + "__lbl";
+					var lblTime  = dc.Kind == "vline" ? atTime : fromTime;
+					var lblPrice = dc.Kind == "rectangle" ? Math.Max(dc.Proximal, dc.Distal)
+						: dc.Kind == "hline" ? dc.Price : High[0];
+					Draw.Text(this, lblTag, dc.Label, BarsAgoFor(lblTime), lblPrice, brush);
+					myTags.Add(lblTag);
+				}
+				Log("drew " + dc.Kind + " " + tag);
+			}
+			catch (Exception ex) { Log("draw(generic) failed: " + ex.Message); }
+		}
+
+		// Apply one clear command.
+		private void ApplyClear(ClearZonesCommand clr)
+		{
+			try
+			{
+				if (clr.Ids != null && clr.Ids.Count > 0)
+				{
+					foreach (var rawId in clr.Ids)
 					{
-						foreach (var rawId in clr.Ids)
-						{
-							if (string.IsNullOrEmpty(rawId)) continue;
-							var tag = TagPrefix + rawId;
-							RemoveDrawObject(tag);
-							RemoveDrawObject(tag + "__lbl");
-							myTags.Remove(tag);
-							myTags.Remove(tag + "__lbl");
-						}
-						Log("cleared " + clr.Ids.Count + " ids on " + symbolKey);
-					}
-					else if (!string.IsNullOrEmpty(clr.Id))
-					{
-						var tag = TagPrefix + clr.Id;
+						if (string.IsNullOrEmpty(rawId)) continue;
+						var tag = TagPrefix + rawId;
 						RemoveDrawObject(tag);
 						RemoveDrawObject(tag + "__lbl");
 						myTags.Remove(tag);
 						myTags.Remove(tag + "__lbl");
-						Log("cleared " + tag);
 					}
-					else
-					{
-						foreach (var tag in new List<string>(myTags))
-							RemoveDrawObject(tag);
-						myTags.Clear();
-						Log("cleared all zones for " + symbolKey);
-					}
+					Log("cleared " + clr.Ids.Count + " ids on " + symbolKey);
 				}
-				catch (Exception ex) { Log("clear failed: " + ex.Message); }
+				else if (!string.IsNullOrEmpty(clr.Id))
+				{
+					var tag = TagPrefix + clr.Id;
+					RemoveDrawObject(tag);
+					RemoveDrawObject(tag + "__lbl");
+					myTags.Remove(tag);
+					myTags.Remove(tag + "__lbl");
+					Log("cleared " + tag);
+				}
+				else
+				{
+					foreach (var tag in new List<string>(myTags))
+						RemoveDrawObject(tag);
+					myTags.Clear();
+					Log("cleared all zones for " + symbolKey);
+				}
+			}
+			catch (Exception ex) { Log("clear failed: " + ex.Message); }
+		}
+
+		private void DrainQueues()
+		{
+			if (CurrentBar < 0) return; // defers the whole ordered batch until bars exist
+			RenderCommand cmd;
+			while (queue.TryDequeue(out cmd))
+			{
+				switch (cmd.Kind)
+				{
+					case RenderKind.Zone:  RenderZone(cmd.Zone);   break;
+					case RenderKind.Draw:  RenderDraw(cmd.Draw);   break;
+					case RenderKind.Clear: ApplyClear(cmd.Clear);  break;
+				}
 			}
 		}
 

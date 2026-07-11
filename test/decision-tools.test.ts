@@ -103,13 +103,13 @@ describe("get_playing_field tool", () => {
     const r = await handler({ symbol: "NQ", asOf: ASOF });
     const payload = parse(r) as {
       symbol: string;
-      playingField?: { winningConditions: { total: number } };
+      playingField?: Record<string, unknown>;
       tradingTrend?: { verdict: string };
       dailyAtr?: number;
     };
     expect(payload.symbol).toBe("NQ");
     expect(payload.playingField).toBeTruthy();
-    expect(payload.playingField!.winningConditions.total).toBeGreaterThanOrEqual(0);
+    expect(Object.keys(payload.playingField!).length).toBeGreaterThan(0);
     expect(["up", "down", "sideways"]).toContain(payload.tradingTrend!.verdict);
     expect(typeof payload.dailyAtr).toBe("number");
   });

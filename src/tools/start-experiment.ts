@@ -25,7 +25,7 @@ export function registerStartExperiment(server: McpServer): void {
       modes: z.array(z.string()).optional().describe("Management modes, e.g. [fixed,trailing,constrained]."),
       strategy: z.string().optional().describe("Strategy name (default: engine default)."),
       smaPreset: z.string().optional().describe("SMA preset name."),
-      lookbackDays: z.number().int().positive().optional().describe("Goal-zone lookback days."),
+      lookbackDays: z.number().int().positive().optional().describe("Zone-detection lookback days."),
       configOverrides: z.record(z.string(), z.unknown()).optional().describe("Deep-merged config overrides (the config-sweep knob)."),
       lean: z.boolean().optional().describe("Skip the giant decisions.jsonl (recommended for sweeps)."),
       expBranch: z.string().optional().describe("Private-repo branch this variant's engine code lives on."),

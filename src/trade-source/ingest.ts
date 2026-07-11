@@ -14,7 +14,7 @@ function toTrade(rt: RawTrade): Trade {
     zoneRef: null, decisionRef: null,
     managementMode: null, barsInTrade: null,
     // mfe reuses the broker realizedPnl for ingested trades. A dedicated
-    // realized_pnl column (Task 6) will replace this interim mapping once the
+    // realized_pnl column will replace this interim mapping once the
     // schema is extended; until then mfe is the only numeric slot that accepts
     // an arbitrary broker P&L value without changing the DDL.
     mfe: rt.realizedPnl,

@@ -75,11 +75,11 @@ export class ChandelierTrail implements ManagementModel {
   }
 }
 
-// "constrained" — the book-faithful trail. The private walker precomputes a
-// per-bar candidate (behind the trending SMA8, only after a confirming close,
-// capped strictly short of breakeven) and passes it in; this model just reads
-// it. Where no move is warranted the candidate equals the entry stop, so the
-// favorable-only ratchet simply holds the running stop.
+// "constrained" — the conservative trail. The private walker precomputes a
+// per-bar stop candidate under its own (private) management rules and passes
+// it in; this model just reads it. Where no move is warranted the candidate
+// equals the entry stop, so the favorable-only ratchet simply holds the
+// running stop.
 export class ConstrainedTrail implements ManagementModel {
   readonly mode: ManagementMode = "constrained";
   constructor(private readonly candidates: readonly number[]) {}
@@ -89,14 +89,49 @@ export class ConstrainedTrail implements ManagementModel {
   }
 }
 
+export type BracketViolation = "past-stop" | "past-target";
+
+// A tradable bracket has the entry strictly between stop and target; returns
+// the violated side, or null when strictly inside.
+export function bracketViolation(
+  direction: TradeDirection,
+  entryPrice: number,
+  stopPrice: number,
+  targetPrice: number,
+): BracketViolation | null {
+  if (direction === "long") {
+    if (entryPrice <= stopPrice) return "past-stop";
+    if (entryPrice >= targetPrice) return "past-target";
+  } else {
+    if (entryPrice >= stopPrice) return "past-stop";
+    if (entryPrice <= targetPrice) return "past-target";
+  }
+  return null;
+}
+
 // Walk the trade forward. Returns null if it never resolves within the supplied
 // window (the walker force-closes at the last bar). bars must be ascending and start at the entry bar.
+// Throws on a born-breached trade (entry at/past its own stop or target): simulating
+// one would read as an instant entry-bar "touch" and book a phantom exit at a stale level.
 export function simulateFill(
   openTrade: OpenTrade,
   bars: Candle[],
   cfg: FillConfig,
   management: ManagementModel,
 ): FillResult | null {
+  const violation = bracketViolation(
+    openTrade.direction,
+    openTrade.entryPrice,
+    openTrade.stopPrice,
+    openTrade.targetPrice,
+  );
+  if (violation !== null) {
+    throw new Error(
+      `born-breached trade: ${openTrade.direction} entry ${openTrade.entryPrice} is at/past its ` +
+        `${violation === "past-stop" ? "stop" : "target"} ` +
+        `(stop ${openTrade.stopPrice}, target ${openTrade.targetPrice})`,
+    );
+  }
   if (bars.length === 0) return null;
   const dir = openTrade.direction;
   const target = openTrade.targetPrice;

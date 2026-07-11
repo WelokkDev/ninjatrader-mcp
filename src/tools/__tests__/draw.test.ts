@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createDrawHandler } from "../draw.js";
 import type { OutboundMessage } from "../../bridge/protocol.js";
 
-function harness(connected = true) {
+function harness(connected = true, attached: string[] = ["NQ"]) {
   const sent: OutboundMessage[] = [];
   const handler = createDrawHandler({
     isConnected: () => connected,
@@ -10,6 +10,7 @@ function harness(connected = true) {
       sent.push(m);
       return true;
     },
+    knownInstruments: () => attached,
   });
   return { handler, sent };
 }
@@ -53,5 +54,20 @@ describe("draw tool", () => {
     const res = await handler({ id: "x", symbol: "NQ", shape: { kind: "vline", ts: 100 } });
     expect(sent).toHaveLength(0);
     expect(res.content[0].text).toMatch(/not connected/i);
+  });
+
+  it("adds a warning when the target symbol has no attached chart", async () => {
+    const { handler } = harness(true, ["ES"]);
+    const res = await handler({ id: "h", symbol: "NQ", shape: { kind: "hline", price: 2000 } });
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.dispatched).toBe(true);
+    expect(payload.warning).toMatch(/NQ/);
+  });
+
+  it("adds no warning when the target symbol has an attached chart", async () => {
+    const { handler } = harness(true, ["NQ"]);
+    const res = await handler({ id: "h", symbol: "NQ", shape: { kind: "hline", price: 2000 } });
+    const payload = JSON.parse(res.content[0].text);
+    expect(payload.warning).toBeUndefined();
   });
 });

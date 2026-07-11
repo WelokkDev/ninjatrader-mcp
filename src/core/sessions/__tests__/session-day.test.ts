@@ -75,6 +75,20 @@ describe("calendar-aware geometry", () => {
     expect(endUnix).toBe(unix(2026, 2, 17, 22)); // normal Tue 17:00 EST close
   });
 
+  it('open "24:00" means midnight of the next calendar day (late begin on the close date)', () => {
+    // Good Friday shape: no prior-evening span at all; the session runs
+    // 00:00 → 09:15 on the close date itself.
+    const cal: SessionCalendar = new Map([
+      [
+        "2026-04-03",
+        { date: "2026-04-03", kind: "modified" as const, openTime: "24:00", closeTime: "09:15", source: "manual" as const, description: "Good Friday" },
+      ],
+    ]);
+    const { startUnix, endUnix } = sessionDayRange("2026-04-03", TEMPLATE, cal);
+    expect(startUnix).toBe(unix(2026, 4, 3, 4)); // Fri 00:00 EDT
+    expect(endUnix).toBe(unix(2026, 4, 3, 13) + 900); // Fri 09:15 EDT
+  });
+
   it("throws SessionClosedError with the description on closed days", () => {
     expect(() => sessionDayRange("2026-02-20", TEMPLATE, CAL)).toThrow(SessionClosedError);
     expect(() => sessionDayRange("2026-02-20", TEMPLATE, CAL)).toThrow(/Test Closure/);

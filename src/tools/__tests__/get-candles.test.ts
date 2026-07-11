@@ -67,6 +67,9 @@ describe("get_candles fail-closed truncation gate", () => {
     expect(text).toMatch(/1380/);
     expect(text).toMatch(/500/);
     expect(text).toMatch(/limit/i);
+    // The refusal must route uncached ranges to the background job, not
+    // coach a bigger limit into a doomed inline mega-fill.
+    expect(text).toMatch(/prefetch_candles/);
     // Fail-closed: the error carries no candle payload at all.
     expect(text).not.toMatch(/"candles"/);
     expect(request).not.toHaveBeenCalled();
@@ -89,6 +92,53 @@ describe("get_candles fail-closed truncation gate", () => {
       await call(handler, { start: "2026-05-04", end: "2026-05-08", limit: 1380 }),
     );
     expect(out.matched).toBe(1380);
+    expect(out.count).toBe(0);
+    expect(out.warning).toMatch(/not connected/i);
+    expect(out.data_complete).toBe(false);
+  });
+});
+
+describe("get_candles inline cold-work guard", () => {
+  // Mon 2026-05-04 .. Fri 2026-05-22 = 15 session-days (3 Mon–Fri weeks).
+  const WEEK3 = { start: "2026-05-04", end: "2026-05-22", limit: 5000 };
+  const WEEK3_LABELS: Array<[number, number]> = [
+    [5, 4], [5, 5], [5, 6], [5, 7], [5, 8],
+    [5, 11], [5, 12], [5, 13], [5, 14], [5, 15],
+    [5, 18], [5, 19], [5, 20], [5, 21], [5, 22],
+  ];
+
+  it("refuses an inline fill when the cold session-day count exceeds the threshold", async () => {
+    const { handler, request } = harness({ connected: true });
+    const text = await call(handler, WEEK3);
+    expect(text).toMatch(/15 session-day/);
+    expect(text).toMatch(/prefetch_candles/);
+    expect(text).not.toMatch(/"candles"/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("fetches inline at or under the threshold", async () => {
+    const { handler, request } = harness({ connected: true });
+    request.mockResolvedValue(undefined);
+    const out = JSON.parse(
+      await call(handler, { start: "2026-05-04", end: "2026-05-05", limit: 600 }),
+    );
+    expect(request).toHaveBeenCalledTimes(2); // one window per cold day
+    expect(out.matched).toBe(552);
+  });
+
+  it("does not trip on a big range that is already fully cached", async () => {
+    const { db, handler, request } = harness({ connected: true });
+    // Session-day D starts at 18:00 ET (22:00 UTC in May) the previous day.
+    for (const [mo, d] of WEEK3_LABELS) seedSessionDay(db, "NQ", unix(2026, mo, d - 1, 22));
+    const out = JSON.parse(await call(handler, WEEK3));
+    expect(out.count).toBe(15 * 276);
+    expect(out.data_complete).toBe(true);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("keeps the disconnected warning path for big cold ranges (no inline work to guard)", async () => {
+    const { handler } = harness();
+    const out = JSON.parse(await call(handler, WEEK3));
     expect(out.count).toBe(0);
     expect(out.warning).toMatch(/not connected/i);
     expect(out.data_complete).toBe(false);

@@ -6,7 +6,7 @@
 //
 // This module is deliberately PUBLIC (no strategy content) — it only
 // buckets and trims bars by an as-of timestamp. The strategy-shaped
-// consumers (WAW / zone detection, SMA / trend reads in src/private) import
+// consumers (zone detection, SMA / trend reads in src/private) import
 // this shape.
 
 import type { Candle, Timeframe } from "../types.js";
@@ -14,7 +14,7 @@ import type { Candle, Timeframe } from "../types.js";
 export interface FrozenView {
   // Entry-TF bars with timestamp <= asOf.
   primary: Candle[];
-  // Per HTF: bars whose bucket CLOSED at <= asOf — the only bars safe for WAW / zone detection, since a still-forming bucket can change its OHLC.
+  // Per HTF: bars whose bucket CLOSED at <= asOf — the only bars safe for zone detection, since a still-forming bucket can change its OHLC.
   completed: Map<Timeframe, Candle[]>;
   // Per HTF: `completed` plus a trailing forming bar (NOT flagged partial), for SMA / trend reads that want the live value at asOf rather than the last closed value.
   asOfView: Map<Timeframe, Candle[]>;

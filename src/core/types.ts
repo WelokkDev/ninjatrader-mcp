@@ -12,29 +12,14 @@ export interface Candle {
   // Set true on the most-recent aggregated bar when its session-day's
   // expected end is in the future — i.e., more underlying bars may still
   // arrive that extend or supersede this bucket. Consumers that ignore
-  // the field see no behavior change. The WAW detector should skip
-  // pairing logic on partial bars (follow-up — not enforced today).
+  // the field see no behavior change. Zone detection should skip
+  // partial bars (follow-up — not enforced today).
   partial?: boolean;
 }
 
 export type Timeframe = "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
 
 export type ZoneType = "supply" | "demand";
-
-export type FormationType = "RBD" | "DBR" | "DBD" | "RBR";
-
-export interface Zone {
-  id: string;
-  symbol: string;
-  timeframe: Timeframe;
-  type: ZoneType;
-  formation: FormationType;
-  proximal: number;
-  distal: number;
-  timestamp: number;
-  waw_count: number;
-  score: number | null;
-}
 
 export interface Trade {
   id: string;

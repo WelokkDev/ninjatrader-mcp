@@ -41,7 +41,7 @@ export function aggregateCandles(
 ): Candle[] {
   if (targetTimeframe === "1d") {
     throw new Error(
-      `aggregateCandles: target "1d" is not supported by the intraday aggregator. Use src/private/sma/rollup/daily-aggregator.ts for session-aligned daily bars.`,
+      `aggregateCandles: target "1d" is not supported by the intraday aggregator. Daily bars come from the private session-aligned daily rollup layer.`,
     );
   }
   if (targetTimeframe === "15s" || targetTimeframe === "5m" || targetTimeframe === "15m") {

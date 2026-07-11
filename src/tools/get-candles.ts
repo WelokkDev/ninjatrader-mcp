@@ -17,9 +17,14 @@ import {
   mismatchIsEmpty,
   validateSessionDay,
 } from "../core/cache/validator.js";
-import { ensureCached } from "../core/cache/fill.js";
+import { classifySessionDay, ensureCached } from "../core/cache/fill.js";
 import { isConnected as defaultIsConnected } from "../bridge/index.js";
 import { prefetchManager } from "../prefetch-instance.js";
+
+// A connected call fetches at most this many uncached session-days inline;
+// colder ranges are refused toward prefetch_candles so a synchronous fill
+// can't outlive the MCP tool-call timeout.
+export const MAX_INLINE_COLD_DAYS = 10;
 
 // Session-day query semantics: startUnix is exclusive, endUnix is inclusive
 const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
@@ -199,17 +204,43 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         content: [
           {
             type: "text" as const,
-            text: `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. Narrow the range or pass limit >= ${matched}.`,
+            text:
+              `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. ` +
+              `If the range is already cached, narrow it or re-issue with limit >= ${matched}. ` +
+              `If it still needs fetching from NinjaTrader, start a background prefetch_candles job instead, then re-read here.`,
           },
         ],
       };
     }
 
+    const rawTF = fetchTimeframeFor(timeframe);
+    const nowUnix = Math.floor(Date.now() / 1000);
+
+    // Refuse inline fills past the cold-day cap. Disconnected calls do no
+    // fetch work (instant per-window failures), so the guard doesn't apply.
+    if (deps.isConnected()) {
+      const coldDays = requestedDays.filter(
+        (day) => classifySessionDay(deps.db, symbol, day, rawTF, nowUnix) !== "complete",
+      );
+      if (coldDays.length > MAX_INLINE_COLD_DAYS) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
+                `over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
+                `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
+                `poll prefetch_status until it completes, then re-issue this get_candles.`,
+            },
+          ],
+        };
+      }
+    }
+
     // Fill any gaps in the cache at the raw TF that backs this request.
     // Day-aligned: any session-day that is empty, partial, or in-progress
     // triggers a fetch covering the entire session-day window.
-    const rawTF = fetchTimeframeFor(timeframe);
-    const nowUnix = Math.floor(Date.now() / 1000);
     const fillResult = await ensureCached(
       deps.db,
       symbol,
@@ -331,7 +362,7 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. For MULTI-DAY cold fills, start a background prefetch_candles job instead of a long synchronous pull, then read from here once cached.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z

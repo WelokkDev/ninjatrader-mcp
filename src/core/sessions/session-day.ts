@@ -228,16 +228,20 @@ export function sessionDayRange(
   // A late-begin override keeps the template's open calendar date and
   // replaces only the wall-clock time.
   const openT = parseTime(openOverride ?? span.openTime);
-  // openTime "24:00" would also push to next day, but "24:00" makes no
-  // sense as an open boundary — reject.
-  if (openT.nextDay) {
-    throw new Error(`openTime "24:00" is not meaningful in template "${template.name}"`);
-  }
-  const startUnix = tzInstantToUnix(
-    openDate.year, openDate.month, openDate.day,
-    openT.hour, openT.minute, openT.second,
-    template.timezone,
-  );
+  // Open "24:00" = midnight of the day AFTER the open calendar date —
+  // expresses a late begin landing on the close date itself (e.g. a Good
+  // Friday session running 00:00 → 09:15 with no prior-evening span).
+  // Mirrors the "24:00" close convention above.
+  const openDay = openT.nextDay
+    ? addDays(openDate.year, openDate.month, openDate.day, 1)
+    : openDate;
+  const startUnix = openT.nextDay
+    ? tzInstantToUnix(openDay.year, openDay.month, openDay.day, 0, 0, 0, template.timezone)
+    : tzInstantToUnix(
+        openDay.year, openDay.month, openDay.day,
+        openT.hour, openT.minute, openT.second,
+        template.timezone,
+      );
 
   if (endUnix <= startUnix) {
     throw new Error(

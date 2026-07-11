@@ -242,7 +242,8 @@ describe("get_candles handler — cache hit path", () => {
     // Empty DB → cache miss → bridge.request("request_candles", payload)
     // gets called. The payload must carry the NQ session-template name
     // ("cme_us_index_futures_eth") so the C# add-on picks the right
-    // NT8 TradingHours template. Regression guard against the F-1 bug.
+    // NT8 TradingHours template. Regression guard against the add-on's old
+    // wrong-template fetch bug.
     let capturedPayload: Record<string, unknown> | null = null;
     const handler = createGetCandlesHandler({
       db,

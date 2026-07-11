@@ -1,9 +1,8 @@
 // Per-instrument minimum price increment (tick size).
 //
-// Lifted out of the smaStop quantifier config — where it lived as a
-// hardcoded 0.25 default to keep PR5 scoped to private/ — so that stop
-// placement, R-multiple math, and stopBufferTicks all read one source
-// of truth. Parallels the session registry in ../sessions/registry.ts:
+// Lifted out of a private engine config — where it lived as a hardcoded
+// 0.25 default — so that every consumer reads one source of truth.
+// Parallels the session registry in ../sessions/registry.ts:
 // same symbol set, same "throw on unknown symbol" contract.
 //
 // Values are the exchange-listed minimum ticks for the front-month

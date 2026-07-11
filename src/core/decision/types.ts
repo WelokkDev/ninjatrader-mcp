@@ -17,8 +17,8 @@ export type TradeMode = "backtest" | "paper" | "live";
 // entry set under each requested mode so they are comparable apples-to-apples:
 //   fixed        — stop+target never move (the control / conservative floor)
 //   trailing     — a structure-agnostic ATR chandelier (aggressive comparator)
-//   constrained  — the book-faithful trail (behind the SMA8 after a confirming
-//                  close, never to breakeven)
+//   constrained  — the conservative trail (per-bar candidates precomputed by
+//                  the private walker under its own rules)
 export type ManagementMode = "fixed" | "trailing" | "constrained";
 
 // How a trade left the market. Mirrors trades.exit_reason.

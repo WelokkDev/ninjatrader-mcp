@@ -7,6 +7,12 @@ export interface HelloMessage {
   instruments: string[];
 }
 
+export interface InstrumentsUpdateMessage {
+  v: 1;
+  type: "instruments_update";
+  instruments: string[];
+}
+
 export interface HeartbeatMessage {
   v: 1;
   type: "heartbeat";
@@ -138,6 +144,7 @@ export interface ErrorMessage {
 export type InboundMessage =
   | HelloMessage
   | HeartbeatMessage
+  | InstrumentsUpdateMessage
   | CandlesResponseMessage
   | BarCloseMessage
   | SessionCalendarResponseMessage
@@ -206,6 +213,19 @@ export function parseMessage(raw: string): ParseResult {
     }
     case "heartbeat":
       return { ok: true, message: { v: 1, type: "heartbeat" } };
+    case "instruments_update": {
+      if (!Array.isArray(obj.instruments) || !obj.instruments.every((s) => typeof s === "string")) {
+        return { ok: false, reason: "instruments_update: instruments must be string[]" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "instruments_update",
+          instruments: obj.instruments as string[],
+        },
+      };
+    }
     case "candles_response": {
       if (typeof obj.id !== "string") {
         return { ok: false, reason: "candles_response: missing id" };

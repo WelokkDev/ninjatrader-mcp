@@ -11,9 +11,8 @@ import { describeBadDays, validateRangeComplete } from "./validator.js";
 // trailing resolve buffer is deliberately not gated — incomplete
 // resolution already surfaces as ambiguousExitTrades.
 
-/** Mirrors DEFAULT_LOOKBACK_DAYS in
- *  src/private/decision/playing-field-orchestrator.ts — keep in sync;
- *  public core must not import private modules. */
+/** Mirrors the private decision engine's DEFAULT_LOOKBACK_DAYS — keep in
+ *  sync; public core must not import private modules. */
 export const FALLBACK_LOOKBACK_DAYS = 35;
 
 export interface RangePreflightResult {

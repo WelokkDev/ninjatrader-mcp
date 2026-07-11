@@ -10,9 +10,10 @@ import {
   DEFAULT_LOOKBACK_DAYS,
 } from "../private/decision/playing-field-orchestrator.js";
 
-// get_playing_field — public MCP registration + a thin validate→delegate→serialize handler. 
-// (config assembly, frozen MTF view, daily-ATR derivation, the findGoalZones → resolveTradingTrend → scanPlayingField pipeline and its result shape) 
-// lives behind composePlayingField in src/private/decision, so the public layer names nothing proprietary. 
+// get_playing_field — public MCP registration + a thin validate→delegate→serialize handler.
+// Everything strategy-shaped (config assembly, frozen MTF view, daily-ATR derivation, the
+// scan pipeline and its result shape) lives behind composePlayingField in src/private/decision,
+// so the public layer names nothing proprietary.
 // Read-only over the 5m cache, call get_candles first.
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };

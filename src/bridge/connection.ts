@@ -189,6 +189,9 @@ export class ConnectionManager {
       case "heartbeat":
         conn.lastHeartbeatAt = Date.now();
         break;
+      case "instruments_update":
+        conn.instruments = [...msg.instruments];
+        break;
     }
 
     // Correlate any inbound message that carries an id with a pending request.

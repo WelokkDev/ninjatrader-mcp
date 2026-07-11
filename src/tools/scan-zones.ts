@@ -1,37 +1,39 @@
 import { z } from "zod";
 import { readFileSync } from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
 import {
   isConnected as defaultIsConnected,
   send as defaultSend,
+  getBridgeStatus,
 } from "../bridge/index.js";
 import type {
   OutboundMessage,
   DrawZoneMessage,
   ClearZonesMessage,
 } from "../bridge/protocol.js";
+import { drawTargetWarning } from "./draw-target.js";
 import { SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import { sessionDayRange } from "../core/sessions/session-day.js";
 import { loadCalendar } from "../core/sessions/calendar.js";
 import type { Candle } from "../core/types.js";
 import { formatLocalISO } from "../core/time.js";
-import { detectWaws } from "../private/waw/detector.js";
-import { summarizeQuantifierResults } from "../private/waw/pipeline.js";
 import {
+  detectZones,
+  summarizeQuantifierResults,
   loadStrategy,
   strategyAdditionalTimeframes,
-} from "../private/waw/strategy-loader.js";
+  STRATEGY_DIR,
+} from "../private/zones.js";
 import type {
   Strategy,
   MarketContext,
   QuantifierResult,
   Zone,
-} from "../private/waw/types.js";
+} from "../private/zones.js";
 
 // scan_zones runs the configured detection pipeline against candles
 // already in the SQLite cache and returns the matching zones. Companion
@@ -52,13 +54,6 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STRATEGY_NAME_RE = /^[a-zA-Z0-9_-]+$/;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// Strategy files live in private/waw/strategies. After build, the
-// build script copies them alongside the compiled JS so this relative
-// path resolves identically in dev (src/) and production (build/).
-const STRATEGY_DIR = path.resolve(__dirname, "../private/waw/strategies");
 
 // A score filter expresses a per-quantifier acceptance window. A zone is  kept iff EVERY filter is satisfied. 
 // A filter is satisfied when the named quantifier's score is in [min, max] (each bound optional). When the named quantifier didn't produce a score 
@@ -89,6 +84,7 @@ export interface ScanZonesDeps {
   db: Database;
   isConnected?: () => boolean;
   send?: (message: OutboundMessage) => boolean;
+  knownInstruments?: () => string[];
 }
 
 type ToolResult = {
@@ -131,6 +127,7 @@ function readStrategy(name: string): Strategy {
 export function createScanZonesHandler(deps: ScanZonesDeps) {
   const isConnectedFn = deps.isConnected ?? defaultIsConnected;
   const sendFn = deps.send ?? defaultSend;
+  const knownInstrumentsFn = deps.knownInstruments ?? (() => getBridgeStatus().instruments);
 
   return async ({
     symbol,
@@ -260,7 +257,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
     // zone — no short-circuit, no mode flag. Earlier callers passed
     // diagnosticMode to disable short-circuit; the short-circuit is now
     // gone and the flag has been removed.
-    const zones = detectWaws(candles, ctx, strategy);
+    const zones = detectZones(candles, ctx, strategy);
 
     // Decorate zones with parallel unix-second timestamps so callers
     // (and the draw path below) don't have to re-parse the ISO strings.
@@ -294,6 +291,7 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
       cleared: boolean;
       drawnIds: string[];
       reason?: string;
+      warning?: string;
     } = {
       requested: draw,
       dispatched: false,
@@ -327,6 +325,8 @@ export function createScanZonesHandler(deps: ScanZonesDeps) {
           if (sendFn(msg)) drawInfo.drawnIds.push(drawId);
         }
         drawInfo.dispatched = drawInfo.drawnIds.length === survivors.length;
+        const warning = drawTargetWarning(symbol, knownInstrumentsFn());
+        if (warning) drawInfo.warning = warning;
       }
     }
 
@@ -419,7 +419,7 @@ export function registerScanZones(server: McpServer): void {
         .optional()
         .default(0.05)
         .describe(
-          "Fraction of c1 body height by which c2's wick may extend outside c1's body before the pair is rejected. Defaults to 0.05 (5%) to forgive sub-tick noise on otherwise-clean pairs; set to 0 for strict containment. Applied to both ends of the wick.",
+          "Detection slack in [0, 1], passed through to the private detection pipeline. Defaults to 0.05 (5%) to forgive sub-tick noise on otherwise-clean candidates; set to 0 for strictest matching. Larger values admit less-clean candidate zones.",
         ),
       skipQuantifiers: z
         .array(z.string())
@@ -433,7 +433,7 @@ export function registerScanZones(server: McpServer): void {
         .optional()
         .default("default")
         .describe(
-          "Strategy file to load from src/private/waw/strategies/ (without the .json extension). Defaults to 'default'.",
+          "Strategy file to load from the private strategies directory (without the .json extension). Defaults to 'default'.",
         ),
       scoreFilters: z
         .array(

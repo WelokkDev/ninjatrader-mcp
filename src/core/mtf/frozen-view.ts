@@ -76,7 +76,7 @@ interface AsOfBuckets {
 
 // Bucket `primary` (already filtered to <= asOf) into `periodSeconds` buckets with the EXACT math of core/aggregator.ts, 
 // sessionDayContaining + floor((t - startUnix - 1) / periodSeconds), close-stamped at the last underlying bar, then split by bucket period-end vs asOf:
-//  - period-end <= asOf → completed (safe for WAW / zone detection)
+//  - period-end <= asOf → completed (safe for zone detection)
 //  - period-end >  asOf → the single forming bar (live, for SMA / trend)
 // A bucket's period-end is its natural grid close clamped to the session-day end, so a session's trailing stub 
 // (e.g. CME ETH's 3-hour 14:00–17:00 4h bucket) counts as complete the instant asOf reaches the 17:00 session close, not at the unreachable 18:00 grid line.
@@ -136,7 +136,7 @@ function bucketAsOf(
 // Aggregate one bucket's underlying bars into a single close-stamped candle. 
 // Byte-identical to core/aggregator.ts: open = first bar, close and timestamp = last bar, high / low / volume reduced across the bucket.
 // Never carries a `partial` flag — completed-vs-live is encoded by which FrozenView map the bar lands in, not by the field 
-// (computeSMAOnCandles forces a trailing-partial SMA to null and throws on a non-trailing one, so a flagged forming bar would break SMA reads).
+// (the private SMA reader forces a trailing-partial SMA to null and throws on a non-trailing one, so a flagged forming bar would break SMA reads).
 export function aggregateBucket(group: readonly Candle[]): Candle {
   const last = group[group.length - 1];
   return {

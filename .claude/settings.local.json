@@ -15,7 +15,11 @@
       "mcp__ninjatrader__run_backtest",
       "mcp__ninjatrader__list_trades",
       "mcp__ninjatrader__list_decisions",
-      "mcp__ninjatrader__draw"
+      "mcp__ninjatrader__draw",
+      "Bash(npx vitest *)",
+      "PowerShell(node \"C:\\\\Users\\\\danie\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-danie-Documents-Project-ninjatrader-mcp\\\\c73eec85-c647-45dc-b0d3-fd2c5d996532\\\\scratchpad\\\\evidence.cjs\")",
+      "Bash(git fetch *)",
+      "Bash(git *)"
     ]
   },
   "enableAllProjectMcpServers": true,

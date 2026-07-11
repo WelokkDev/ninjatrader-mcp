@@ -98,9 +98,7 @@ function rowToDecision(r: DecisionRow): TradeDecisionRow {
   };
 }
 
-// Realized R-multiple in units of initial risk (entry-to-stop distance). 
-// Since the walker sets stop_price from the *expanded* distal, 
-// this number is automatically computed off distalExpanded, not distalOriginal
+// Realized R-multiple in units of initial risk (entry-to-stop distance).
 // For a degenerate stop == entry, risk is 0 and we return null rather than dividing.
 function computeRMultiple(
   direction: TradeDirection,

@@ -2,7 +2,7 @@
 
 // One-shot rebuild script — drops every row from the `candles` table.
 // Subsequent `get_candles` calls trigger on-demand fetches that hit the
-// (post-F-1-fix, ETH-emitting) NT8 add-on, which re-populates the cache
+// (fixed, ETH-emitting) NT8 add-on, which re-populates the cache
 // with correctly-windowed and correctly-stamped bars.
 
 import db from "../db/connection.js";

@@ -92,8 +92,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 			new Dictionary<string, string>(StringComparer.Ordinal)
 		{
 			{ "cme_us_index_futures_eth", "CME US Index Futures ETH" },
-			{ "nymex_energy_eth",         "CME US Energy ETH" },
-			{ "comex_metals_eth",         "COMEX Metals ETH" },
+			// NT8 ships one combined template for NYMEX energy + COMEX metals.
+			{ "nymex_energy_eth",         "Nymex Metals - Energy ETH" },
+			{ "comex_metals_eth",         "Nymex Metals - Energy ETH" },
 		};
 
 		private CancellationTokenSource cts;
@@ -111,13 +112,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public void RegisterSymbol(string symbol)
 		{
 			if (string.IsNullOrEmpty(symbol)) return;
-			registeredSymbols[symbol] = 1;
+			if (registeredSymbols.TryAdd(symbol, 1))
+				PushRoster();
 			Log("indicator registered symbol: " + symbol);
 		}
 		public void UnregisterSymbol(string symbol)
 		{
 			byte _;
-			registeredSymbols.TryRemove(symbol, out _);
+			if (registeredSymbols.TryRemove(symbol, out _))
+				PushRoster();
 			Log("indicator unregistered symbol: " + symbol);
 		}
 
@@ -374,6 +377,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 			};
 			await SendJsonAsync(ws, Json.Serialize(hello), ct);
 			Log("sent hello (" + instruments.Count + " instruments)");
+		}
+
+		// Push the renderer roster on change so the server's known-instruments list
+		// stays live rather than a connect-time snapshot. Fire-and-forget; roster
+		// changes made while disconnected are covered by the next hello.
+		private void PushRoster()
+		{
+			var instruments = new List<string>(registeredSymbols.Keys);
+			var msg = new Dictionary<string, object>
+			{
+				{ "v",           1 },
+				{ "type",        "instruments_update" },
+				{ "instruments", instruments.ToArray() },
+			};
+			SendFireAndForget(Json.Serialize(msg),
+				"instruments_update (" + instruments.Count + " instruments)");
 		}
 
 		private async Task HeartbeatLoopAsync(ClientWebSocket ws, CancellationToken ct)
@@ -847,7 +866,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					partialHolidays.Add(new Dictionary<string, object>
 					{
 						{ "date",         kvp.Key.ToString("yyyy-MM-dd") },
-						{ "isEarlyClose", partial != null && partial.IsEarlyClose },
+						{ "isEarlyClose", partial != null && partial.IsEarlyEnd },
 						{ "isLateBegin",  partial != null && partial.IsLateBegin },
 						{ "description",  partial != null && partial.Description != null ? partial.Description : "" },
 					});
