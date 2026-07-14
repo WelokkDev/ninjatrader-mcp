@@ -7,24 +7,24 @@
     "ninjatrader-mcp": "./build/index.js"
   },
   "scripts": {
-    "generate:schema": "ts-json-schema-generator --path src/private/sma/types.ts --type SMAConfig --tsconfig tsconfig.json --out src/private/sma/config/schema/sma-config.schema.json",
-    "generate:csharp": "shx mkdir -p src/private/ninjatrader/indicators/generated && quicktype --src src/private/sma/config/schema/sma-config.schema.json --src-lang schema --out src/private/ninjatrader/indicators/generated/SMAConfig.generated.cs --lang csharp --top-level SMAConfig --namespace NinjaTrader.NinjaScript.Indicators.Generated --framework NewtonSoft --array-type list --features attributes-only --csharp-version 6 --number-type double",
-    "build": "npm run generate:schema && npm run generate:csharp && tsc && shx chmod +x build/index.js && node src/private/scripts/copy-assets.mjs",
+    "build": "tsc && shx chmod +x build/index.js && node scripts/build-private.mjs --optional",
+    "build:private": "node scripts/build-private.mjs",
+    "init-private": "node scripts/init-private.mjs",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
+    "typecheck:private": "tsc -p tsconfig.private.json --noEmit",
     "inspect": "npx @modelcontextprotocol/inspector build/index.js",
     "seed": "node build/scripts/seed.js",
     "start": "node build/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:zones": "tsc && node build/private/tests/test-zones.js",
     "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js",
     "dump-bars": "tsc && node build/scripts/dump-bars.js",
-    "audit-bars": "tsc && node build/scripts/audit-bars.js",
-    "backtest:observe": "tsc && node src/private/scripts/copy-assets.mjs && node build/private/scripts/run-backtest-observable.js"
+    "audit-bars": "tsc && node build/scripts/audit-bars.js"
   },
   "files": [
-    "build"
+    "build",
+    "!build/private"
   ],
   "repository": {
     "type": "git",

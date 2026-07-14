@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/private-module-context.mjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

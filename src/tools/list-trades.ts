@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ledger } from "../db/ledger.js";
 
 // list_trades — read the persisted trades table (a thin filter→serialize shell
-// over the ledger DAO). Filter by runId (a run_backtest run), mode
+// over the ledger DAO). Filter by runId (a backtest run), mode
 // (backtest/paper/live), and/or managementMode (fixed/trailing/constrained) to
 // compare the three exit policies of a backtest run side by side.
 
@@ -34,12 +34,12 @@ export function registerListTrades(server: McpServer): void {
 
   server.tool(
     "list_trades",
-    "List persisted trades from the ledger, optionally filtered by runId (a run_backtest run), mode (backtest/paper/live), and/or managementMode (fixed/trailing/constrained). Each trade carries entry/stop/target/exit prices, exitReason, r_multiple, barsInTrade, and mfe. Note: for 'live'/imported trades, mfe carries the broker's realized P&L (dollars), not max-favorable-excursion-in-R, until a dedicated realized_pnl column lands.",
+    "List persisted trades from the ledger, optionally filtered by runId (a backtest run — see an experiment's provenance.runId), mode (backtest/paper/live), and/or managementMode (fixed/trailing/constrained). Each trade carries entry/stop/target/exit prices, exitReason, r_multiple, barsInTrade, and mfe. Note: for 'live'/imported trades, mfe carries the broker's realized P&L (dollars), not max-favorable-excursion-in-R, until a dedicated realized_pnl column lands.",
     {
       runId: z
         .string()
         .optional()
-        .describe("Filter to a single backtest run id (from run_backtest)."),
+        .describe("Filter to a single backtest run id."),
       mode: z
         .enum(MODES)
         .optional()

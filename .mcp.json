@@ -2,7 +2,7 @@
   "mcpServers": {
     "ninjatrader": {
       "command": "node",
-      "args": ["./build/index.js"],
+      "args": ["./scripts/mcp-entry.mjs"],
       "timeout": 1800000
     }
   }

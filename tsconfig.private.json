@@ -1,0 +1,5 @@
+{
+  "//": "Build YOUR private bin. Re-includes src/private/ (which the root tsconfig excludes) so `npm run build:private` emits build/private/index.js. Public `npm run build` stays private-free.",
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules"]
+}

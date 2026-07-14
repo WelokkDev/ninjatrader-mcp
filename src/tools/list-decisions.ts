@@ -4,7 +4,7 @@ import { ledger } from "../db/ledger.js";
 
 // list_decisions — read the persisted trade_decisions table (a thin
 // filter→serialize shell over the ledger DAO). One row per evaluated bar of a
-// run_backtest walk, with verdict ('yes'/'no'), the short reason code, and the
+// backtest walk, with verdict ('yes'/'no'), the short reason code, and the
 // full per-step trace. Filter by runId and/or verdict to build the "stall
 // funnel": how many bars died at each decision step, by reason.
 
@@ -48,12 +48,12 @@ export function registerListDecisions(server: McpServer): void {
 
   server.tool(
     "list_decisions",
-    "List persisted per-bar decisions from a run_backtest walk (one row per evaluated 5m close), with verdict ('yes'/'no'), short reason code, and the full step trace. Pass reasonsOnly=true for the 'stall funnel' — a count of 'no' bars grouped by which decision step killed them. Filter by runId and/or verdict.",
+    "List persisted per-bar decisions from a backtest walk (one row per evaluated 5m close), with verdict ('yes'/'no'), short reason code, and the full step trace. Pass reasonsOnly=true for the 'stall funnel' — a count of 'no' bars grouped by which decision step killed them. Filter by runId and/or verdict.",
     {
       runId: z
         .string()
         .optional()
-        .describe("Filter to a single backtest run id (from run_backtest)."),
+        .describe("Filter to a single backtest run id."),
       verdict: z
         .enum(["yes", "no"])
         .optional()

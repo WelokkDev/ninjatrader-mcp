@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { lab } from "../lab-instance.js";
+import type { Lab } from "../lab/lab.js";
 
 // diff_experiments — side-by-side of two finished experiments: funnel yes-delta,
 // per-reason deltas, per-mode metric deltas, and a CAUTION when config/engine
@@ -11,7 +11,7 @@ const ok = (payload: unknown): ToolResult => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload) }],
 });
 
-export function registerDiffExperiments(server: McpServer): void {
+export function registerDiffExperiments(server: McpServer, lab: Lab): void {
   server.tool(
     "diff_experiments",
     "Diff two finished experiments: funnel yes-delta, per-reason deltas, per-mode metric deltas, and a caution flag if config/engine differ (yield can move just by loosening a gate).",

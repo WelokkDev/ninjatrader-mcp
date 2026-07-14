@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { lab } from "../lab-instance.js";
+import type { Lab } from "../lab/lab.js";
 
 // experiment_result — the ~3KB normalized verdict (funnel + per-mode metrics +
 // provenance + integrity report). NEVER the 176-307MB decisions.jsonl.
@@ -10,7 +10,7 @@ const ok = (payload: unknown): ToolResult => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload) }],
 });
 
-export function registerExperimentResult(server: McpServer): void {
+export function registerExperimentResult(server: McpServer, lab: Lab): void {
   server.tool(
     "experiment_result",
     "Get the normalized, token-tiny result for a finished experiment: funnel, per-mode metrics, provenance, and the integrity report (causal/cache/provenance verdicts). Returns {pending:true} if the run is not finished.",

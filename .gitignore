@@ -12,7 +12,6 @@ private/
 # ignore it all EXCEPT the tracked fixtures re-included below.
 data/*
 !data/sample/
-!data/lab-calibration.json
 # (kept below for clarity / stash-merge safety; redundant under data/*)
 data/*.db
 data/*.db-shm

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { lab } from "../lab-instance.js";
+import type { Lab } from "../lab/lab.js";
 
 // list_experiments — compact summaries (id, status, label, yes-count, trades by
 // mode, integrity ok). Explicit small fields only; never the full records.
@@ -10,7 +10,7 @@ const ok = (payload: unknown): ToolResult => ({
   content: [{ type: "text" as const, text: JSON.stringify(payload) }],
 });
 
-export function registerListExperiments(server: McpServer): void {
+export function registerListExperiments(server: McpServer, lab: Lab): void {
   server.tool(
     "list_experiments",
     "List experiments (newest first) as compact summaries: id, status, label, yes-count, trades-by-mode, integrity ok. Optionally filter by status.",
