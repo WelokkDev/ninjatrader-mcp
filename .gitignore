@@ -20,7 +20,9 @@ data/*.db-wal
 src/private/
 build/
 
-drawing.config.json
+# Trade-import config — holds a local filesystem path and account name.
+# Copy ninjatrader.config.example.json to create it; see SETUP.md.
+ninjatrader.config.json
 draw.md
 
 # Backtest output bundles (one folder per run; regenerable, can be large)
@@ -159,3 +161,6 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Active Claude skills are personal/local — ship shareable ones as .claude/skill-templates/
+.claude/skills/

@@ -119,6 +119,104 @@ describe("PrefetchManager single-flight scheduling", () => {
 });
 
 describe("PrefetchManager jobs", () => {
+  it("re-classifies at execute time: a day completed while queued is not refetched", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+    await flush();
+    expect(calls).toHaveLength(1); // D1 in flight, D2 queued
+
+    // A hi-lane inline fill completes D2 while it waits its turn.
+    seed15m(db, D2);
+
+    calls[0].release(() => seed15m(db, D1));
+    await m.whenSettled(started.job.jobId);
+    // D2 must NOT have been refetched — its fetch would be pure churn and,
+    // under day-refill ingest, could downgrade the day on a degraded response.
+    expect(calls).toHaveLength(1);
+    const after = m.status(started.job.jobId);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.job.state).toBe("completed");
+    // Skipped-as-already-complete days must not inflate the fetched count —
+    // operators reconcile `fetched` against actual bridge round-trips.
+    expect(after.job).toMatchObject({ fetched: 1, alreadyComplete: 1 });
+  });
+
+  it("skips a queued day completed under ADJUSTED geometry while it waited (no refetch, no false failure)", async () => {
+    const db = memDb();
+    // D2 is a declared-but-untimed early-close day.
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source)
+       VALUES ('cme_us_index_futures_eth', '2026-05-05', 'modified', 'nt8')`,
+    ).run();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+    await flush();
+    expect(calls).toHaveLength(1); // D1 in flight, D2 queued
+
+    // While D2 waits, a hi-lane inline fill completes it AND records the
+    // 13:00 close — the cache is complete under the ADJUSTED geometry.
+    const trimmedEnd = D2.startUnix + 76 * 900;
+    seed15m(db, { label: "trim", startUnix: D2.startUnix, endUnix: trimmedEnd });
+    const { recordObservedClose } = await import("../../sessions/calendar.js");
+    recordObservedClose(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
+
+    calls[0].release(() => seed15m(db, D1));
+    await flush();
+    if (calls.length > 1) calls[1].release();
+    await m.whenSettled(started.job.jobId);
+
+    // Classifying D2 with its frozen template-close geometry would refetch
+    // it and then mark it FAILED (observeEarlyClose refuses recorded days).
+    expect(calls).toHaveLength(1);
+    const after = m.status(started.job.jobId);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.job.state).toBe("completed");
+  });
+
+  it("verifies a FETCHED day against current geometry when its close was recorded while queued", async () => {
+    const db = memDb();
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source)
+       VALUES ('cme_us_index_futures_eth', '2026-05-05', 'modified', 'nt8')`,
+    ).run();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+    await flush();
+    expect(calls).toHaveLength(1); // D1 in flight, D2 queued
+
+    // The close is recorded while D2 waits — but its 15m cache stays EMPTY,
+    // so the pre-fire re-classify still (correctly) fetches it.
+    const { recordObservedClose } = await import("../../sessions/calendar.js");
+    recordObservedClose(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
+
+    calls[0].release(() => seed15m(db, D1));
+    await flush();
+    expect(calls).toHaveLength(2); // D2's fetch fired
+    // NT8 returns the trimmed session (76 × 15m through 13:00 EDT).
+    calls[1].release(() =>
+      seed15m(db, { label: "trim", startUnix: D2.startUnix, endUnix: D2.startUnix + 76 * 900 }),
+    );
+    await m.whenSettled(started.job.jobId);
+
+    // Verifying against the frozen template-close window would call the
+    // complete day 'partial' and mark it failed (observeEarlyClose refuses
+    // days whose close is already recorded).
+    const after = m.status(started.job.jobId);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.job.state).toBe("completed");
+    expect(after.job).toMatchObject({ fetched: 2, failed: 0 });
+  });
+
   it("fetches days, verifies the cache actually filled, and completes", async () => {
     const db = memDb();
     const m = manager(db, healingRequest(db));

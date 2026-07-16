@@ -249,7 +249,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 					var lblTime  = dc.Kind == "vline" ? atTime : fromTime;
 					var lblPrice = dc.Kind == "rectangle" ? Math.Max(dc.Proximal, dc.Distal)
 						: dc.Kind == "hline" ? dc.Price : High[0];
-					Draw.Text(this, lblTag, dc.Label, BarsAgoFor(lblTime), lblPrice, brush);
+					// Always black, independent of the shape's brush — a label tinted to
+					// match its zone's fill/border color reads as illegible on same-color
+					// candles (e.g. a red SUPPLY label over red candles).
+					Draw.Text(this, lblTag, dc.Label, BarsAgoFor(lblTime), lblPrice, Brushes.Black);
 					myTags.Add(lblTag);
 				}
 				Log("drew " + dc.Kind + " " + tag);

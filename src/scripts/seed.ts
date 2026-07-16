@@ -4,10 +4,9 @@ import { readFileSync, readdirSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import db from "../db/connection.js";
-import { aggregateCandles } from "../core/aggregator.js";
-import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { ingestCandles } from "../bridge/ingest.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
-import type { Candle, Timeframe } from "../core/types.js";
+import type { Candle } from "../core/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,49 +36,34 @@ function main() {
     process.exit(1);
   }
 
-  const insertStmt = db.prepare(`
-    INSERT OR REPLACE INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
+  let totalDropped = 0;
   for (const file of files) {
     const symbol = file.replace("_15m.csv", "");
     // Throws if the symbol isn't registered. Fail loudly rather than
     // silently aggregating with the wrong session model.
-    const config = getInstrumentConfig(symbol);
+    getInstrumentConfig(symbol);
 
     const content = readFileSync(path.join(sampleDir, file), "utf-8");
     const candles = parseCsv(content);
 
-    db.transaction(() => {
-      for (const c of candles) {
-        insertStmt.run(
-          symbol, "15m", c.timestamp,
-          c.open, c.high, c.low, c.close, c.volume,
-        );
-      }
-    })();
-    console.error(`${symbol} 15m: ${candles.length} rows`);
-
-    for (const tf of SUPPORTED_TIMEFRAMES) {
-      if (RAW_TIMEFRAMES.includes(tf)) continue;
-      const aggregated = aggregateCandles(candles, tf, {
-        session: config.session,
-        alignment: config.alignment,
-        timestampConvention: config.timestampConvention,
-      });
-      db.transaction(() => {
-        for (const c of aggregated) {
-          insertStmt.run(
-            symbol, tf as Timeframe, c.timestamp,
-            c.open, c.high, c.low, c.close, c.volume,
-          );
-        }
-      })();
-      console.error(`${symbol} ${tf}: ${aggregated.length} rows`);
-    }
+    // Route through the single owner of candle persistence: session
+    // filtering, derived recomputation, and day-refill convergence all come
+    // from ingest. Note re-seeding an existing DB converges CSV-touched
+    // closed days rather than being purely additive.
+    const result = ingestCandles(symbol, "15m", candles, db, { mode: "day-refill" });
+    totalDropped += result.dropped;
+    console.error(
+      `${symbol} 15m: ${result.inserted} inserted, ${result.dropped} dropped (invalid, out-of-session, or off-grid); derived: ${JSON.stringify(result.aggregated)}`,
+    );
   }
 
+  if (totalDropped > 0) {
+    console.error(
+      `WARNING: ${totalDropped} CSV row(s) were dropped — see the per-row messages above. ` +
+        `Check that stamps are close-stamped unix seconds within the instrument's session ` +
+        `(open-stamped exports put every bar one slot early and the session-open bar out of session).`,
+    );
+  }
   console.error("Seed complete.");
 }
 

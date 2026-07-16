@@ -83,4 +83,37 @@ describe("validateRangeComplete", () => {
     );
     expect(r).toMatchObject({ ok: true, daysChecked: 0 });
   });
+
+  it("catches an offsetting missing+extra pair (same count, wrong stamps)", () => {
+    const db = memDb();
+    seed15m(db, D1);
+    seed15m(db, D2);
+    // Replace one canonical stamp with an off-grid one: bar count stays 92,
+    // but the day holds 1 missing + 1 extra. A count-only check masks this.
+    db.prepare(`DELETE FROM candles WHERE symbol='NQ' AND timeframe='15m' AND timestamp=?`)
+      .run(D2.startUnix + 5 * 900);
+    db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('NQ', '15m', ?, 1, 2, 0.5, 1.5, 10)`,
+    ).run(D2.startUnix + 5 * 900 + 450);
+    const r = validateRangeComplete(db, "NQ", "15m", D1.startUnix, D2.endUnix, CME_US_INDEX_FUTURES_ETH, NOW);
+    expect(r.ok).toBe(false);
+    expect(r.badDays).toEqual([
+      { label: "2026-05-05", status: "incomplete", missing: 1, extra: 1 },
+    ]);
+  });
+
+  it("flags a day whose only defect is extra rows", () => {
+    const db = memDb();
+    seed15m(db, D1);
+    db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('NQ', '15m', ?, 1, 2, 0.5, 1.5, 10)`,
+    ).run(D1.startUnix + 450);
+    const r = validateRangeComplete(db, "NQ", "15m", D1.startUnix, D1.endUnix, CME_US_INDEX_FUTURES_ETH, NOW);
+    expect(r.ok).toBe(false);
+    expect(r.badDays).toEqual([
+      { label: "2026-05-04", status: "incomplete", missing: 0, extra: 1 },
+    ]);
+  });
 });

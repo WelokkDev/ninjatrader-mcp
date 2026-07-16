@@ -19,6 +19,15 @@ on top of it.
   `npm run typecheck:private`. (`npm test` runs `src/private/tests/` too when
   the module is present.)
 
+## Helping someone set this up
+
+Follow [SETUP.md](SETUP.md) — install, build, database, bridge token, NT8
+handoff, cache warm-up, trade import. Two steps there are the developer's own:
+copying the C# files into `Documents/NinjaTrader 8/bin/Custom/` and compiling
+them in the NinjaScript Editor. **Never do those for the user** — it's their
+trading platform. Prepare everything else, hand off with exact instructions,
+and verify via the NinjaScript Output window (tab 1) afterward.
+
 ## Adding or building private tools
 
 Follow [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md): scaffold with

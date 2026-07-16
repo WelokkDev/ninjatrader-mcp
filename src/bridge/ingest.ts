@@ -1,22 +1,21 @@
 import type { Database } from "better-sqlite3";
 import db from "../db/connection.js";
-import { aggregateCandles } from "../core/aggregator.js";
-import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import { RAW_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   sessionDayContaining,
   sessionDayRange,
 } from "../core/sessions/session-day.js";
 import { loadCalendar } from "../core/sessions/calendar.js";
+import { expectedRawGrid, purgeOffGridRawRows } from "../core/cache/purge.js";
+import {
+  DERIVED_TIMEFRAMES,
+  recomputeDerivedForSessionDay,
+} from "../core/cache/derived.js";
+import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import type { CandlesResponseMessage } from "./protocol.js";
-
-// TFs that are aggregated from 15m on the 15m ingest path. 5m bars do
-// not feed this chain (5m is a parallel raw stream).
-const DERIVED_TIMEFRAMES: Timeframe[] = SUPPORTED_TIMEFRAMES.filter(
-  (tf) => !RAW_TIMEFRAMES.includes(tf),
-);
 
 function isValidCandle(c: Candle): boolean {
   return (
@@ -32,7 +31,16 @@ function isValidCandle(c: Candle): boolean {
 
 export interface IngestResult {
   inserted: number;
+  // Invalid OHLCV, outside any session-day, or off a closed day's grid.
+  dropped: number;
   aggregated: Record<string, number>;
+}
+
+export interface IngestOptions {
+  // "day-refill" (whole-day fetch) deletes off-grid raw rows on the closed
+  // days it touches; "append" (bar_close, direct callers) never deletes.
+  mode?: "day-refill" | "append";
+  nowUnix?: number;
 }
 
 export function ingestCandles(
@@ -41,6 +49,7 @@ export function ingestCandles(
   candles: Candle[],
   // Injectable for tests; production callers use the shared connection.
   database: Database = db,
+  opts: IngestOptions = {},
 ): IngestResult {
   if (!RAW_TIMEFRAMES.includes(timeframe)) {
     throw new Error(
@@ -48,11 +57,13 @@ export function ingestCandles(
     );
   }
 
+  let dropped = 0;
   const valid: Candle[] = [];
   for (const c of candles) {
     if (isValidCandle(c)) {
       valid.push(c);
     } else {
+      dropped++;
       console.error(
         `[ingest] skipping invalid candle for ${symbol} ${timeframe}: ${JSON.stringify(c)}`,
       );
@@ -63,31 +74,29 @@ export function ingestCandles(
     DERIVED_TIMEFRAMES.map((tf) => [tf, 0]),
   );
 
-  if (valid.length === 0) return { inserted: 0, aggregated };
+  if (valid.length === 0) return { inserted: 0, dropped, aggregated };
 
   const config = getInstrumentConfig(symbol);
-  // Bars after an early close are out-of-session and dropped; the
-  // derived-TF re-aggregation below stays holiday-correct.
   const calendar = loadCalendar(database, config.session.name);
+  const mode = opts.mode ?? "append";
+  const nowUnix = opts.nowUnix ?? Math.floor(Date.now() / 1000);
 
-  // Map each incoming bar to its session-day. Bars outside any session-day
-  // (in maintenance breaks, weekend gaps, or pre-session) are dropped with
-  // a warning rather than persisted.
   const inSession: Array<{ candle: Candle; sessionDayLabel: string }> = [];
-  const affectedSessionDays = new Set<string>();
+  const perDayCount = new Map<string, number>();
   for (const c of valid) {
     const sd = sessionDayContaining(c.timestamp, config.session, calendar);
     if (sd === null) {
+      dropped++;
       console.error(
         `[ingest] dropping bar for ${symbol} ${timeframe} at unix=${c.timestamp} — not in any session-day for template "${config.session.name}"`,
       );
       continue;
     }
     inSession.push({ candle: c, sessionDayLabel: sd.label });
-    affectedSessionDays.add(sd.label);
+    perDayCount.set(sd.label, (perDayCount.get(sd.label) ?? 0) + 1);
   }
 
-  if (inSession.length === 0) return { inserted: 0, aggregated };
+  if (inSession.length === 0) return { inserted: 0, dropped, aggregated };
 
   const insertStmt = database.prepare(
     `INSERT OR REPLACE INTO candles
@@ -95,64 +104,82 @@ export function ingestCandles(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  // Only 15m bars drive the derived-TF aggregation cascade. SELECT all
-  // 15m bars within a session-day's (startUnix, endUnix] range for
-  // re-aggregation. Half-open in SQL maps to `> ? AND <= ?` per the
-  // session-day boundary convention
-  const selectSessionStmt = database.prepare(
-    `SELECT timestamp, open, high, low, close, volume
-       FROM candles
-      WHERE symbol = ? AND timeframe = '15m'
-        AND timestamp > ? AND timestamp <= ?
-      ORDER BY timestamp ASC`,
-  );
+  let inserted = 0;
+  // Doubles as a screen on incoming bars, so a mis-stamped bar the provider
+  // keeps re-sending can't be re-planted after each purge.
+  const closedDayGrid = new Map<string, Set<number>>();
 
   const tx = database.transaction(() => {
-    for (const { candle: c } of inSession) {
-      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+    // Off-grid rows are structural extras (partial-bucket leftovers,
+    // mis-stamps). Canonical rows are never deleted, so a truncated or
+    // stamp-disjoint fetch can't destroy real bars. In-progress days are
+    // never touched: a lagging refill must not erase newer live bars.
+    if (mode === "day-refill") {
+      for (const label of perDayCount.keys()) {
+        const range = sessionDayRange(label, config.session, calendar);
+        const day: SessionDay = { label, ...range };
+        if (range.endUnix > nowUnix) continue; // in-progress: never delete
+        // Close time unknown, so the day's true grid is too. Purging against
+        // the template close would delete the genuine early-close stub bar
+        // that observeEarlyClose still needs to see. Converges once a close
+        // time is recorded.
+        const calEntry = calendar.get(label);
+        if (calEntry?.kind === "modified" && !calEntry.closeTime) {
+          continue;
+        }
+        const expectedSet = expectedRawGrid(
+          day,
+          timeframe as Exclude<Timeframe, "1d">,
+          config.session,
+          calendar,
+        );
+        closedDayGrid.set(label, expectedSet);
+        const removed = purgeOffGridRawRows(database, symbol, timeframe, day, expectedSet, nowUnix);
+        if (removed > 0) {
+          console.error(
+            `[ingest] day-refill ${symbol} ${timeframe} ${label}: removed ${removed} off-grid row(s)`,
+          );
+        }
+      }
     }
 
-    // 5m is a raw, parallel stream — persisted and stopped. Only 15m
-    // ingest fans out into the derived chain.
+    for (const { candle: c, sessionDayLabel } of inSession) {
+      const grid = closedDayGrid.get(sessionDayLabel);
+      if (grid && !grid.has(c.timestamp)) {
+        dropped++;
+        console.error(
+          `[ingest] dropping off-grid bar for ${symbol} ${timeframe} at unix=${c.timestamp} — closed day ${sessionDayLabel} converges to its expected grid`,
+        );
+        continue;
+      }
+      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+      inserted++;
+    }
+
+    // Only 15m fans out into the derived chain; other raw TFs are parallel
+    // streams. Recomputed per day from scratch, so partial-bucket rows from
+    // mid-session ingests can't accumulate.
     if (timeframe !== "15m") return;
 
-    for (const label of affectedSessionDays) {
+    for (const label of perDayCount.keys()) {
       const range = sessionDayRange(label, config.session, calendar);
-      const sessionCandles = selectSessionStmt.all(
-        symbol,
-        range.startUnix,
-        range.endUnix,
-      ) as Candle[];
-      if (sessionCandles.length === 0) continue;
-
-      for (const tf of DERIVED_TIMEFRAMES) {
-        const aggCandles = aggregateCandles(sessionCandles, tf, {
-          session: config.session,
-          alignment: config.alignment,
-          timestampConvention: config.timestampConvention,
-          calendar,
-        });
-        for (const a of aggCandles) {
-          insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume);
-        }
-        aggregated[tf] += aggCandles.length;
-      }
+      const counts = recomputeDerivedForSessionDay(
+        database, symbol, { label, ...range }, config, calendar, nowUnix,
+      );
+      for (const tf of DERIVED_TIMEFRAMES) aggregated[tf] += counts[tf];
     }
   });
 
   tx();
 
-  return { inserted: inSession.length, aggregated };
+  return { inserted, dropped, aggregated };
 }
 
 /**
- * Global ingest for candles_response messages — the single owner of
- * historical-candle persistence. Runs on EVERY candles_response,
- * whether or not a request is still pending: a response that arrives
- * after its request timed out (NT8 downloading history from the
- * provider) still lands in the cache, so the next query reclassifies
- * those days complete instead of refetching from zero. Idempotent via
- * INSERT OR REPLACE on PK (symbol, timeframe, timestamp).
+ * The single owner of historical-candle persistence. Runs on every
+ * candles_response, including ones whose request already timed out — a late
+ * response still lands in the cache, so the next query sees those days
+ * complete instead of refetching from zero.
  */
 export function createCandlesResponseHandler(database: Database = db) {
   return (msg: CandlesResponseMessage): void => {
@@ -162,9 +189,10 @@ export function createCandlesResponseHandler(database: Database = db) {
         msg.timeframe as Timeframe,
         msg.candles,
         database,
+        { mode: "day-refill" },
       );
       console.error(
-        `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} agg=${JSON.stringify(result.aggregated)}`,
+        `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} dropped=${result.dropped} agg=${JSON.stringify(result.aggregated)}`,
       );
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);

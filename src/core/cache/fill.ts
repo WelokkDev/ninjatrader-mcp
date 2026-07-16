@@ -3,11 +3,15 @@ import type { Timeframe } from "../types.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDaysOverlapping } from "../sessions/session-day.js";
 import {
+  loadCalendar,
   recordObservedClose,
   wallClockHHMM,
   type SessionCalendar,
 } from "../sessions/calendar.js";
+import { getInstrumentConfig } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
+import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
+import { recomputeDerivedForSessionDay } from "./derived.js";
 
 // Classification of a single session-day's cache state at a given raw TF.
 //   complete    — bars match expected geometry, nothing to do
@@ -112,8 +116,9 @@ export interface EnsureCachedResult {
  *
  * Day-aligned fetches: regardless of the user's intra-day window, the
  * fetch always covers `(sessionDay.startUnix, sessionDay.endUnix]` for
- * each session-day in a window. Mid-day partial caches are dropped via
- * INSERT OR REPLACE on re-ingest.
+ * each session-day in a window. On re-ingest, CLOSED days converge to the
+ * fresh fetch (guarded delete-then-insert in ingest's day-refill mode);
+ * in-progress days merge via INSERT OR REPLACE.
  *
  * In-progress days are always refetched. The live bar_close ingest is
  * best-effort; refetching today on every query keeps the view fresh
@@ -201,17 +206,45 @@ export async function ensureCached(
     }
   }
 
-  // For each fetched day, record a trimmed session's close time when the
-  // calendar declares the date but no time is known yet.
-  if (calendar) {
-    for (const window of fetchedWindows) {
-      const day: SessionDay = {
-        label: window.labels[0],
-        startUnix: window.startUnix,
-        endUnix: window.endUnix,
-      };
-      if (observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)) {
-        result.calendarUpdated = true;
+  // Record an early close before purging, so a genuine non-grid-aligned stub
+  // isn't deleted before its close time is known. Reconcile here rather than
+  // in ingest: only this side knows which window was fetched, so a zero-bar
+  // response's leftovers converge to honest-empty instead of refetch-looping.
+  for (const window of fetchedWindows) {
+    const day: SessionDay = {
+      label: window.labels[0],
+      startUnix: window.startUnix,
+      endUnix: window.endUnix,
+    };
+    if (
+      calendar &&
+      observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)
+    ) {
+      result.calendarUpdated = true;
+      continue;
+    }
+    // Close time unrecorded, so the day's true grid is unknown: purging
+    // against template geometry would delete the genuine stub bar.
+    const calEntry = calendar?.get(day.label);
+    if (calEntry?.kind === "modified" && !calEntry.closeTime) {
+      continue;
+    }
+    if (rawTimeframe === "1d") continue; // no intraday grid to reconcile
+    const grid = expectedRawGrid(day, rawTimeframe, template, calendar);
+    const purged = purgeOffGridRawRows(db, symbol, rawTimeframe, day, grid, nowUnix);
+    if (purged > 0) {
+      console.error(
+        `[fill] post-fetch reconcile ${symbol} ${rawTimeframe} ${day.label}: removed ${purged} off-grid row(s)`,
+      );
+      // Without re-deriving, the day would serve derived OHLCV aggregated
+      // from the rows just deleted — at canonical stamps that pass every
+      // validator.
+      if (rawTimeframe === "15m") {
+        const config = getInstrumentConfig(symbol);
+        const cal = calendar ?? loadCalendar(db, template.name);
+        db.transaction(() => {
+          recomputeDerivedForSessionDay(db, symbol, day, config, cal, nowUnix);
+        })();
       }
     }
   }

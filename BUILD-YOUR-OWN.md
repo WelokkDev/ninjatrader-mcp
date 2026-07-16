@@ -110,7 +110,27 @@ Restart the MCP client and verify: the tool list should show every public tool
 **plus** `my_tool` and `my_first_scan`. Call `my_first_scan` with a symbol you
 have cached candles for and check the JSON comes back.
 
-## 5. Where to go deeper
+## 5. Your own Claude skills
+
+`.claude/skills/` is **yours** — the whole folder is gitignored, so anything in
+it stays on your machine. Claude Code's skill discovery doesn't consult git, so
+gitignored skills load exactly like tracked ones, and edits are picked up live
+(no restart).
+
+- **Start from a template:** copy one from `.claude/skill-templates/` (tracked,
+  shipped with the repo) into `.claude/skills/` and personalize it:
+  ```
+  cp -r .claude/skill-templates/analyzing-backtest-results .claude/skills/analyzing-backtest-results
+  ```
+  Templates are NOT auto-discovered — only copies in `.claude/skills/` are.
+- **Write your own:** any `.claude/skills/<name>/SKILL.md` with `name` and a
+  trigger-rich `description` in its frontmatter becomes invocable. Put your
+  personal doctrine there freely — it can never reach the public repo.
+- **Version them** (optional): keep the folder inside `src/private/` and place
+  a symlink/junction at `.claude/skills/<name>` pointing to it — discovery
+  follows links.
+
+## 6. Where to go deeper
 
 - **Replace a public tool**: the MCP SDK rejects duplicate tool names, so
   skip the stock registration and then register your own under the same name:

@@ -31,6 +31,28 @@ export function expectedBarCount(
   return Math.floor(duration / period) + (duration % period !== 0 ? 1 : 0);
 }
 
+/**
+ * The close-stamps session geometry demands for one (session-day, timeframe):
+ * full periods from the session start, plus a stub at the close when the
+ * period doesn't divide the duration. Works off resolved unix bounds, so
+ * calendar-adjusted days get their adjusted stub automatically.
+ */
+export function expectedCloseStamps(
+  sd: Pick<SessionDay, "startUnix" | "endUnix">,
+  tf: Exclude<Timeframe, "1d">,
+): number[] {
+  const periodSeconds = SECONDS_PER_TIMEFRAME[tf];
+  const duration = sd.endUnix - sd.startUnix;
+  const hasStub = duration % periodSeconds !== 0;
+  const fullBarCount = expectedBarCount(sd, tf) - (hasStub ? 1 : 0);
+  const expected: number[] = [];
+  for (let i = 1; i <= fullBarCount; i++) {
+    expected.push(sd.startUnix + i * periodSeconds);
+  }
+  if (hasStub) expected.push(sd.endUnix);
+  return expected;
+}
+
 export interface RangeCompleteness {
   /** True iff no CLOSED session-day in the range is empty or incomplete. */
   ok: boolean;
@@ -58,10 +80,9 @@ export function mismatchIsEmpty(r: Pick<ValidationResult, "actual">): boolean {
  * [startUnix, endUnix] must structurally validate at `timeframe`. The
  * preflight primitive for consumers that read the cache directly.
  *
- * Fast path: an index-only COUNT per day; stamp-level validateSessionDay
- * runs only when the count is off. A count match with offsetting
- * missing+extra stamps is possible (orphan rows) — that residue is caught
- * by get_candles' stamp-level validation, not here.
+ * Stamp-level per day, no COUNT shortcut: a count match with offsetting
+ * missing+extra stamps (orphan rows) must be reported here — the backtest
+ * walker reads the cache directly and this is its only gate.
  */
 export function validateRangeComplete(
   db: Database,
@@ -76,18 +97,12 @@ export function validateRangeComplete(
   const days = sessionDaysOverlapping(startUnix, endUnix, template, calendar);
   const badDays: RangeCompleteness["badDays"] = [];
   const inProgressDays: string[] = [];
-  const countStmt = db.prepare(
-    `SELECT COUNT(*) AS c FROM candles
-      WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
-  );
 
   for (const day of days) {
     if (day.endUnix > nowUnix) {
       inProgressDays.push(day.label);
       continue;
     }
-    const { c } = countStmt.get(symbol, timeframe, day.startUnix, day.endUnix) as { c: number };
-    if (c === expectedBarCount(day, timeframe)) continue;
     const r = validateSessionDay(db, symbol, day, timeframe, nowUnix);
     if (r.status !== "mismatch") continue;
     badDays.push({
@@ -194,17 +209,7 @@ export function validateSessionDay(
     };
   }
 
-  const periodSeconds = SECONDS_PER_TIMEFRAME[timeframe];
-  const duration = sessionDay.endUnix - sessionDay.startUnix;
-  const hasStub = duration % periodSeconds !== 0;
-  const fullBarCount =
-    expectedBarCount(sessionDay, timeframe) - (hasStub ? 1 : 0);
-
-  const expected: number[] = [];
-  for (let i = 1; i <= fullBarCount; i++) {
-    expected.push(sessionDay.startUnix + i * periodSeconds);
-  }
-  if (hasStub) expected.push(sessionDay.endUnix);
+  const expected = expectedCloseStamps(sessionDay, timeframe);
 
   // Half-open session window: (startUnix, endUnix]. Matches D.2 / D.6
   // convention used throughout the codebase.

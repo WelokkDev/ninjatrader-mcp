@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
-import { SUPPORTED_SYMBOLS } from "../core/constants.js";
+import { RAW_TIMEFRAMES, SUPPORTED_SYMBOLS } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   SessionClosedError,
@@ -14,11 +14,16 @@ import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import {
   expectedBarCount,
+  expectedCloseStamps,
   mismatchIsEmpty,
   validateSessionDay,
 } from "../core/cache/validator.js";
 import { classifySessionDay, ensureCached } from "../core/cache/fill.js";
 import { isConnected as defaultIsConnected } from "../bridge/index.js";
+import {
+  computeDerivedForSessionDay,
+  writeDerivedForSessionDay,
+} from "../core/cache/derived.js";
 import { prefetchManager } from "../prefetch-instance.js";
 
 // A connected call fetches at most this many uncached session-days inline;
@@ -271,27 +276,162 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       matched = finalDays.reduce((acc, day) => acc + expectedBarCount(day, timeframe), 0);
     }
 
-    // Now query the user's exact range at the requested TF.
-    const stmt = deps.db.prepare(QUERY_SQL);
-    const rows = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+    const isDerived = !RAW_TIMEFRAMES.includes(timeframe);
 
-    // The geometry gate keys on EXPECTED bars, but actual rows can exceed
-    // expected (orphan partial bars) — if the LIMIT clipped anything, say so.
-    const { c: totalInRange } = deps.db
-      .prepare(
-        `SELECT COUNT(*) AS c FROM candles
-          WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
-      )
-      .get(symbol, timeframe, startTs, endTs) as { c: number };
-    const truncated = totalInRange > rows.length;
-
-    const validation = validateRequestedRange(
+    let validation = validateRequestedRange(
       deps.db,
       symbol,
       finalDays,
       timeframe,
       nowUnix,
     );
+
+    // No fetch path fixes derived rows that diverge from their 15m backing —
+    // fill/prefetch classify at the raw TF and skip the day. Derived rows are
+    // a pure function of the cached 15m, so re-derive locally and re-validate.
+    // One attempt per call; days whose defects survive it stay loud.
+    if (isDerived && validation.issues) {
+      const count15mStmt = deps.db.prepare(
+        `SELECT COUNT(*) AS c FROM candles
+          WHERE symbol = ? AND timeframe = '15m' AND timestamp > ? AND timestamp <= ?`,
+      );
+      const healable = finalDays.filter(
+        (day) =>
+          day.endUnix <= nowUnix &&
+          validation.issues!.some((i) => i.sessionDay === day.label) &&
+          (count15mStmt.get(symbol, day.startUnix, day.endUnix) as { c: number }).c > 0,
+      );
+      if (healable.length > 0) {
+        const cal = calendar;
+        const cachedStampsStmt = deps.db.prepare(
+          `SELECT timestamp FROM candles
+            WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?
+            ORDER BY timestamp ASC`,
+        );
+        const healed: string[] = [];
+        for (const day of healable) {
+          const computed = computeDerivedForSessionDay(deps.db, symbol, day, config, cal, nowUnix);
+          // Recompute would emit exactly the cached stamps: healing is a
+          // no-op, so skip the write churn. The day stays loud via issues.
+          let differs = false;
+          for (const [tf, aggCandles] of computed) {
+            const cached = (
+              cachedStampsStmt.all(symbol, tf, day.startUnix, day.endUnix) as Array<{
+                timestamp: number;
+              }>
+            ).map((r) => r.timestamp);
+            if (
+              cached.length !== aggCandles.length ||
+              cached.some((t, i) => t !== aggCandles[i].timestamp)
+            ) {
+              differs = true;
+              break;
+            }
+          }
+          if (!differs) continue;
+          deps.db.transaction(() => {
+            writeDerivedForSessionDay(deps.db, symbol, day, computed);
+          })();
+          healed.push(day.label);
+        }
+        if (healed.length > 0) {
+          console.error(
+            `[get_candles] re-derived ${healed.length} day(s) whose derived rows diverged from their 15m backing for ${symbol}: ${healed.join(",")}`,
+          );
+          validation = validateRequestedRange(deps.db, symbol, finalDays, timeframe, nowUnix);
+        }
+      }
+    }
+
+    const stmt = deps.db.prepare(QUERY_SQL);
+    const rowsRaw = stmt.all(symbol, timeframe, startTs, endTs, limit) as Candle[];
+
+    // Rows outside every session-day window are residue (unfiltered seeds,
+    // geometry shifts) that validation and the purge can't see — serving them
+    // would present untrusted bars as clean. Excluded, never deleted: they may
+    // be real bars orphaned by a calendar edit. LIMIT applies pre-filter, so
+    // heavy residue can push canonical rows out; `truncated` keeps that loud.
+    const rows = rowsRaw.filter((r) =>
+      finalDays.some((d) => r.timestamp > d.startUnix && r.timestamp <= d.endUnix),
+    );
+
+    // The geometry gate keys on expected bars, but actual rows can exceed it
+    // (orphan partials). Counted per session-day so inter-session residue
+    // can't skew the math.
+    const dayCountStmt = deps.db.prepare(
+      `SELECT COUNT(*) AS c FROM candles
+        WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+    );
+    const totalInRange = finalDays.reduce(
+      (acc, d) =>
+        acc + (dayCountStmt.get(symbol, timeframe, d.startUnix, d.endUnix) as { c: number }).c,
+      0,
+    );
+    const truncated = totalInRange > rows.length;
+
+    // From the flat range minus the per-day sum, not the served rows — the
+    // LIMIT clips those, undercounting whenever residue falls past the clip.
+    const { c: flatInRange } = dayCountStmt.get(symbol, timeframe, startTs, endTs) as {
+      c: number;
+    };
+    const interSessionExcluded = flatInRange - totalInRange;
+
+    // A derived bar in an in-progress day is partial when its stamp is off
+    // the expected grid (bucket still forming), or when its stamp is canonical
+    // but a 15m constituent is missing (NT8-side gap), so its OHLC covers only
+    // part of the bucket. Closed days are covered by validation instead.
+    let partialBars = 0;
+    if (isDerived) {
+      const cached15mStmt = deps.db.prepare(
+        `SELECT timestamp FROM candles
+          WHERE symbol = ? AND timeframe = '15m' AND timestamp > ? AND timestamp <= ?`,
+      );
+      for (const day of finalDays) {
+        if (day.endUnix <= nowUnix) continue;
+        const expected = expectedCloseStamps(day, timeframe);
+        const expectedSet = new Set(expected);
+        const expected15m = expectedCloseStamps(day, "15m");
+        const cached15m = new Set(
+          (cached15mStmt.all(symbol, day.startUnix, day.endUnix) as Array<{
+            timestamp: number;
+          }>).map((r) => r.timestamp),
+        );
+        for (const row of rows) {
+          if (row.timestamp <= day.startUnix || row.timestamp > day.endUnix) continue;
+          if (!expectedSet.has(row.timestamp)) {
+            row.partial = true;
+            partialBars++;
+            continue;
+          }
+          const idx = expected.indexOf(row.timestamp);
+          const bucketStart = idx > 0 ? expected[idx - 1] : day.startUnix;
+          const holed = expected15m.some(
+            (t) => t > bucketStart && t <= row.timestamp && !cached15m.has(t),
+          );
+          if (holed) {
+            row.partial = true;
+            partialBars++;
+          }
+        }
+      }
+    }
+
+    // A day can have fully canonical derived stamps over a holed 15m stream,
+    // since interior gaps preserve the bucket's last bar — so surface the
+    // backing state. Only for days not already flagged at the requested TF,
+    // which are loud once via validation.issues.
+    let raw15m: ValidationSummary | undefined;
+    if (isDerived) {
+      const flagged = new Set((validation.issues ?? []).map((i) => i.sessionDay));
+      const summary = validateRequestedRange(
+        deps.db,
+        symbol,
+        finalDays.filter((d) => !flagged.has(d.label)),
+        "15m",
+        nowUnix,
+      );
+      if (summary.mismatch > 0) raw15m = summary;
+    }
 
     // Compose the warning string. Preserve the legacy
     // "NinjaTrader is not connected" guidance verbatim — existing
@@ -316,15 +456,25 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       warning = `Response truncated: the range holds ${totalInRange} rows at ${timeframe} but only ${rows.length} were returned (limit ${limit}). Actual rows exceed expected geometry — likely orphan partial bars; see \`validation.issues\`.`;
     } else if (validation.mismatch > 0) {
       warning = `Cache validation flagged ${validation.mismatch} session-day(s) at ${timeframe}. See \`validation.issues\` for details. If this is a holiday early close, connect NT8 to sync the session calendar, or add a manual session_calendar row.`;
+    } else if (raw15m) {
+      warning = `Underlying 15m data is incomplete for ${raw15m.mismatch} session-day(s) backing this ${timeframe} request — derived bars over those days may aggregate only part of their bucket. See \`validation.raw_15m\`.`;
+    } else if (interSessionExcluded > 0) {
+      warning = `${interSessionExcluded} cached row(s) stamped between session-day windows were excluded from this response — legacy residue (pre-fix seed or session-geometry changes), invisible to validation.`;
     }
 
     // The single trust bit a consumer checks before relying on the data.
-    // In-progress days don't falsify it (see validation.in_progress_days).
+    // In-progress days don't falsify it (their forming bars carry
+    // `partial: true` instead — see partial_bars).
     const dataComplete =
       validation.mismatch === 0 &&
+      raw15m === undefined &&
       fillResult.windowsFailed === 0 &&
       !fillResult.bridgeDisconnected &&
       !truncated;
+
+    const validationOut: ValidationSummary & { raw_15m?: ValidationSummary } = raw15m
+      ? { ...validation, raw_15m: raw15m }
+      : validation;
 
     return {
       content: [
@@ -340,8 +490,12 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
             matched,
             truncated,
             data_complete: dataComplete,
+            ...(partialBars > 0 && { partial_bars: partialBars }),
+            ...(interSessionExcluded > 0 && {
+              inter_session_rows_excluded: interSessionExcluded,
+            }),
             candles: rows,
-            validation,
+            validation: validationOut,
             ...(warning && { warning }),
           }),
         },
@@ -362,7 +516,7 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z

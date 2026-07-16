@@ -119,6 +119,10 @@ function stripPartial(c: Candle): Candle {
 // Sets `partial: true` on the LAST candle in a sorted-ascending array
 // when its containing session-day's expected end is in the future.
 // Mutates the trailing entry in place (after a copy at the call site).
+//
+// Advisory and in-memory only — never persisted. It deliberately differs
+// from the grid-membership rule used for served data: this also flags a
+// trailing bucket that closed exactly on its boundary mid-session.
 function markPartial(sorted: Candle[], options: AggregateOptions): Candle[] {
   if (sorted.length === 0) return sorted;
   const last = sorted[sorted.length - 1];

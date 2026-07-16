@@ -32,7 +32,15 @@ export interface PrefetchDeps {
   nowMs?: () => number;
 }
 
-type DayState = "pending" | "fetching" | "fetched" | "failed" | "cancelled";
+type DayState =
+  | "pending"
+  | "fetching"
+  | "fetched"
+  | "failed"
+  | "cancelled"
+  // Complete by execute time (hi-lane fill, late response) — no bridge
+  // request issued; reported under alreadyComplete.
+  | "skipped";
 
 interface JobDay {
   day: SessionDay;
@@ -264,6 +272,34 @@ export class PrefetchManager {
       return;
     }
 
+    // A day can complete while queued (hi-lane inline fill, another
+    // response): refetching is churn, and a degraded response could downgrade
+    // it under day-refill ingest. Classify against current calendar geometry
+    // rather than the window frozen at startJob — an early close recorded
+    // since would make a complete cache read as partial, then fail.
+    const freshDay = (): SessionDay => {
+      try {
+        const cal = loadCalendar(this.deps.db, job.template.name);
+        return { label: d.day.label, ...sessionDayRange(d.day.label, job.template, cal) };
+      } catch {
+        // Day declared closed or unresolvable while queued — keep the
+        // job-creation geometry and let the fetch path stay loud.
+        return d.day;
+      }
+    };
+
+    {
+      const nowSec = Math.floor(this.nowMs() / 1000);
+      if (
+        classifySessionDay(this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec) ===
+        "complete"
+      ) {
+        d.state = "skipped";
+        this.finalizeIfDone(job);
+        return;
+      }
+    }
+
     d.state = "fetching";
     const t0 = this.nowMs();
     try {
@@ -280,9 +316,10 @@ export class PrefetchManager {
       );
 
       // Verify what actually landed — ingest runs in the candles_response
-      // handler before this continuation resumes.
+      // handler before this continuation resumes. Against current geometry,
+      // since ingest stored the bars under the current calendar.
       const nowSec = Math.floor(this.nowMs() / 1000);
-      const cls = classifySessionDay(this.deps.db, job.symbol, d.day, job.rawTimeframe, nowSec);
+      const cls = classifySessionDay(this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec);
       if (cls === "complete") {
         d.state = "fetched";
       } else if (cls === "in_progress") {
@@ -376,6 +413,7 @@ export class PrefetchManager {
 
   private snapshot(job: Job): PrefetchJobSnapshot {
     let fetched = 0;
+    let skipped = 0;
     let failed = 0;
     let pending = 0;
     let cancelled = 0;
@@ -387,6 +425,9 @@ export class PrefetchManager {
         case "fetched":
           fetched++;
           if (d.inProgress) inProgressDays.push(d.day.label);
+          break;
+        case "skipped":
+          skipped++;
           break;
         case "failed":
           failed++;
@@ -422,7 +463,9 @@ export class PrefetchManager {
       timeframe: job.rawTimeframe,
       state: job.state,
       daysTotal: job.days.length + job.alreadyComplete.length,
-      alreadyComplete: job.alreadyComplete.length,
+      // Plan-time completes plus execute-time skips, so `fetched` stays
+      // reconcilable against actual bridge round-trips.
+      alreadyComplete: job.alreadyComplete.length + skipped,
       fetched,
       failed,
       pending,

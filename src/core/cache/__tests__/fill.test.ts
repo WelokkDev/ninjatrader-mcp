@@ -94,4 +94,46 @@ describe("ensureCached fetch loop", () => {
     expect(result.errors).toEqual([{ window: "2026-05-05", message: "boom" }]);
     expect(result.fetchedDays).toEqual(["2026-05-04", "2026-05-06"]);
   });
+
+  it("post-fetch reconcile spares a declared-but-untimed early-close day whose close could not be recorded", async () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    // 2026-05-04 declared modified, no time known.
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source)
+       VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
+    ).run();
+    // The fetch "heals" a trimmed series with a GAP in the prefix (bar 3
+    // missing) and a stub off the template grid: observeEarlyClose refuses
+    // the gap-riddled prefix, so no close is recorded — the purge must not
+    // then delete the genuine stub against template geometry.
+    const stub = DAYS[0].startUnix + 74 * 900 + 420;
+    const ins = db.prepare(
+      `INSERT OR REPLACE INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('NQ', '15m', ?, 1, 2, 0.5, 1.5, 10)`,
+    );
+    const request = vi.fn(async () => {
+      for (let i = 1; i <= 74; i++) if (i !== 3) ins.run(DAYS[0].startUnix + i * 900);
+      ins.run(stub);
+      return {};
+    });
+    const { loadCalendar } = await import("../../sessions/calendar.js");
+    await ensureCached(
+      db,
+      "NQ",
+      DAYS[0].startUnix,
+      DAYS[0].endUnix,
+      "15m",
+      CME_US_INDEX_FUTURES_ETH,
+      { isConnected: () => true, request },
+      NOW,
+      loadCalendar(db, "cme_us_index_futures_eth"),
+    );
+    const stamps = (
+      db
+        .prepare(`SELECT timestamp FROM candles WHERE symbol='NQ' AND timeframe='15m'`)
+        .all() as Array<{ timestamp: number }>
+    ).map((r) => r.timestamp);
+    expect(stamps).toContain(stub);
+  });
 });
