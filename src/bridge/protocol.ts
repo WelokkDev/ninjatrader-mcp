@@ -134,6 +134,34 @@ export interface SessionCalendarResponseMessage {
   }>;
 }
 
+export interface RequestOpenChartsMessage {
+  v: 1;
+  id: string;
+  type: "request_open_charts";
+}
+
+/** One open chart tab. `symbol` uses the roster/draw convention
+ *  (MasterInstrument.Name); `timeframe` is compact ("5m"/"1h") when the
+ *  NT8 bars type maps to the SUPPORTED_TIMEFRAMES vocabulary, otherwise
+ *  NT8's own display string (e.g. "150 Tick"). Empty strings mean the tab
+ *  hadn't finished loading when read. */
+export interface OpenChartEntry {
+  window: string;
+  symbol: string;
+  instrument: string;
+  timeframe: string;
+  isActive: boolean;
+  hasRenderer: boolean;
+}
+
+export interface OpenChartsResponseMessage {
+  v: 1;
+  id: string;
+  type: "open_charts_response";
+  charts: OpenChartEntry[];
+  skippedWindows: number;
+}
+
 export interface ErrorMessage {
   v: 1;
   id: string;
@@ -148,6 +176,7 @@ export type InboundMessage =
   | CandlesResponseMessage
   | BarCloseMessage
   | SessionCalendarResponseMessage
+  | OpenChartsResponseMessage
   | ErrorMessage;
 export type OutboundMessage =
   | HelloAckMessage
@@ -155,7 +184,8 @@ export type OutboundMessage =
   | DrawMessage
   | ClearZonesMessage
   | RequestCandlesMessage
-  | RequestSessionCalendarMessage;
+  | RequestSessionCalendarMessage
+  | RequestOpenChartsMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =
@@ -307,6 +337,36 @@ export function parseMessage(raw: string): ParseResult {
           id: obj.id,
           holidays: obj.holidays,
           partialHolidays: obj.partialHolidays,
+        },
+      };
+    }
+    case "open_charts_response": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "open_charts_response: missing id" };
+      }
+      const isEntry = (v: unknown): v is OpenChartEntry => {
+        if (!v || typeof v !== "object") return false;
+        const e = v as Record<string, unknown>;
+        return (
+          typeof e.window === "string" &&
+          typeof e.symbol === "string" &&
+          typeof e.instrument === "string" &&
+          typeof e.timeframe === "string" &&
+          typeof e.isActive === "boolean" &&
+          typeof e.hasRenderer === "boolean"
+        );
+      };
+      if (!Array.isArray(obj.charts) || !obj.charts.every(isEntry)) {
+        return { ok: false, reason: "open_charts_response: bad charts" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "open_charts_response",
+          id: obj.id,
+          charts: obj.charts as OpenChartEntry[],
+          skippedWindows: typeof obj.skippedWindows === "number" ? obj.skippedWindows : 0,
         },
       };
     }

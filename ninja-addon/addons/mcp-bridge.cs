@@ -635,6 +635,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 					HandleRequestSessionCalendar(obj);
 					break;
 
+				case "request_open_charts":
+					HandleRequestOpenCharts(obj);
+					break;
+
 				default:
 					Log("unknown message type: " + type);
 					break;
@@ -1140,6 +1144,230 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Log("send failed (" + logTag + "): " + ex.Message);
 				}
 			});
+		}
+
+		// ---------- request_open_charts ----------
+		//
+		// Enumerates every open chart window/tab. Uses undocumented-but-staff-
+		// endorsed API (Globals.AllWindows, Chart, MainTabControl, ChartTab —
+		// forum 1055530/100732); may change between NT8 builds, so every hop
+		// is null-guarded and failures degrade to skippedWindows, never throw.
+
+		// Per-request dispatcher budget. A window mid-close or with a hung UI
+		// thread is counted in skippedWindows rather than stalling the response.
+		private const int OpenChartsBudgetMs = 3_000;
+
+		private void HandleRequestOpenCharts(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_open_charts missing id; dropping");
+				return;
+			}
+			// Leave the WS reader thread immediately; it owns no NT state.
+			Task.Run(async () =>
+			{
+				try { await BuildAndSendOpenChartsAsync(id); }
+				catch (Exception ex)
+				{
+					SendErrorResponse(id, "request_open_charts failed: " + ex.Message);
+				}
+			});
+		}
+
+		private async Task BuildAndSendOpenChartsAsync(string id)
+		{
+			// Snapshot first: the window collection is not documented as
+			// thread-safe and other threads open/close windows while we walk.
+			var chartWindows = new List<NinjaTrader.Gui.Chart.Chart>();
+			try
+			{
+				foreach (var w in Globals.AllWindows)
+				{
+					// Type test, not caption match: captions are user-renameable
+					// and localized. Only the type test happens on this thread.
+					var chart = w as NinjaTrader.Gui.Chart.Chart;
+					if (chart != null) chartWindows.Add(chart);
+				}
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "window enumeration failed: " + ex.Message);
+				return;
+			}
+
+			var perWindow = new List<Task<List<Dictionary<string, object>>>>();
+			foreach (var chart in chartWindows)
+				perWindow.Add(ReadChartWindowAsync(chart));
+
+			// NT8 spreads windows across multiple UI threads; wait on all
+			// dispatchers in parallel but never longer than the budget.
+			await Task.WhenAny(Task.WhenAll(perWindow), Task.Delay(OpenChartsBudgetMs));
+
+			var charts  = new List<object>();
+			var skipped = 0;
+			foreach (var t in perWindow)
+			{
+				if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+					foreach (var tab in t.Result) charts.Add(tab);
+				else
+					skipped++;
+			}
+
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",              1 },
+				{ "id",             id },
+				{ "type",           "open_charts_response" },
+				{ "charts",         charts },
+				{ "skippedWindows", skipped },
+			};
+			SendFireAndForget(Json.Serialize(payload),
+				"open_charts_response id=" + id + " charts=" + charts.Count
+				+ (skipped > 0 ? " skippedWindows=" + skipped : ""));
+		}
+
+		// Everything below the type test runs on the window's own dispatcher
+		// (InvokeAsync, never Invoke — documented deadlock risk). Failures
+		// resolve to an empty tab list; they never throw across the boundary.
+		private static Task<List<Dictionary<string, object>>> ReadChartWindowAsync(NinjaTrader.Gui.Chart.Chart chart)
+		{
+			var tcs = new TaskCompletionSource<List<Dictionary<string, object>>>();
+			try
+			{
+				chart.Dispatcher.InvokeAsync(() =>
+				{
+					var tabs = new List<Dictionary<string, object>>();
+					try
+					{
+						// Title is NT-composed "tab header + caption" — the
+						// human label. Caption is only the settable base name.
+						string title = null;
+						try { title = chart.Title; } catch { /* label only */ }
+
+						var tabControl = chart.MainTabControl;
+						if (tabControl != null)
+						{
+							// ActiveChartControl lags after tab switches
+							// (staff-confirmed); SelectedItem is current.
+							var selected = tabControl.SelectedItem;
+							foreach (var item in tabControl.Items)
+							{
+								try
+								{
+									var tabItem  = item as System.Windows.Controls.TabItem;
+									var chartTab = tabItem != null
+										? tabItem.Content as NinjaTrader.Gui.Chart.ChartTab
+										: null;
+									if (chartTab == null) continue;
+									tabs.Add(DescribeChartTab(title, chartTab,
+										object.ReferenceEquals(item, selected)));
+								}
+								catch (Exception ex) { Log("open_charts tab read failed: " + ex.Message); }
+							}
+						}
+					}
+					catch (Exception ex) { Log("open_charts window read failed: " + ex.Message); }
+					tcs.TrySetResult(tabs);
+				});
+			}
+			catch (Exception ex)
+			{
+				// Window mid-close: its dispatcher is already shutting down.
+				Log("open_charts dispatch failed: " + ex.Message);
+				tcs.TrySetResult(new List<Dictionary<string, object>>());
+			}
+			return tcs.Task;
+		}
+
+		private static Dictionary<string, object> DescribeChartTab(
+			string windowTitle,
+			NinjaTrader.Gui.Chart.ChartTab chartTab,
+			bool isActive)
+		{
+			string symbol      = "";
+			string instrument  = "";
+			string timeframe   = "";
+			bool   hasRenderer = false;
+
+			var cc = chartTab.ChartControl;
+
+			Bars bars = null;
+			try
+			{
+				// Staff-shown route to the primary series; both hops can be
+				// null while the chart is still loading.
+				var chartBars = cc != null ? cc.PrimaryBars : null;
+				if (chartBars == null && cc != null && cc.BarsArray != null && cc.BarsArray.Count > 0)
+					chartBars = cc.BarsArray[0];
+				if (chartBars != null) bars = chartBars.Bars;
+			}
+			catch { /* chart mid-load */ }
+
+			Instrument inst = null;
+			try
+			{
+				inst = bars != null ? bars.Instrument : null;
+				// Fallback for tabs whose bars haven't loaded yet
+				if (inst == null) inst = chartTab.Instrument;
+			}
+			catch { /* tab mid-load */ }
+			if (inst != null)
+			{
+				try
+				{
+					instrument = inst.FullName ?? "";
+					symbol     = inst.MasterInstrument != null ? inst.MasterInstrument.Name : "";
+				}
+				catch { /* instrument mid-teardown */ }
+			}
+
+			try
+			{
+				if (bars != null) timeframe = CompactTimeframe(bars.BarsPeriod);
+			}
+			catch { /* bars mid-teardown */ }
+
+			try
+			{
+				if (cc != null && cc.Indicators != null)
+					foreach (var ind in cc.Indicators)
+						if (ind != null && ind.GetType().Name == "McpBridgeRenderer")
+						{
+							hasRenderer = true;
+							break;
+						}
+			}
+			catch { /* indicator collection mid-mutation */ }
+
+			return new Dictionary<string, object>
+			{
+				{ "window",      string.IsNullOrEmpty(windowTitle) ? "Chart" : windowTitle },
+				{ "symbol",      symbol },
+				{ "instrument",  instrument },
+				{ "timeframe",   timeframe },
+				{ "isActive",    isActive },
+				{ "hasRenderer", hasRenderer },
+			};
+		}
+
+		// Compact form matching the server's timeframe vocabulary
+		// (src/core/constants.ts); exotic types (Tick/Range/Volume) keep
+		// NT8's own display string.
+		private static string CompactTimeframe(BarsPeriod bp)
+		{
+			if (bp == null) return "";
+			switch (bp.BarsPeriodType)
+			{
+				case BarsPeriodType.Second: return bp.Value + "s";
+				case BarsPeriodType.Minute:
+					return bp.Value % 60 == 0 ? (bp.Value / 60) + "h" : bp.Value + "m";
+				case BarsPeriodType.Day:    return bp.Value + "d";
+				case BarsPeriodType.Week:   return bp.Value + "w";
+				case BarsPeriodType.Month:  return bp.Value + "mo";
+				default:                    return bp.ToString();
+			}
 		}
 
 		// ---------- logging ----------

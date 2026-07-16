@@ -13,6 +13,7 @@ import { registerPrefetchTools } from "./tools/prefetch-candles.js";
 import { registerDraw } from "./tools/draw.js";
 import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerClearZones } from "./tools/clear-zones.js";
+import { registerListOpenCharts } from "./tools/list-open-charts.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
 import { registerGetTrades, registerSyncTrades } from "./tools/get-trades.js";
@@ -52,6 +53,7 @@ export function registerGenericTools(
   unless(["draw"], () => registerDraw(server));
   unless(["draw_zone"], () => registerDrawZone(server));
   unless(["clear_zones"], () => registerClearZones(server));
+  unless(["list_open_charts"], () => registerListOpenCharts(server));
   unless(["list_trades"], () => registerListTrades(server));
   unless(["list_decisions"], () => registerListDecisions(server));
   unless(["get_trades"], () => registerGetTrades(server));

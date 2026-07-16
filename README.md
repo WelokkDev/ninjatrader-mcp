@@ -194,8 +194,7 @@ A bridge failure (e.g., invalid port) is non-fatal: the MCP server keeps running
 | File | Tracked? | Purpose |
 |---|---|---|
 | `.env.local` | no | `NT_BRIDGE_TOKEN=<64-hex>`; created on first run. |
-| `ninjatrader.config.json` | no | `{ "dbPath": "<path to NinjaTrader.sqlite>", "account"?: "<name>" }` — required only by `get_trades`/`sync_trades`, loaded lazily. |
-| `drawing.config.json` | no | Optional, machine-local drawing conventions (role → style presets, named views) that the `draw` tool's description points the MCP client at; schema in `src/tools/drawing-config.ts`. |
+| `ninjatrader.config.json` | no | `{ "dbPath": "<path to NinjaTrader.sqlite>", "account"?: "<name>" }` — required only by `get_trades`/`sync_trades`, loaded lazily. Copy `ninjatrader.config.example.json` (tracked) to create it; see [SETUP.md](SETUP.md). |
 | `data/lab-calibration.json` | yes | Experiment ETA calibration data. |
 | `data/sample/*.csv` | yes | 15m fixtures for `npm run seed`. |
 
