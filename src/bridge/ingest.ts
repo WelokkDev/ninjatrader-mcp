@@ -17,7 +17,8 @@ import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import type { CandlesResponseMessage } from "./protocol.js";
 
-function isValidCandle(c: Candle): boolean {
+// Exported: the live runtime applies the same gate before /feed publish.
+export function isValidCandle(c: Candle): boolean {
   return (
     Number.isInteger(c.timestamp) &&
     c.timestamp > 0 &&
@@ -25,7 +26,10 @@ function isValidCandle(c: Candle): boolean {
     Number.isFinite(c.high) && c.high > 0 &&
     Number.isFinite(c.low) && c.low > 0 &&
     Number.isFinite(c.close) && c.close > 0 &&
-    Number.isFinite(c.volume) && c.volume >= 0
+    Number.isFinite(c.volume) && c.volume >= 0 &&
+    // OHLC ordering: the body must sit inside the range.
+    c.low <= Math.min(c.open, c.close) &&
+    Math.max(c.open, c.close) <= c.high
   );
 }
 

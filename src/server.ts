@@ -14,6 +14,12 @@ import { registerDraw } from "./tools/draw.js";
 import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerClearZones } from "./tools/clear-zones.js";
 import { registerListOpenCharts } from "./tools/list-open-charts.js";
+import {
+  registerSubscribeLiveBars,
+  registerUnsubscribeLiveBars,
+  registerLiveFeedStatus,
+} from "./tools/live-feed.js";
+import { startLiveFeedRuntime } from "./live/runtime.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
 import { registerGetTrades, registerSyncTrades } from "./tools/get-trades.js";
@@ -54,6 +60,9 @@ export function registerGenericTools(
   unless(["draw_zone"], () => registerDrawZone(server));
   unless(["clear_zones"], () => registerClearZones(server));
   unless(["list_open_charts"], () => registerListOpenCharts(server));
+  unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server));
+  unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server));
+  unless(["live_feed_status"], () => registerLiveFeedStatus(server));
   unless(["list_trades"], () => registerListTrades(server));
   unless(["list_decisions"], () => registerListDecisions(server));
   unless(["get_trades"], () => registerGetTrades(server));
@@ -75,9 +84,12 @@ export function registerExperimentTools(server: McpServer, lab: Lab): void {
 /** NT8 bridge + live/candles ingest + calendar sync. Run exactly one process. */
 export async function startRuntime(): Promise<void> {
   await startBridge();
+  // Ingest must register before the live runtime: bar_close persists to the
+  // cache before the feed bus publishes (read-your-writes for /feed).
   registerLiveIngestHandler();
   registerCandlesResponseHandler();
   registerCalendarSyncOnHello();
+  startLiveFeedRuntime();
 }
 
 export async function stopRuntime(): Promise<void> {

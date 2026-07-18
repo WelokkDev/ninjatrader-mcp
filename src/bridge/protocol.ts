@@ -5,6 +5,8 @@ export interface HelloMessage {
   type: "hello";
   ntVersion: string;
   instruments: string[];
+  // NT8-configured timezone id (bars are stamped in it); older AddOns omit it.
+  timeZone?: string;
 }
 
 export interface InstrumentsUpdateMessage {
@@ -109,6 +111,56 @@ export interface BarCloseMessage {
   symbol: string;
   timeframe: string;
   candle: CandlePayload;
+  // Live-feed extensions — optional so a legacy AddOn stays parseable.
+  // Monotonic per subscription; a jump = undelivered bars, a reset = re-seed.
+  seq?: number;
+  // Resolved NT8 contract (e.g. "MNQ 09-26") — makes rolls visible.
+  contract?: string;
+  // Closed well before emission (catch-up); act-on-close consumers skip these.
+  backfill?: boolean;
+}
+
+export interface SubscribeBarsMessage {
+  v: 1;
+  id: string;
+  type: "subscribe_bars";
+  symbol: string;
+  timeframe: string;
+  // Same fail-closed template contract as request_candles.
+  tradingHoursTemplate: string;
+}
+
+export interface UnsubscribeBarsMessage {
+  v: 1;
+  id: string;
+  type: "unsubscribe_bars";
+  symbol: string;
+  timeframe: string;
+}
+
+export interface SubscribeAckMessage {
+  v: 1;
+  id: string;
+  type: "subscribe_ack";
+  symbol: string;
+  timeframe: string;
+  // Resolved NT8 contract FullName the stream is bound to.
+  contract: string;
+  // Bars in the C# seed request (0 on an alreadyActive re-subscribe ack).
+  seedCount: number;
+  // Unix seconds of the last seeded bar; 0 when none.
+  seedLastTs: number;
+  // The subscription already existed C#-side (idempotent re-subscribe).
+  alreadyActive: boolean;
+}
+
+export interface UnsubscribeAckMessage {
+  v: 1;
+  id: string;
+  type: "unsubscribe_ack";
+  symbol: string;
+  timeframe: string;
+  removed: boolean;
 }
 
 export interface RequestSessionCalendarMessage {
@@ -177,6 +229,8 @@ export type InboundMessage =
   | BarCloseMessage
   | SessionCalendarResponseMessage
   | OpenChartsResponseMessage
+  | SubscribeAckMessage
+  | UnsubscribeAckMessage
   | ErrorMessage;
 export type OutboundMessage =
   | HelloAckMessage
@@ -185,7 +239,9 @@ export type OutboundMessage =
   | ClearZonesMessage
   | RequestCandlesMessage
   | RequestSessionCalendarMessage
-  | RequestOpenChartsMessage;
+  | RequestOpenChartsMessage
+  | SubscribeBarsMessage
+  | UnsubscribeBarsMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =
@@ -238,6 +294,7 @@ export function parseMessage(raw: string): ParseResult {
           type: "hello",
           ntVersion: obj.ntVersion,
           instruments: obj.instruments as string[],
+          ...(typeof obj.timeZone === "string" ? { timeZone: obj.timeZone } : {}),
         },
       };
     }
@@ -291,6 +348,15 @@ export function parseMessage(raw: string): ParseResult {
       if (!isCandlePayload(obj.candle)) {
         return { ok: false, reason: "bar_close: invalid candle" };
       }
+      if (obj.seq !== undefined && typeof obj.seq !== "number") {
+        return { ok: false, reason: "bar_close: seq must be a number" };
+      }
+      if (obj.contract !== undefined && typeof obj.contract !== "string") {
+        return { ok: false, reason: "bar_close: contract must be a string" };
+      }
+      if (obj.backfill !== undefined && typeof obj.backfill !== "boolean") {
+        return { ok: false, reason: "bar_close: backfill must be a boolean" };
+      }
       return {
         ok: true,
         message: {
@@ -299,6 +365,9 @@ export function parseMessage(raw: string): ParseResult {
           symbol: obj.symbol,
           timeframe: obj.timeframe,
           candle: obj.candle,
+          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
+          ...(typeof obj.contract === "string" ? { contract: obj.contract } : {}),
+          ...(typeof obj.backfill === "boolean" ? { backfill: obj.backfill } : {}),
         },
       };
     }
@@ -367,6 +436,68 @@ export function parseMessage(raw: string): ParseResult {
           id: obj.id,
           charts: obj.charts as OpenChartEntry[],
           skippedWindows: typeof obj.skippedWindows === "number" ? obj.skippedWindows : 0,
+        },
+      };
+    }
+    case "subscribe_ack": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "subscribe_ack: missing id" };
+      }
+      if (typeof obj.symbol !== "string") {
+        return { ok: false, reason: "subscribe_ack: missing symbol" };
+      }
+      if (typeof obj.timeframe !== "string") {
+        return { ok: false, reason: "subscribe_ack: missing timeframe" };
+      }
+      if (typeof obj.contract !== "string") {
+        return { ok: false, reason: "subscribe_ack: missing contract" };
+      }
+      if (typeof obj.seedCount !== "number") {
+        return { ok: false, reason: "subscribe_ack: missing seedCount" };
+      }
+      if (typeof obj.seedLastTs !== "number") {
+        return { ok: false, reason: "subscribe_ack: missing seedLastTs" };
+      }
+      if (typeof obj.alreadyActive !== "boolean") {
+        return { ok: false, reason: "subscribe_ack: missing alreadyActive" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "subscribe_ack",
+          id: obj.id,
+          symbol: obj.symbol,
+          timeframe: obj.timeframe,
+          contract: obj.contract,
+          seedCount: obj.seedCount,
+          seedLastTs: obj.seedLastTs,
+          alreadyActive: obj.alreadyActive,
+        },
+      };
+    }
+    case "unsubscribe_ack": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "unsubscribe_ack: missing id" };
+      }
+      if (typeof obj.symbol !== "string") {
+        return { ok: false, reason: "unsubscribe_ack: missing symbol" };
+      }
+      if (typeof obj.timeframe !== "string") {
+        return { ok: false, reason: "unsubscribe_ack: missing timeframe" };
+      }
+      if (typeof obj.removed !== "boolean") {
+        return { ok: false, reason: "unsubscribe_ack: missing removed" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "unsubscribe_ack",
+          id: obj.id,
+          symbol: obj.symbol,
+          timeframe: obj.timeframe,
+          removed: obj.removed,
         },
       };
     }

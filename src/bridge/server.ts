@@ -1,6 +1,8 @@
 import { createServer, type Server as HttpServer, type IncomingMessage } from "http";
+import type { AddressInfo } from "net";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { ConnectionManager } from "./connection.js";
+import { consumerHub } from "./consumer.js";
 import { encode } from "./protocol.js";
 
 export const DEFAULT_PORT = 9472;
@@ -40,15 +42,30 @@ export async function startServer(opts: {
       console.error("[bridge] rejected upgrade: bad or missing token");
       return;
     }
-    if (connections.hasActiveConnection()) {
-      socket.write("HTTP/1.1 409 Conflict\r\n\r\n");
-      socket.destroy();
-      console.error("[bridge] rejected upgrade: client already connected");
+    // Two surfaces share the port: "/" is the NT8 addon (exactly one),
+    // "/feed" is the local consumer channel (many — trading bots, dashboards).
+    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (pathname === "/") {
+      if (connections.hasActiveConnection()) {
+        socket.write("HTTP/1.1 409 Conflict\r\n\r\n");
+        socket.destroy();
+        console.error("[bridge] rejected upgrade: client already connected");
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit("connection", ws, req);
+      });
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
+    if (pathname === "/feed") {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        consumerHub.attach(ws);
+      });
+      return;
+    }
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
+    console.error(`[bridge] rejected upgrade: unknown path ${pathname}`);
   });
 
   wss.on("connection", (ws: WebSocket) => {
@@ -65,11 +82,15 @@ export async function startServer(opts: {
     });
   });
 
-  console.error(`[bridge] listening on 127.0.0.1:${port}`);
+  // The ACTUAL bound port — with {port: 0} the OS assigns one, and callers
+  // (ephemeral-port tests) must be able to dial back.
+  const boundPort = (http.address() as AddressInfo).port;
+  console.error(`[bridge] listening on 127.0.0.1:${boundPort}`);
 
   return {
-    port,
+    port: boundPort,
     async stop() {
+      consumerHub.stop();
       connections.closeActive(1001, "server shutdown");
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => http.close(() => resolve()));

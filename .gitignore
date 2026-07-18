@@ -28,6 +28,10 @@ draw.md
 # Backtest output bundles (one folder per run; regenerable, can be large)
 backtest-results/
 
+# Python bytecode caches (example clients; the coming Python lab)
+__pycache__/
+*.pyc
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 

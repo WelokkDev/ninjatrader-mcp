@@ -47,6 +47,15 @@ export function initializeSchema(db: Database.Database): void {
       PRIMARY KEY (template, date)
     );
 
+    -- Operator-desired live subscriptions (consumer interests are ephemeral).
+    -- Replayed to the AddOn on startup and every hello.
+    CREATE TABLE IF NOT EXISTS live_subscriptions (
+      symbol     TEXT NOT NULL,
+      timeframe  TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (symbol, timeframe)
+    );
+
     CREATE TABLE IF NOT EXISTS backtest_runs (
       run_id        TEXT    PRIMARY KEY,
       strategy_name TEXT    NOT NULL,

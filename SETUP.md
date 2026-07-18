@@ -272,7 +272,46 @@ go back to step 5.
 Other shapes: `rectangle` (`proximal`, `distal`), `vline` (`ts`), `text` (`ts`,
 `price`, `text`). Timestamps are unix **seconds**.
 
-## 8. Optional — trade import
+## 8. Optional — live bar feed
+
+Stream closed bars from NT8 into the candle cache as they happen, instead of
+fetching after the fact. Requires the AddOn from step 4 to have been compiled
+from a source tree that includes `subscribe_bars` (recompile after updating
+`ninja-addon/addons/mcp-bridge.cs` if unsure — a subscribe that times out with
+a "recompile" hint means the AddOn predates it).
+
+Start a stream and check it:
+
+```
+subscribe_live_bars { "symbol": "MNQ", "timeframe": "5m" }
+live_feed_status {}
+```
+
+`subscribe_live_bars` answers with the truth from NT8 — `acked: true` plus the
+resolved contract (e.g. `MNQ 09-26`) — not just "message sent". After the next
+5m boundary, `live_feed_status` shows the bar count and lag (expect ≤ ~2 s
+during RTH), and `get_candles` serves the bar from the cache immediately.
+Higher timeframes (30m–4h) derive automatically on 15m closes; `15s` works but
+is subscribe-on-demand only (seconds history is shallow provider-side).
+
+Subscriptions persist across server restarts and replay whenever NT8
+reconnects; missed bars are healed automatically through `request_candles`
+(visible as `gapCount` in `live_feed_status`).
+
+**For bots and dashboards** there is a push channel on the same port:
+`ws://127.0.0.1:9472/feed`, authenticated with the same bearer token. A minimal
+Python consumer ships in the repo:
+
+```bash
+pip install websockets
+python examples/python/live_feed_client.py MNQ 5m
+```
+
+Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is
+self-sufficient. Bars tagged `backfill: true` closed well before delivery
+(reconnect catch-up) — act-on-close logic must skip them.
+
+## 9. Optional — trade import
 
 Skip this entirely if you only want candles and drawing. Nothing else depends on
 it.
@@ -350,7 +389,7 @@ surfaces errors directly instead of swallowing them. Reading the result:
 
 Then read them back with `get_trades` or `list_trades`.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | What you see | What it means |
 |---|---|
@@ -386,7 +425,7 @@ it has to be a real process environment variable.
 | `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/` or `backtest-results/`, which stay repo-relative. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. |
 
-## 10. Next steps
+## 11. Next steps
 
 You now have the public tool surface: `get_candles`, `resolve_session_days`,
 `prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`, `draw_zone`,

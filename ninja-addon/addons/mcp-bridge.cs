@@ -108,6 +108,42 @@ namespace NinjaTrader.NinjaScript.AddOns
 			= new Dictionary<string, List<StoredDraw>>(StringComparer.Ordinal);
 		private readonly object drawStoreLock = new object();
 
+		// ---------- live bar subscription state ----------
+
+		private const int LiveSeedBarsBack      = 30;   // enough to establish the index baseline
+		private const int LiveSendQueueCapacity = 2048; // beyond this, bars drop (TS-side heal recovers)
+		private const int BackfillThresholdBars = 2;    // older than 2 bar-widths at emit => backfill:true
+
+		private class LiveSub
+		{
+			public string      Key;        // symbol + "|" + timeframe
+			public string      Symbol;     // roster symbol, e.g. "MNQ"
+			public string      Timeframe;  // "15s" | "5m" | "15m"
+			public string      TradingHoursTemplate; // internal key, for reconnect re-resolution
+			public int         TfSeconds;
+			public Instrument  Instrument;
+			public BarsRequest Request;
+			// Per-sub closure (no reliance on Update's undocumented sender);
+			// kept for detach.
+			public EventHandler<BarsUpdateEventArgs> Handler;
+			// subscribe_bars ids awaiting the seed callback's verdict.
+			public List<string> PendingAckIds = new List<string>();
+			public int         LastMaxIndex = -1;
+			public bool        Seeded;
+			public long        Seq;        // monotonic per sub; survives feed reconnects
+		}
+
+		private readonly Dictionary<string, LiveSub> liveSubs
+			= new Dictionary<string, LiveSub>(StringComparer.Ordinal);
+		private readonly object liveLock = new object();
+		// Serializes RecreateAllLiveSubs (two providers reconnecting at once).
+		private readonly object recreateGate = new object();
+
+		// Ordered single-writer queue for live sends — the fire-and-forget path
+		// does not preserve FIFO, and seq-carrying bars must never reorder.
+		private BlockingCollection<string> liveSendQueue;
+		private Task liveSendWorker;
+
 		// Indicators register here so the AddOn can include them in `hello`.
 		public void RegisterSymbol(string symbol)
 		{
@@ -195,22 +231,55 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 			else if (State == State.Configure)
 			{
-				Instance = this;
-				cts      = new CancellationTokenSource();
-				runner   = Task.Run(() => RunAsync(cts.Token));
+				Instance      = this;
+				cts           = new CancellationTokenSource();
+				liveSendQueue = new BlockingCollection<string>(LiveSendQueueCapacity);
+				liveSendWorker = Task.Run(() => LiveSendLoopAsync(cts.Token));
+				runner        = Task.Run(() => RunAsync(cts.Token));
 			}
 			else if (State == State.Terminated)
 			{
 				try
 				{
 					if (cts != null) cts.Cancel();
+					DisposeAllLiveSubs("addon terminating");
+					if (liveSendQueue != null) liveSendQueue.CompleteAdding();
 					if (runner != null) runner.Wait(2_000);
+					if (liveSendWorker != null) liveSendWorker.Wait(2_000);
 				}
 				catch (Exception ex) { Log("shutdown error: " + ex.Message); }
 				finally
 				{
 					if (Instance == this) Instance = null;
 				}
+			}
+		}
+
+		// After a feed reconnect, BarsRequests can silently stop updating —
+		// dispose and recreate every live sub when a provider reconnects.
+		protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs connectionStatusUpdate)
+		{
+			try
+			{
+				if (connectionStatusUpdate.Status == ConnectionStatus.Connected
+					&& connectionStatusUpdate.PriorStatus != ConnectionStatus.Connected)
+				{
+					string connName = "?";
+					try
+					{
+						if (connectionStatusUpdate.Connection != null
+							&& connectionStatusUpdate.Connection.Options != null)
+							connName = connectionStatusUpdate.Connection.Options.Name;
+					}
+					catch { /* name is best-effort */ }
+					Log("provider (re)connected (" + connName + ": "
+						+ connectionStatusUpdate.PriorStatus + " -> Connected) — recreating live BarsRequests");
+					Task.Run(() => RecreateAllLiveSubs());
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("OnConnectionStatusUpdate error: " + ex.Message);
 			}
 		}
 
@@ -374,9 +443,30 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "type",        "hello" },
 				{ "ntVersion",   "NT8" },
 				{ "instruments", instruments.ToArray() },
+				{ "timeZone",    GetConfiguredTimeZoneId() },
 			};
 			await SendJsonAsync(ws, Json.Serialize(hello), ct);
 			Log("sent hello (" + instruments.Count + " instruments)");
+		}
+
+		// Bars are stamped in NT8's configured timezone; the server warns if it
+		// isn't Eastern. Fully reflective so it compiles on any NT8 build.
+		private static string GetConfiguredTimeZoneId()
+		{
+			try
+			{
+				var goProp = typeof(Globals).GetProperty("GeneralOptions",
+					System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+				var go = goProp != null ? goProp.GetValue(null, null) : null;
+				if (go != null)
+				{
+					var p = go.GetType().GetProperty("TimeZoneInfo");
+					var tz = p != null ? p.GetValue(go, null) as TimeZoneInfo : null;
+					if (tz != null) return tz.Id;
+				}
+			}
+			catch (Exception) { /* fall through to the OS fallback */ }
+			return "unknown(local:" + TimeZoneInfo.Local.Id + ")";
 		}
 
 		// Push the renderer roster on change so the server's known-instruments list
@@ -630,6 +720,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case "request_candles":
 					HandleRequestCandles(obj);
 					break;
+
+				// Off the read thread: ResolveInstrument can block for seconds
+				// and would starve heartbeats.
+				case "subscribe_bars":
+				{
+					var o = obj;
+					Task.Run(() => HandleSubscribeBars(o));
+					break;
+				}
+
+				case "unsubscribe_bars":
+				{
+					var o = obj;
+					Task.Run(() => HandleUnsubscribeBars(o));
+					break;
+				}
 
 				case "request_session_calendar":
 					HandleRequestSessionCalendar(obj);
@@ -890,6 +996,75 @@ namespace NinjaTrader.NinjaScript.AddOns
 				+ " holidays=" + holidays.Count + " partial=" + partialHolidays.Count);
 		}
 
+		// ---------- shared TF / trading-hours resolution ----------
+		// One implementation for request_candles and subscribe_bars — the two
+		// paths cannot drift.
+
+		private static bool TryResolveBarsPeriod(string timeframe,
+			out BarsPeriodType periodType, out int periodValue,
+			out string resolvedTimeframe, out string error)
+		{
+			periodType        = BarsPeriodType.Minute;
+			periodValue       = 15;
+			resolvedTimeframe = "15m";
+			error             = null;
+			if (string.IsNullOrEmpty(timeframe)) return true; // request_candles default
+			if (!ALLOWED_RAW_TIMEFRAMES.Contains(timeframe))
+			{
+				error = "Unsupported timeframe: '" + timeframe
+					+ "'. Supported raw TFs: " + string.Join(", ", ALLOWED_RAW_TIMEFRAMES) + ".";
+				return false;
+			}
+			var unit = timeframe[timeframe.Length - 1];
+			int n;
+			if (!int.TryParse(timeframe.Substring(0, timeframe.Length - 1), out n) || n <= 0)
+			{
+				error = "Malformed timeframe: '" + timeframe + "'";
+				return false;
+			}
+			periodType        = unit == 's' ? BarsPeriodType.Second : BarsPeriodType.Minute;
+			periodValue       = n;
+			resolvedTimeframe = timeframe;
+			return true;
+		}
+
+		private static bool TryResolveTradingHours(string tradingHoursTemplate,
+			out TradingHours tradingHours, out string nt8TemplateName, out string error)
+		{
+			tradingHours    = null;
+			error           = null;
+			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
+			{
+				var knownKeys = new StringBuilder();
+				foreach (var k in TRADING_HOURS_MAP.Keys)
+				{
+					if (knownKeys.Length > 0) knownKeys.Append(", ");
+					knownKeys.Append(k);
+				}
+				error = "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
+					+ "'. Known: " + knownKeys.ToString()
+					+ ". Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.";
+				return false;
+			}
+			try
+			{
+				tradingHours = TradingHours.Get(nt8TemplateName);
+			}
+			catch (Exception ex)
+			{
+				error = "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message;
+				return false;
+			}
+			if (tradingHours == null)
+			{
+				error = "NT8 has no TradingHours template named '" + nt8TemplateName
+					+ "' (mapped from '" + tradingHoursTemplate
+					+ "'). Check 'Tools → Trading Hours' in NT8 and update TRADING_HOURS_MAP if NT8 uses a different name on this install.";
+				return false;
+			}
+			return true;
+		}
+
 		private void HandleRequestCandles(IDictionary<string, object> obj)
 		{
 			var id                   = GetString(obj, "id");
@@ -919,62 +1094,21 @@ namespace NinjaTrader.NinjaScript.AddOns
 			BarsPeriodType barsPeriodType;
 			int            barsPeriodValue;
 			string         resolvedTimeframe;
-			if (string.IsNullOrEmpty(timeframe))
+			string         tfError;
+			if (!TryResolveBarsPeriod(timeframe, out barsPeriodType, out barsPeriodValue,
+				out resolvedTimeframe, out tfError))
 			{
-				barsPeriodType    = BarsPeriodType.Minute;
-				barsPeriodValue   = 15;
-				resolvedTimeframe = "15m";
-			}
-			else if (!ALLOWED_RAW_TIMEFRAMES.Contains(timeframe))
-			{
-				SendErrorResponse(id, "Unsupported timeframe for request_candles: '"
-					+ timeframe + "'. Supported raw TFs: " + string.Join(", ", ALLOWED_RAW_TIMEFRAMES) + ".");
-				return;
-			}
-			else
-			{
-				var unit = timeframe[timeframe.Length - 1];
-				int n;
-				if (!int.TryParse(timeframe.Substring(0, timeframe.Length - 1), out n) || n <= 0)
-				{
-					SendErrorResponse(id, "Malformed timeframe for request_candles: '" + timeframe + "'");
-					return;
-				}
-				barsPeriodType    = unit == 's' ? BarsPeriodType.Second : BarsPeriodType.Minute;
-				barsPeriodValue   = n;
-				resolvedTimeframe = timeframe;
-			}
-
-			string nt8TemplateName;
-			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
-			{
-				var knownKeys = new StringBuilder();
-				foreach (var k in TRADING_HOURS_MAP.Keys)
-				{
-					if (knownKeys.Length > 0) knownKeys.Append(", ");
-					knownKeys.Append(k);
-				}
-				SendErrorResponse(id, "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
-					+ "'. Known: " + knownKeys.ToString()
-					+ ". Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.");
+				SendErrorResponse(id, tfError);
 				return;
 			}
 
 			TradingHours nt8TradingHours;
-			try
+			string       nt8TemplateName;
+			string       thError;
+			if (!TryResolveTradingHours(tradingHoursTemplate, out nt8TradingHours,
+				out nt8TemplateName, out thError))
 			{
-				nt8TradingHours = TradingHours.Get(nt8TemplateName);
-			}
-			catch (Exception ex)
-			{
-				SendErrorResponse(id, "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message);
-				return;
-			}
-			if (nt8TradingHours == null)
-			{
-				SendErrorResponse(id, "NT8 has no TradingHours template named '" + nt8TemplateName
-					+ "' (mapped from '" + tradingHoursTemplate
-					+ "'). Check 'Tools → Trading Hours' in NT8 and update TRADING_HOURS_MAP if NT8 uses a different name on this install.");
+				SendErrorResponse(id, thError);
 				return;
 			}
 
@@ -1144,6 +1278,506 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Log("send failed (" + logTag + "): " + ex.Message);
 				}
 			});
+		}
+
+		// ---------- live bar subscriptions ----------
+		//
+		// One live BarsRequest per (symbol, timeframe). Close detection is
+		// index-advance: when Update's MaxIndex passes the high-water mark,
+		// every index in between just closed (never assume MaxIndex-1 is
+		// closed). Payloads build under liveLock, send via the ordered queue.
+
+		private async Task LiveSendLoopAsync(CancellationToken ct)
+		{
+			try
+			{
+				foreach (var json in liveSendQueue.GetConsumingEnumerable(ct))
+				{
+					var ws = socket;
+					if (ws == null || ws.State != WebSocketState.Open)
+					{
+						// Dropped by design: the TS side detects the gap and heals.
+						continue;
+					}
+					try
+					{
+						await SendJsonAsync(ws, json, CancellationToken.None);
+					}
+					catch (Exception ex)
+					{
+						Log("live send failed: " + ex.Message);
+					}
+				}
+			}
+			catch (OperationCanceledException) { /* shutting down */ }
+			catch (Exception ex) { Log("live send loop error: " + ex.Message); }
+			Log("live send loop exiting");
+		}
+
+		private void QueueLiveSend(string json, string logTag)
+		{
+			var queue = liveSendQueue;
+			if (queue == null || queue.IsAddingCompleted)
+			{
+				Log("cannot queue (" + logTag + "): send queue unavailable");
+				return;
+			}
+			if (!queue.TryAdd(json))
+				Log("live send queue full — dropped " + logTag + " (TS heal will recover)");
+		}
+
+		private void QueueSubscribeAck(string id, string symbol, string timeframe,
+			string contract, int seedCount, long seedLastTs, bool alreadyActive)
+		{
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",             1 },
+				{ "id",            id },
+				{ "type",          "subscribe_ack" },
+				{ "symbol",        symbol },
+				{ "timeframe",     timeframe },
+				{ "contract",      contract },
+				{ "seedCount",     seedCount },
+				{ "seedLastTs",    seedLastTs },
+				{ "alreadyActive", alreadyActive },
+			};
+			QueueLiveSend(Json.Serialize(payload),
+				"subscribe_ack " + symbol + "/" + timeframe + " id=" + id);
+		}
+
+		private void QueueUnsubscribeAck(string id, string symbol, string timeframe, bool removed)
+		{
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",         1 },
+				{ "id",        id },
+				{ "type",      "unsubscribe_ack" },
+				{ "symbol",    symbol },
+				{ "timeframe", timeframe },
+				{ "removed",   removed },
+			};
+			QueueLiveSend(Json.Serialize(payload),
+				"unsubscribe_ack " + symbol + "/" + timeframe + " id=" + id);
+		}
+
+		private void HandleSubscribeBars(IDictionary<string, object> obj)
+		{
+			var id                   = GetString(obj, "id");
+			var symbol               = GetString(obj, "symbol");
+			var timeframe            = GetString(obj, "timeframe");
+			var tradingHoursTemplate = GetString(obj, "tradingHoursTemplate");
+
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("subscribe_bars missing id; dropping");
+				return;
+			}
+			if (string.IsNullOrEmpty(symbol))
+			{
+				SendErrorResponse(id, "subscribe_bars missing required field: symbol");
+				return;
+			}
+			// No default TF here — an unrequested stream is worse than an error.
+			if (string.IsNullOrEmpty(timeframe))
+			{
+				SendErrorResponse(id, "subscribe_bars missing required field: timeframe");
+				return;
+			}
+			if (string.IsNullOrEmpty(tradingHoursTemplate))
+			{
+				SendErrorResponse(id, "subscribe_bars missing required field: tradingHoursTemplate");
+				return;
+			}
+
+			BarsPeriodType periodType;
+			int            periodValue;
+			string         resolvedTf;
+			string         tfError;
+			if (!TryResolveBarsPeriod(timeframe, out periodType, out periodValue,
+				out resolvedTf, out tfError))
+			{
+				SendErrorResponse(id, tfError);
+				return;
+			}
+
+			TradingHours tradingHours;
+			string       nt8TemplateName;
+			string       thError;
+			if (!TryResolveTradingHours(tradingHoursTemplate, out tradingHours,
+				out nt8TemplateName, out thError))
+			{
+				SendErrorResponse(id, thError);
+				return;
+			}
+
+			var instrument = ResolveInstrument(symbol);
+			if (instrument == null)
+			{
+				SendErrorResponse(id, "Could not resolve instrument for symbol: " + symbol);
+				return;
+			}
+
+			var key       = symbol + "|" + resolvedTf;
+			var tfSeconds = periodType == BarsPeriodType.Second ? periodValue : periodValue * 60;
+
+			LiveSub sub;
+			lock (liveLock)
+			{
+				if (liveSubs.TryGetValue(key, out sub))
+				{
+					// Idempotent re-subscribe: only claim alreadyActive once truly
+					// live. During a pending seed, park the id — the seed callback
+					// answers it.
+					if (sub.Seeded)
+					{
+						QueueSubscribeAck(id, symbol, resolvedTf,
+							sub.Instrument.FullName, 0, 0, true);
+					}
+					else
+					{
+						sub.PendingAckIds.Add(id);
+					}
+					return;
+				}
+				sub = new LiveSub
+				{
+					Key                  = key,
+					Symbol               = symbol,
+					Timeframe            = resolvedTf,
+					TradingHoursTemplate = tradingHoursTemplate,
+					TfSeconds            = tfSeconds,
+					Instrument           = instrument,
+					Seeded               = false,
+					LastMaxIndex         = -1,
+					Seq                  = 0,
+				};
+				sub.PendingAckIds.Add(id);
+				liveSubs[key] = sub;
+			}
+
+			Log("subscribe_bars " + key + " id=" + id
+				+ " | resolved=" + DescribeInstrument(instrument)
+				+ " | NT8 template='" + nt8TemplateName + "'");
+
+			StartLiveRequest(sub, periodType, periodValue, tradingHours, true);
+		}
+
+		// Creates and seeds the BarsRequest for `sub`; answers parked subscribe
+		// ids when ackPending. Also the re-seed path after a provider reconnect.
+		private void StartLiveRequest(LiveSub sub, BarsPeriodType periodType,
+			int periodValue, TradingHours tradingHours, bool ackPending)
+		{
+			BarsRequest req;
+			try
+			{
+				req = new BarsRequest(sub.Instrument, LiveSeedBarsBack);
+				req.BarsPeriod = new BarsPeriod
+				{
+					BarsPeriodType = periodType,
+					Value          = periodValue,
+				};
+				req.TradingHours = tradingHours;
+			}
+			catch (Exception ex)
+			{
+				List<string> failIds = null;
+				lock (liveLock)
+				{
+					liveSubs.Remove(sub.Key);
+					failIds = new List<string>(sub.PendingAckIds);
+					sub.PendingAckIds.Clear();
+				}
+				if (ackPending)
+					foreach (var fid in failIds)
+						SendErrorResponse(fid, "subscribe_bars BarsRequest construction failed: " + ex.Message);
+				Log("live BarsRequest construction failed for " + sub.Key + ": " + ex.Message);
+				return;
+			}
+
+			// Per-sub closure: the handler carries its own sub reference.
+			EventHandler<BarsUpdateEventArgs> handler = (s, e) => OnLiveBarsUpdate(sub, e);
+			lock (liveLock)
+			{
+				sub.Request = req;
+				sub.Handler = handler;
+			}
+			req.Update += handler; // attach BEFORE Request; the Seeded gate protects
+
+			try
+			{
+				req.Request((bars, errorCode, errorMessage) =>
+				{
+					try
+					{
+						if (errorCode != ErrorCode.NoError)
+						{
+							// Seed failed: remove + dispose so a retry isn't wedged;
+							// truthful nack.
+							List<string> nackIds;
+							lock (liveLock)
+							{
+								liveSubs.Remove(sub.Key);
+								nackIds = new List<string>(sub.PendingAckIds);
+								sub.PendingAckIds.Clear();
+							}
+							try { req.Update -= handler; } catch { /* already gone */ }
+							try { req.Dispose(); } catch { /* already gone */ }
+							Log("subscribe_bars seed failed " + sub.Key + ": " + errorCode
+								+ " " + (errorMessage ?? "") + " | provider " + DescribeProviderState());
+							if (ackPending)
+								foreach (var nid in nackIds)
+									SendErrorResponse(nid, "subscribe_bars seed failed: "
+										+ errorCode + " — " + (errorMessage ?? ""));
+							return;
+						}
+
+						int  seedCount  = bars != null && bars.Bars != null ? bars.Bars.Count : 0;
+						long seedLastTs = 0;
+						if (seedCount > 0)
+							seedLastTs = ExchangeTimeToUnixSeconds(bars.Bars.GetTime(seedCount - 1));
+
+						bool stillWanted;
+						List<string> ackIds;
+						lock (liveLock)
+						{
+							// An unsubscribe may have raced the seed — don't bring an
+							// unregistered sub live or leak its BarsRequest.
+							LiveSub cur;
+							stillWanted = liveSubs.TryGetValue(sub.Key, out cur)
+								&& object.ReferenceEquals(cur, sub);
+							if (stillWanted)
+							{
+								// Last seeded bar counts as forming: emission starts
+								// when MaxIndex advances past it — no first-close
+								// drop, no history replay.
+								sub.LastMaxIndex = seedCount - 1;
+								sub.Seeded       = true;
+							}
+							ackIds = new List<string>(sub.PendingAckIds);
+							sub.PendingAckIds.Clear();
+						}
+						if (!stillWanted)
+						{
+							try { req.Update -= handler; } catch { /* already gone */ }
+							try { req.Dispose(); } catch { /* already gone */ }
+							Log("subscribe_bars seed completed after unsubscribe " + sub.Key + " — disposed");
+							if (ackPending)
+								foreach (var uid in ackIds)
+									SendErrorResponse(uid, "subscribe_bars: unsubscribed while the seed was in flight");
+							return;
+						}
+						Log("subscribe_bars seeded " + sub.Key + ": " + seedCount
+							+ " bars, lastTs=" + seedLastTs);
+						if (ackPending)
+							foreach (var aid in ackIds)
+								QueueSubscribeAck(aid, sub.Symbol, sub.Timeframe,
+									sub.Instrument.FullName, seedCount, seedLastTs, false);
+					}
+					catch (Exception ex)
+					{
+						Log("subscribe_bars seed callback error " + sub.Key + ": " + ex.Message);
+					}
+				});
+			}
+			catch (Exception ex)
+			{
+				List<string> failIds;
+				lock (liveLock)
+				{
+					liveSubs.Remove(sub.Key);
+					failIds = new List<string>(sub.PendingAckIds);
+					sub.PendingAckIds.Clear();
+				}
+				try { req.Update -= handler; } catch { /* already gone */ }
+				try { req.Dispose(); } catch { /* already gone */ }
+				if (ackPending)
+					foreach (var fid in failIds)
+						SendErrorResponse(fid, "subscribe_bars BarsRequest.Request threw: " + ex.Message);
+				Log("live BarsRequest.Request threw for " + sub.Key + ": " + ex.Message);
+			}
+		}
+
+		private void OnLiveBarsUpdate(LiveSub sub, BarsUpdateEventArgs e)
+		{
+			try
+			{
+				List<string> payloads = null;
+				lock (liveLock)
+				{
+					// Reject events for unsubscribed/replaced subs and anything
+					// arriving before the seed completes.
+					LiveSub current;
+					if (!liveSubs.TryGetValue(sub.Key, out current)) return;
+					if (!object.ReferenceEquals(current, sub)) return;
+					if (!sub.Seeded) return;
+
+					int newMax = e.MaxIndex;
+					if (newMax <= sub.LastMaxIndex) return;
+
+					var series = e.BarsSeries;
+					if (series == null) return;
+					var nowUnix = (long) (DateTime.UtcNow - UnixEpoch).TotalSeconds;
+
+					payloads = new List<string>();
+					for (int i = Math.Max(sub.LastMaxIndex, 0); i < newMax; i++)
+					{
+						long ts = ExchangeTimeToUnixSeconds(series.GetTime(i));
+						sub.Seq++;
+						var msg = new Dictionary<string, object>
+						{
+							{ "v",         1 },
+							{ "type",      "bar_close" },
+							{ "symbol",    sub.Symbol },
+							{ "timeframe", sub.Timeframe },
+							{ "seq",       sub.Seq },
+							{ "contract",  sub.Instrument.FullName },
+							{ "candle",    new Dictionary<string, object>
+								{
+									{ "timestamp", ts },
+									{ "open",      series.GetOpen(i) },
+									{ "high",      series.GetHigh(i) },
+									{ "low",       series.GetLow(i) },
+									{ "close",     series.GetClose(i) },
+									{ "volume",    (double) series.GetVolume(i) },
+								} },
+						};
+						// Tag stale catch-up bars so act-on-close consumers skip them.
+						if (nowUnix - ts > (long) BackfillThresholdBars * sub.TfSeconds)
+							msg["backfill"] = true;
+						payloads.Add(Json.Serialize(msg));
+					}
+					sub.LastMaxIndex = newMax;
+				}
+				// Built under liveLock, sent after — the queue preserves order.
+				if (payloads != null)
+					foreach (var p in payloads)
+						QueueLiveSend(p, "bar_close " + sub.Key);
+			}
+			catch (Exception ex)
+			{
+				Log("live update error " + sub.Key + ": " + ex.Message);
+			}
+		}
+
+		private void HandleUnsubscribeBars(IDictionary<string, object> obj)
+		{
+			var id        = GetString(obj, "id");
+			var symbol    = GetString(obj, "symbol");
+			var timeframe = GetString(obj, "timeframe");
+
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("unsubscribe_bars missing id; dropping");
+				return;
+			}
+			if (string.IsNullOrEmpty(symbol))
+			{
+				SendErrorResponse(id, "unsubscribe_bars missing required field: symbol");
+				return;
+			}
+			if (string.IsNullOrEmpty(timeframe))
+			{
+				SendErrorResponse(id, "unsubscribe_bars missing required field: timeframe");
+				return;
+			}
+
+			var key = symbol + "|" + timeframe;
+			LiveSub sub;
+			lock (liveLock)
+			{
+				if (liveSubs.TryGetValue(key, out sub))
+					liveSubs.Remove(key);
+			}
+			if (sub != null)
+			{
+				// Outside liveLock: Dispose may block on an in-flight Update
+				// that wants the lock (lock-ordering discipline).
+				DetachAndDispose(sub);
+				Log("unsubscribed " + key);
+			}
+			else
+			{
+				Log("unsubscribe_bars: no sub for " + key);
+			}
+			QueueUnsubscribeAck(id, symbol, timeframe, sub != null);
+		}
+
+		// Dispose and recreate every live BarsRequest. Seq keeps counting (the
+		// TS side reads continuity from timestamps). Serialized by recreateGate.
+		private void RecreateAllLiveSubs()
+		{
+			lock (recreateGate)
+			{
+				RecreateAllLiveSubsLocked();
+			}
+		}
+
+		private void RecreateAllLiveSubsLocked()
+		{
+			List<LiveSub> snapshot;
+			lock (liveLock)
+			{
+				snapshot = new List<LiveSub>(liveSubs.Values);
+				foreach (var s in snapshot) s.Seeded = false;
+			}
+			Log("recreating " + snapshot.Count + " live subscription(s) after provider reconnect");
+
+			foreach (var sub in snapshot)
+			{
+				DetachAndDispose(sub);
+
+				BarsPeriodType periodType;
+				int            periodValue;
+				string         resolvedTf;
+				string         tfError;
+				if (!TryResolveBarsPeriod(sub.Timeframe, out periodType, out periodValue,
+					out resolvedTf, out tfError))
+				{
+					Log("recreate " + sub.Key + " failed to re-resolve TF: " + tfError);
+					lock (liveLock) { liveSubs.Remove(sub.Key); }
+					continue;
+				}
+				// Re-resolve from the sub's OWN template key — never guess.
+				TradingHours tradingHours;
+				string       nt8TemplateName;
+				string       thError;
+				if (!TryResolveTradingHours(sub.TradingHoursTemplate, out tradingHours,
+					out nt8TemplateName, out thError))
+				{
+					Log("recreate " + sub.Key + " failed to re-resolve TradingHours: " + thError);
+					lock (liveLock) { liveSubs.Remove(sub.Key); }
+					continue;
+				}
+
+				StartLiveRequest(sub, periodType, periodValue, tradingHours, false);
+			}
+		}
+
+		private void DisposeAllLiveSubs(string reason)
+		{
+			List<LiveSub> snapshot;
+			lock (liveLock)
+			{
+				snapshot = new List<LiveSub>(liveSubs.Values);
+				liveSubs.Clear();
+			}
+			if (snapshot.Count == 0) return;
+			Log("disposing " + snapshot.Count + " live subscription(s): " + reason);
+			foreach (var sub in snapshot) DetachAndDispose(sub);
+		}
+
+		// NEVER call under liveLock: BarsRequest.Dispose may synchronously wait
+		// on an in-flight Update callback that is itself blocked on liveLock.
+		private static void DetachAndDispose(LiveSub sub)
+		{
+			var req     = sub.Request;
+			var handler = sub.Handler;
+			if (req == null) return;
+			if (handler != null)
+			{
+				try { req.Update -= handler; } catch { /* already detached */ }
+			}
+			try { req.Dispose(); } catch { /* already disposed */ }
 		}
 
 		// ---------- request_open_charts ----------
