@@ -51,8 +51,9 @@ Verify: `build/index.js` exists.
 There is **no database setup step**. Opening the connection creates everything:
 `src/db/connection.ts` runs `mkdirSync` on the data directory, opens
 `data/candles.db` in WAL mode, and calls `initializeSchema`, which creates all
-seven tables (`candles`, `draw_commands`, `session_calendar`, `backtest_runs`,
-`trades`, `trade_decisions`, `positions`) plus indexes. Every statement is
+nine tables (`candles`, `draw_commands`, `session_calendar`,
+`live_subscriptions`, `live_position_feed`, `backtest_runs`, `trades`,
+`trade_decisions`, `positions`) plus indexes. Every statement is
 `CREATE TABLE IF NOT EXISTS` and the column migrations are idempotent, so this
 runs safely on every boot. Nothing to create by hand, ever.
 
@@ -311,7 +312,43 @@ Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is
 self-sufficient. Bars tagged `backfill: true` closed well before delivery
 (reconnect catch-up) — act-on-close logic must skip them.
 
-## 9. Optional — trade import
+## 9. Optional — live position tracking
+
+Strictly **read-only** observation of your accounts — the bridge never places,
+changes, or cancels orders. Requires the AddOn to have been compiled from a
+source tree that includes `subscribe_positions` (a request that times out with
+a "recompile" hint means it predates the feature).
+
+Check what's open right now (works with or without the feed):
+
+```
+get_positions {}
+```
+
+Every position comes back with the account it belongs to (sim vs. live is
+flagged by name heuristic and never merged), average entry, working stops and
+targets matched into dollar risk and an R-multiple, and unrealized P&L computed
+from the freshest price the server knows — the answer says which price source
+it used and how old it is. When NT8 is disconnected the reply is marked
+`stale: true` with a warning: treat it as *unknown*, never as flat.
+
+Turn on the event feed for live-trade context:
+
+```
+subscribe_live_positions {}
+```
+
+While on, the AddOn streams fills, order changes, and position transitions
+(sparse events — not a P&L ticker), and pushes a full snapshot on subscribe,
+provider reconnect, and account changes so state self-heals. `get_positions`
+then also carries per-trade age, fill history, and MAE/MFE — excursion
+granularity follows whatever live bar feeds are running (a `15s` bar sub on
+the traded symbol gives the finest picture). The toggle persists across server
+restarts and replays on every NT8 reconnect. Health lives in
+`live_feed_status` under `positions`; events also broadcast on the `/feed`
+channel (send `{"type": "subscribe_positions"}`).
+
+## 10. Optional — trade import
 
 Skip this entirely if you only want candles and drawing. Nothing else depends on
 it.
@@ -389,7 +426,7 @@ surfaces errors directly instead of swallowing them. Reading the result:
 
 Then read them back with `get_trades` or `list_trades`.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | What you see | What it means |
 |---|---|
@@ -425,7 +462,7 @@ it has to be a real process environment variable.
 | `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/` or `backtest-results/`, which stay repo-relative. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. |
 
-## 11. Next steps
+## 12. Next steps
 
 You now have the public tool surface: `get_candles`, `resolve_session_days`,
 `prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`, `draw_zone`,

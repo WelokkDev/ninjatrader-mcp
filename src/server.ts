@@ -19,6 +19,11 @@ import {
   registerUnsubscribeLiveBars,
   registerLiveFeedStatus,
 } from "./tools/live-feed.js";
+import {
+  registerGetPositions,
+  registerSubscribeLivePositions,
+  registerUnsubscribeLivePositions,
+} from "./tools/positions.js";
 import { startLiveFeedRuntime } from "./live/runtime.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
@@ -63,6 +68,9 @@ export function registerGenericTools(
   unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server));
   unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server));
   unless(["live_feed_status"], () => registerLiveFeedStatus(server));
+  unless(["get_positions"], () => registerGetPositions(server));
+  unless(["subscribe_live_positions"], () => registerSubscribeLivePositions(server));
+  unless(["unsubscribe_live_positions"], () => registerUnsubscribeLivePositions(server));
   unless(["list_trades"], () => registerListTrades(server));
   unless(["list_decisions"], () => registerListDecisions(server));
   unless(["get_trades"], () => registerGetTrades(server));

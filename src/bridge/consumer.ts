@@ -1,7 +1,8 @@
 import type { WebSocket } from "ws";
 import { RAW_TIMEFRAMES } from "../core/constants.js";
 import type { EnsureResult, LiveSubState, LiveTimeframe } from "../live/registry.js";
-import type { LiveBarEvent, LiveFeedBus } from "../live/bus.js";
+import type { Bus, LiveBarEvent, LiveFeedBus } from "../live/bus.js";
+import type { PositionBroadcast } from "../live/positions.js";
 import { SERVER_VERSION } from "./server.js";
 
 // Consumers whose socket buffer exceeds this are dropped (stuck-bot guard).
@@ -26,6 +27,8 @@ interface ConsumerConn {
   id: string;
   ws: WebSocket;
   keys: Set<string>;
+  // Opted into position broadcasts (position_event/position_sync/trade_closed).
+  positions: boolean;
 }
 
 /**
@@ -38,6 +41,9 @@ interface ConsumerConn {
 export class ConsumerHub {
   private binding: ConsumerHubBinding | null = null;
   private busUnsubscribe: (() => void) | null = null;
+  private positionBusUnsubscribe: (() => void) | null = null;
+  private positionFeedStatus: (() => { desired: boolean; upstreamAcked: boolean }) | null =
+    null;
   private readonly consumers = new Map<string, ConsumerConn>();
   private nextId = 1;
 
@@ -47,9 +53,20 @@ export class ConsumerHub {
     this.busUnsubscribe = bus.subscribe((e) => this.broadcast(e));
   }
 
+  /** Position broadcasts are receive-only: the upstream toggle is operator-
+   *  owned, so opted-in bots get events only while the feed is on. */
+  bindPositions(
+    bus: Bus<PositionBroadcast>,
+    status: () => { desired: boolean; upstreamAcked: boolean },
+  ): void {
+    this.positionFeedStatus = status;
+    if (this.positionBusUnsubscribe) this.positionBusUnsubscribe();
+    this.positionBusUnsubscribe = bus.subscribe((b) => this.broadcastPosition(b));
+  }
+
   attach(ws: WebSocket): void {
     const id = `consumer:${this.nextId++}`;
-    const conn: ConsumerConn = { id, ws, keys: new Set() };
+    const conn: ConsumerConn = { id, ws, keys: new Set(), positions: false };
     this.consumers.set(id, conn);
 
     this.send(conn, {
@@ -117,6 +134,31 @@ export class ConsumerHub {
     }
   }
 
+  // Same backpressure guard as bars; the payload's own type field
+  // ("position_event" | "position_sync" | "trade_closed") discriminates.
+  private broadcastPosition(b: PositionBroadcast): void {
+    if (this.consumers.size === 0) return;
+    let payload: string | null = null;
+    for (const conn of this.consumers.values()) {
+      if (!conn.positions) continue;
+      if (conn.ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+        console.error(`[feed] ${conn.id} backpressure limit hit — dropping consumer`);
+        try {
+          conn.ws.terminate();
+        } catch {
+          // ignore
+        }
+        continue;
+      }
+      payload ??= JSON.stringify(b);
+      try {
+        conn.ws.send(payload);
+      } catch (err) {
+        console.error(`[feed] ${conn.id} send failed:`, err);
+      }
+    }
+  }
+
   private async handleMessage(conn: ConsumerConn, raw: string): Promise<void> {
     let msg: Record<string, unknown>;
     try {
@@ -134,6 +176,30 @@ export class ConsumerHub {
       case "ping":
         this.send(conn, { type: "pong" });
         return;
+      case "subscribe_positions": {
+        conn.positions = true;
+        const feed = this.positionFeedStatus
+          ? this.positionFeedStatus()
+          : { desired: false, upstreamAcked: false };
+        this.send(conn, {
+          type: "subscribed_positions",
+          ok: true,
+          // Receive-only: events flow only while the operator-owned feed is on.
+          feedDesired: feed.desired,
+          feedUpstreamAcked: feed.upstreamAcked,
+          ...(feed.desired
+            ? {}
+            : {
+                note: "position feed is OFF — ask the operator to run subscribe_live_positions",
+              }),
+        });
+        return;
+      }
+      case "unsubscribe_positions": {
+        conn.positions = false;
+        this.send(conn, { type: "unsubscribed_positions", ok: true });
+        return;
+      }
       case "subscribe":
       case "unsubscribe": {
         const symbol = msg.symbol;

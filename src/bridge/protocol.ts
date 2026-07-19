@@ -214,6 +214,132 @@ export interface OpenChartsResponseMessage {
   skippedWindows: number;
 }
 
+// ---------- live position tracking ----------
+// Read-only account observation. Enum-ish fields carry NT8's own ToString()
+// values ("Long", "StopMarket", "Working", ...) so new values pass through.
+
+export interface PositionPayload {
+  instrument: string; // resolved contract, e.g. "MNQ 09-26"
+  symbol: string; // master symbol, e.g. "MNQ" — matches the roster/draw convention
+  marketPosition: string;
+  quantity: number;
+  averagePrice?: number;
+  pointValue?: number;
+  tickSize?: number;
+  // Best-effort from NT8 market data; omitted when no data is flowing.
+  unrealizedPnl?: number;
+  marketPrice?: number;
+  marketPriceTs?: number;
+}
+
+export interface WorkingOrderPayload {
+  orderId: string;
+  name: string; // NT8 order name, e.g. "Stop loss" / "Profit target"
+  instrument: string;
+  symbol: string;
+  action: string; // Buy | Sell | SellShort | BuyToCover
+  orderType: string; // Market | Limit | StopMarket | StopLimit | ...
+  state: string; // NT8 OrderState string
+  quantity: number;
+  filled: number;
+  limitPrice?: number;
+  stopPrice?: number;
+  avgFillPrice?: number;
+  time?: number; // unix seconds
+  oco?: string;
+}
+
+export interface ExecutionPayload {
+  executionId: string;
+  orderId: string;
+  instrument: string;
+  symbol: string;
+  side: string; // NT8 MarketPosition of the fill: "Long" = buy, "Short" = sell
+  quantity: number;
+  price?: number;
+  time?: number; // unix seconds
+  orderName?: string;
+  commission?: number;
+}
+
+export interface AccountSnapshotPayload {
+  name: string;
+  connection?: string;
+  connectionStatus?: string;
+  denomination?: string;
+  realizedPnl?: number;
+  cashValue?: number;
+  netLiquidation?: number;
+  positions: PositionPayload[];
+  orders: WorkingOrderPayload[]; // working (non-terminal) orders only
+}
+
+export interface RequestPositionsMessage {
+  v: 1;
+  id: string;
+  type: "request_positions";
+}
+
+export interface PositionsResponseMessage {
+  v: 1;
+  id: string;
+  type: "positions_response";
+  accounts: AccountSnapshotPayload[];
+}
+
+export interface SubscribePositionsMessage {
+  v: 1;
+  id: string;
+  type: "subscribe_positions";
+}
+
+export interface SubscribePositionsAckMessage {
+  v: 1;
+  id: string;
+  type: "subscribe_positions_ack";
+  accounts: string[];
+  alreadyActive: boolean;
+}
+
+export interface UnsubscribePositionsMessage {
+  v: 1;
+  id: string;
+  type: "unsubscribe_positions";
+}
+
+export interface UnsubscribePositionsAckMessage {
+  v: 1;
+  id: string;
+  type: "unsubscribe_positions_ack";
+  removed: boolean;
+}
+
+/** Unsolicited full snapshot (after subscribe / reconnect / roster change);
+ *  shares the position_event seq stream for ordering and drop detection. */
+export interface PositionSyncMessage {
+  v: 1;
+  type: "position_sync";
+  accounts: AccountSnapshotPayload[];
+  seq?: number;
+  reason?: string;
+  ts?: number; // unix seconds at emit
+}
+
+export interface PositionEventMessage {
+  v: 1;
+  type: "position_event";
+  account: string;
+  kind: "position" | "order" | "execution";
+  seq?: number;
+  ts?: number; // unix seconds at emit
+  // Exactly one of these is present, matching `kind`.
+  position?: PositionPayload;
+  order?: WorkingOrderPayload;
+  execution?: ExecutionPayload;
+  // kind="position" only: NT8 Operation (Add | Update | Remove).
+  operation?: string;
+}
+
 export interface ErrorMessage {
   v: 1;
   id: string;
@@ -231,6 +357,11 @@ export type InboundMessage =
   | OpenChartsResponseMessage
   | SubscribeAckMessage
   | UnsubscribeAckMessage
+  | PositionsResponseMessage
+  | SubscribePositionsAckMessage
+  | UnsubscribePositionsAckMessage
+  | PositionSyncMessage
+  | PositionEventMessage
   | ErrorMessage;
 export type OutboundMessage =
   | HelloAckMessage
@@ -241,7 +372,10 @@ export type OutboundMessage =
   | RequestSessionCalendarMessage
   | RequestOpenChartsMessage
   | SubscribeBarsMessage
-  | UnsubscribeBarsMessage;
+  | UnsubscribeBarsMessage
+  | RequestPositionsMessage
+  | SubscribePositionsMessage
+  | UnsubscribePositionsMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =
@@ -258,6 +392,87 @@ function isCandlePayload(v: unknown): v is CandlePayload {
     typeof c.low === "number" &&
     typeof c.close === "number" &&
     typeof c.volume === "number"
+  );
+}
+
+// Optional-field check: absent is fine, present-but-wrong-type is not.
+function optNum(v: unknown): boolean {
+  return v === undefined || typeof v === "number";
+}
+function optStr(v: unknown): boolean {
+  return v === undefined || typeof v === "string";
+}
+
+function isPositionPayload(v: unknown): v is PositionPayload {
+  if (!v || typeof v !== "object") return false;
+  const p = v as Record<string, unknown>;
+  return (
+    typeof p.instrument === "string" &&
+    typeof p.symbol === "string" &&
+    typeof p.marketPosition === "string" &&
+    typeof p.quantity === "number" &&
+    optNum(p.averagePrice) &&
+    optNum(p.pointValue) &&
+    optNum(p.tickSize) &&
+    optNum(p.unrealizedPnl) &&
+    optNum(p.marketPrice) &&
+    optNum(p.marketPriceTs)
+  );
+}
+
+function isWorkingOrderPayload(v: unknown): v is WorkingOrderPayload {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.orderId === "string" &&
+    typeof o.name === "string" &&
+    typeof o.instrument === "string" &&
+    typeof o.symbol === "string" &&
+    typeof o.action === "string" &&
+    typeof o.orderType === "string" &&
+    typeof o.state === "string" &&
+    typeof o.quantity === "number" &&
+    typeof o.filled === "number" &&
+    optNum(o.limitPrice) &&
+    optNum(o.stopPrice) &&
+    optNum(o.avgFillPrice) &&
+    optNum(o.time) &&
+    optStr(o.oco)
+  );
+}
+
+function isExecutionPayload(v: unknown): v is ExecutionPayload {
+  if (!v || typeof v !== "object") return false;
+  const x = v as Record<string, unknown>;
+  return (
+    typeof x.executionId === "string" &&
+    typeof x.orderId === "string" &&
+    typeof x.instrument === "string" &&
+    typeof x.symbol === "string" &&
+    typeof x.side === "string" &&
+    typeof x.quantity === "number" &&
+    optNum(x.price) &&
+    optNum(x.time) &&
+    optStr(x.orderName) &&
+    optNum(x.commission)
+  );
+}
+
+function isAccountSnapshotPayload(v: unknown): v is AccountSnapshotPayload {
+  if (!v || typeof v !== "object") return false;
+  const a = v as Record<string, unknown>;
+  return (
+    typeof a.name === "string" &&
+    optStr(a.connection) &&
+    optStr(a.connectionStatus) &&
+    optStr(a.denomination) &&
+    optNum(a.realizedPnl) &&
+    optNum(a.cashValue) &&
+    optNum(a.netLiquidation) &&
+    Array.isArray(a.positions) &&
+    a.positions.every(isPositionPayload) &&
+    Array.isArray(a.orders) &&
+    a.orders.every(isWorkingOrderPayload)
   );
 }
 
@@ -498,6 +713,112 @@ export function parseMessage(raw: string): ParseResult {
           symbol: obj.symbol,
           timeframe: obj.timeframe,
           removed: obj.removed,
+        },
+      };
+    }
+    case "positions_response": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "positions_response: missing id" };
+      }
+      if (!Array.isArray(obj.accounts) || !obj.accounts.every(isAccountSnapshotPayload)) {
+        return { ok: false, reason: "positions_response: bad accounts" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "positions_response",
+          id: obj.id,
+          accounts: obj.accounts as AccountSnapshotPayload[],
+        },
+      };
+    }
+    case "subscribe_positions_ack": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "subscribe_positions_ack: missing id" };
+      }
+      if (!Array.isArray(obj.accounts) || !obj.accounts.every((s) => typeof s === "string")) {
+        return { ok: false, reason: "subscribe_positions_ack: accounts must be string[]" };
+      }
+      if (typeof obj.alreadyActive !== "boolean") {
+        return { ok: false, reason: "subscribe_positions_ack: missing alreadyActive" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "subscribe_positions_ack",
+          id: obj.id,
+          accounts: obj.accounts as string[],
+          alreadyActive: obj.alreadyActive,
+        },
+      };
+    }
+    case "unsubscribe_positions_ack": {
+      if (typeof obj.id !== "string") {
+        return { ok: false, reason: "unsubscribe_positions_ack: missing id" };
+      }
+      if (typeof obj.removed !== "boolean") {
+        return { ok: false, reason: "unsubscribe_positions_ack: missing removed" };
+      }
+      return {
+        ok: true,
+        message: { v: 1, type: "unsubscribe_positions_ack", id: obj.id, removed: obj.removed },
+      };
+    }
+    case "position_sync": {
+      if (!Array.isArray(obj.accounts) || !obj.accounts.every(isAccountSnapshotPayload)) {
+        return { ok: false, reason: "position_sync: bad accounts" };
+      }
+      if (!optNum(obj.seq) || !optNum(obj.ts) || !optStr(obj.reason)) {
+        return { ok: false, reason: "position_sync: bad seq/ts/reason" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "position_sync",
+          accounts: obj.accounts as AccountSnapshotPayload[],
+          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
+          ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
+          ...(typeof obj.ts === "number" ? { ts: obj.ts } : {}),
+        },
+      };
+    }
+    case "position_event": {
+      if (typeof obj.account !== "string") {
+        return { ok: false, reason: "position_event: missing account" };
+      }
+      if (obj.kind !== "position" && obj.kind !== "order" && obj.kind !== "execution") {
+        return { ok: false, reason: `position_event: bad kind ${String(obj.kind)}` };
+      }
+      if (!optNum(obj.seq) || !optNum(obj.ts) || !optStr(obj.operation)) {
+        return { ok: false, reason: "position_event: bad seq/ts/operation" };
+      }
+      if (obj.kind === "position" && !isPositionPayload(obj.position)) {
+        return { ok: false, reason: "position_event: invalid position payload" };
+      }
+      if (obj.kind === "order" && !isWorkingOrderPayload(obj.order)) {
+        return { ok: false, reason: "position_event: invalid order payload" };
+      }
+      if (obj.kind === "execution" && !isExecutionPayload(obj.execution)) {
+        return { ok: false, reason: "position_event: invalid execution payload" };
+      }
+      return {
+        ok: true,
+        message: {
+          v: 1,
+          type: "position_event",
+          account: obj.account,
+          kind: obj.kind,
+          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
+          ...(typeof obj.ts === "number" ? { ts: obj.ts } : {}),
+          ...(obj.kind === "position" ? { position: obj.position as PositionPayload } : {}),
+          ...(obj.kind === "order" ? { order: obj.order as WorkingOrderPayload } : {}),
+          ...(obj.kind === "execution"
+            ? { execution: obj.execution as ExecutionPayload }
+            : {}),
+          ...(typeof obj.operation === "string" ? { operation: obj.operation } : {}),
         },
       };
     }

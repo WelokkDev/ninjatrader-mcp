@@ -13,18 +13,18 @@ export interface LiveBarEvent {
 export type LiveBarListener = (e: LiveBarEvent) => void;
 
 /**
- * In-process fan-out for post-ingest live bars. Listeners are isolated —
- * one throwing consumer never affects the others or the feed.
+ * In-process fan-out. Listeners are isolated — one throwing consumer never
+ * affects the others or the feed.
  */
-export class LiveFeedBus {
-  private readonly listeners = new Set<LiveBarListener>();
+export class Bus<T> {
+  private readonly listeners = new Set<(e: T) => void>();
 
-  subscribe(listener: LiveBarListener): () => void {
+  subscribe(listener: (e: T) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  publish(event: LiveBarEvent): void {
+  publish(event: T): void {
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -34,3 +34,6 @@ export class LiveFeedBus {
     }
   }
 }
+
+/** Post-ingest live bars (kept as a named class for existing call sites). */
+export class LiveFeedBus extends Bus<LiveBarEvent> {}

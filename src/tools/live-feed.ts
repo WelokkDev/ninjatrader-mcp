@@ -107,6 +107,8 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
       healsInFlight: runtime.healer.healsInFlight(),
       ...(pendingUnsubscribes.length > 0 ? { pendingUnsubscribes } : {}),
       subscriptions,
+      // Position feed health (see subscribe_live_positions).
+      positions: runtime.positions.status(),
     });
   };
 }
@@ -140,7 +142,7 @@ export function registerUnsubscribeLiveBars(server: McpServer): void {
 export function registerLiveFeedStatus(server: McpServer): void {
   server.tool(
     "live_feed_status",
-    "Health of the live bar feed: per-subscription truth (acked by NT8, resolved contract, last seq/timestamp, lag, bars received, duplicate/out-of-order/gap counters, last error) plus bridge connection state, connected /feed consumer count, and heals in flight. gapCount > 0 with healsInFlight 0 means a gap was detected and repaired (or exceeded the heal window — check get_candles for that range).",
+    "Health of the live feeds. Bars: per-subscription truth (acked by NT8, resolved contract, last seq/timestamp, lag, bars received, duplicate/out-of-order/gap counters, last error) plus bridge connection state, connected /feed consumer count, and heals in flight. gapCount > 0 with healsInFlight 0 means a gap was detected and repaired (or exceeded the heal window — check get_candles for that range). Positions: the live position feed's health (desired vs NT8-acked, accounts tracked, open positions/trades, event/sync counters, seq gaps, last event/sync times, last error).",
     {},
     createLiveFeedStatusHandler(defaultDeps),
   );

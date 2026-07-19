@@ -144,6 +144,25 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private BlockingCollection<string> liveSendQueue;
 		private Task liveSendWorker;
 
+		// ---------- position tracking state ----------
+		//
+		// Read-only account observation — never creates, changes, or cancels
+		// orders. posLock guards the wired set, streaming flag, and the seq
+		// shared by position_event/position_sync (drop detection + ordering).
+
+		private class AccountHandlers
+		{
+			public EventHandler<PositionEventArgs>  OnPosition;
+			public EventHandler<OrderEventArgs>     OnOrder;
+			public EventHandler<ExecutionEventArgs> OnExecution;
+		}
+
+		private readonly Dictionary<Account, AccountHandlers> wiredAccounts
+			= new Dictionary<Account, AccountHandlers>();
+		private readonly object posLock = new object();
+		private bool positionsStreaming;
+		private long positionSeq;
+
 		// Indicators register here so the AddOn can include them in `hello`.
 		public void RegisterSymbol(string symbol)
 		{
@@ -232,6 +251,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 			else if (State == State.Configure)
 			{
 				Instance      = this;
+				Connection.ConnectionStatusUpdate += OnConnectionStatusUpdate;
+				Account.AccountStatusUpdate       += OnAccountStatusUpdate;
 				cts           = new CancellationTokenSource();
 				liveSendQueue = new BlockingCollection<string>(LiveSendQueueCapacity);
 				liveSendWorker = Task.Run(() => LiveSendLoopAsync(cts.Token));
@@ -241,6 +262,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				try
 				{
+					Connection.ConnectionStatusUpdate -= OnConnectionStatusUpdate;
+					Account.AccountStatusUpdate       -= OnAccountStatusUpdate;
+					UnwireAllAccounts();
 					if (cts != null) cts.Cancel();
 					DisposeAllLiveSubs("addon terminating");
 					if (liveSendQueue != null) liveSendQueue.CompleteAdding();
@@ -257,12 +281,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		// After a feed reconnect, BarsRequests can silently stop updating —
 		// dispose and recreate every live sub when a provider reconnects.
-		protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs connectionStatusUpdate)
+		private void OnConnectionStatusUpdate(object sender, ConnectionStatusEventArgs connectionStatusUpdate)
 		{
 			try
 			{
 				if (connectionStatusUpdate.Status == ConnectionStatus.Connected
-					&& connectionStatusUpdate.PriorStatus != ConnectionStatus.Connected)
+					&& connectionStatusUpdate.PreviousStatus != ConnectionStatus.Connected)
 				{
 					string connName = "?";
 					try
@@ -273,8 +297,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 					}
 					catch { /* name is best-effort */ }
 					Log("provider (re)connected (" + connName + ": "
-						+ connectionStatusUpdate.PriorStatus + " -> Connected) — recreating live BarsRequests");
-					Task.Run(() => RecreateAllLiveSubs());
+						+ connectionStatusUpdate.PreviousStatus + " -> Connected) — recreating live BarsRequests");
+					Task.Run(() =>
+					{
+						RecreateAllLiveSubs();
+						// Reconnect can add accounts / drop events — rewire + re-anchor.
+						WireAccounts();
+						SendPositionSync("provider reconnect");
+					});
 				}
 			}
 			catch (Exception ex)
@@ -376,6 +406,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private async Task RunAsync(CancellationToken ct)
 		{
 			LogAvailableTradingHours();
+			try { WireAccounts(); }
+			catch (Exception ex) { Log("initial account wiring failed: " + ex.Message); }
 
 			var backoffMs = ReconnectMinMs;
 
@@ -744,6 +776,29 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case "request_open_charts":
 					HandleRequestOpenCharts(obj);
 					break;
+
+				// Off the read thread: snapshots enumerate NT collections and
+				// must never starve heartbeats.
+				case "request_positions":
+				{
+					var o = obj;
+					Task.Run(() => HandleRequestPositions(o));
+					break;
+				}
+
+				case "subscribe_positions":
+				{
+					var o = obj;
+					Task.Run(() => HandleSubscribePositions(o));
+					break;
+				}
+
+				case "unsubscribe_positions":
+				{
+					var o = obj;
+					Task.Run(() => HandleUnsubscribePositions(o));
+					break;
+				}
 
 				default:
 					Log("unknown message type: " + type);
@@ -2001,6 +2056,583 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case BarsPeriodType.Week:   return bp.Value + "w";
 				case BarsPeriodType.Month:  return bp.Value + "mo";
 				default:                    return bp.ToString();
+			}
+		}
+
+		// ---------- account / position tracking ----------
+		//
+		// Read-only observation of Account.All — the no-order-APIs boundary is
+		// a design decision. WireAccounts() reconciles per-account handlers
+		// against Account.All (re-run on AccountStatusUpdate and provider
+		// reconnect); position_sync re-anchors the server with a full snapshot
+		// after subscribe / reconnect / roster change.
+		//
+		// posLock is a LEAF lock: payloads build outside it, then seq + enqueue
+		// happen atomically under it so wire order always matches seq order.
+
+		private void OnAccountStatusUpdate(object sender, AccountStatusEventArgs e)
+		{
+			try
+			{
+				Task.Run(() =>
+				{
+					WireAccounts();
+					SendPositionSync("account roster change");
+				});
+			}
+			catch (Exception ex)
+			{
+				Log("OnAccountStatusUpdate error: " + ex.Message);
+			}
+		}
+
+		// Reconcile per-account handlers with Account.All. Idempotent.
+		private void WireAccounts()
+		{
+			var current = new List<Account>();
+			try
+			{
+				lock (Account.All)
+				{
+					foreach (var a in Account.All)
+						if (a != null) current.Add(a);
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("WireAccounts: Account.All enumeration failed: " + ex.Message);
+				return;
+			}
+
+			// Membership reconciles under posLock; NT event accessors (+=/-=)
+			// only OUTSIDE it — dispatching NT threads take posLock in the
+			// handlers, so nesting the accessors would risk lock-order inversion.
+			var toAttach = new List<KeyValuePair<Account, AccountHandlers>>();
+			var toDetach = new List<KeyValuePair<Account, AccountHandlers>>();
+			lock (posLock)
+			{
+				foreach (var a in current)
+				{
+					if (wiredAccounts.ContainsKey(a)) continue;
+					var acct = a;
+					var h    = new AccountHandlers();
+					h.OnPosition  = delegate(object s, PositionEventArgs e)  { OnAccountPositionUpdate(acct, e); };
+					h.OnOrder     = delegate(object s, OrderEventArgs e)     { OnAccountOrderUpdate(acct, e); };
+					h.OnExecution = delegate(object s, ExecutionEventArgs e) { OnAccountExecutionUpdate(acct, e); };
+					wiredAccounts[acct] = h;
+					toAttach.Add(new KeyValuePair<Account, AccountHandlers>(acct, h));
+				}
+
+				var gone = new List<Account>();
+				foreach (var wired in wiredAccounts.Keys)
+				{
+					var still = false;
+					foreach (var a in current)
+						if (object.ReferenceEquals(a, wired)) { still = true; break; }
+					if (!still) gone.Add(wired);
+				}
+				foreach (var g in gone)
+				{
+					toDetach.Add(new KeyValuePair<Account, AccountHandlers>(g, wiredAccounts[g]));
+					wiredAccounts.Remove(g);
+				}
+			}
+
+			foreach (var kvp in toAttach)
+			{
+				var acct = kvp.Key;
+				var h    = kvp.Value;
+				try
+				{
+					acct.PositionUpdate  += h.OnPosition;
+					acct.OrderUpdate     += h.OnOrder;
+					acct.ExecutionUpdate += h.OnExecution;
+				}
+				catch (Exception ex)
+				{
+					Log("WireAccounts attach failed: " + ex.Message);
+					lock (posLock) { wiredAccounts.Remove(acct); }
+					DetachAccountHandlers(acct, h); // roll back any partial attach
+				}
+			}
+			foreach (var kvp in toDetach)
+				DetachAccountHandlers(kvp.Key, kvp.Value);
+
+			if (toAttach.Count > 0 || toDetach.Count > 0)
+				Log("WireAccounts: " + current.Count + " account(s), +" + toAttach.Count
+					+ " wired, -" + toDetach.Count + " unwired");
+		}
+
+		private void UnwireAllAccounts()
+		{
+			var snapshot = new List<KeyValuePair<Account, AccountHandlers>>();
+			lock (posLock)
+			{
+				foreach (var kvp in wiredAccounts) snapshot.Add(kvp);
+				wiredAccounts.Clear();
+				positionsStreaming = false;
+			}
+			foreach (var kvp in snapshot)
+				DetachAccountHandlers(kvp.Key, kvp.Value);
+		}
+
+		private static void DetachAccountHandlers(Account a, AccountHandlers h)
+		{
+			if (a == null || h == null) return;
+			try { if (h.OnPosition  != null) a.PositionUpdate  -= h.OnPosition; }  catch { /* already gone */ }
+			try { if (h.OnOrder     != null) a.OrderUpdate     -= h.OnOrder; }     catch { /* already gone */ }
+			try { if (h.OnExecution != null) a.ExecutionUpdate -= h.OnExecution; } catch { /* already gone */ }
+		}
+
+		// ---------- position event handlers (NT threads; must never throw) ----------
+
+		private void OnAccountPositionUpdate(Account account, PositionEventArgs e)
+		{
+			try
+			{
+				if (!IsStreamingPositions()) return;
+				if (e == null || e.Position == null || e.Position.Instrument == null) return;
+
+				// e.MarketPosition/e.Quantity/e.AveragePrice are the account's
+				// actual aggregate; e.Position.* can lag or cover only the
+				// updating slice. Always serialize the account-level values.
+				var payload = new Dictionary<string, object>
+				{
+					{ "position", BuildPositionCore(
+						e.Position.Instrument,
+						e.MarketPosition.ToString(),
+						e.Quantity,
+						e.AveragePrice) },
+					{ "operation", e.Operation.ToString() },
+				};
+				QueuePositionEvent(account, "position", payload);
+			}
+			catch (Exception ex)
+			{
+				Log("position update handler error: " + ex.Message);
+			}
+		}
+
+		private void OnAccountOrderUpdate(Account account, OrderEventArgs e)
+		{
+			try
+			{
+				if (!IsStreamingPositions()) return;
+				if (e == null || e.Order == null) return;
+				var payload = new Dictionary<string, object>
+				{
+					{ "order", BuildOrderPayload(e.Order) },
+				};
+				QueuePositionEvent(account, "order", payload);
+			}
+			catch (Exception ex)
+			{
+				Log("order update handler error: " + ex.Message);
+			}
+		}
+
+		private void OnAccountExecutionUpdate(Account account, ExecutionEventArgs e)
+		{
+			try
+			{
+				if (!IsStreamingPositions()) return;
+				if (e == null || e.Execution == null) return;
+				var payload = new Dictionary<string, object>
+				{
+					{ "execution", BuildExecutionPayload(e.Execution) },
+				};
+				QueuePositionEvent(account, "execution", payload);
+			}
+			catch (Exception ex)
+			{
+				Log("execution update handler error: " + ex.Message);
+			}
+		}
+
+		private bool IsStreamingPositions()
+		{
+			lock (posLock) { return positionsStreaming; }
+		}
+
+		// seq + enqueue are atomic under posLock (wire order == seq order).
+		private void QueuePositionEvent(Account account, string kind,
+			Dictionary<string, object> fields)
+		{
+			var msg = new Dictionary<string, object>
+			{
+				{ "v",       1 },
+				{ "type",    "position_event" },
+				{ "account", account != null ? (account.Name ?? "") : "" },
+				{ "kind",    kind },
+				{ "ts",      (long) (DateTime.UtcNow - UnixEpoch).TotalSeconds },
+			};
+			foreach (var kvp in fields) msg[kvp.Key] = kvp.Value;
+
+			lock (posLock)
+			{
+				if (!positionsStreaming) return;
+				positionSeq++;
+				msg["seq"] = positionSeq;
+				QueueLiveSend(Json.Serialize(msg), "position_event " + kind);
+			}
+		}
+
+		// ---------- payload builders (all reads best-effort) ----------
+
+		private static void PutFinite(Dictionary<string, object> d, string key, double v)
+		{
+			if (double.IsNaN(v) || double.IsInfinity(v)) return;
+			d[key] = v;
+		}
+
+		private static string SymbolOf(Instrument inst)
+		{
+			try
+			{
+				if (inst != null && inst.MasterInstrument != null)
+					return inst.MasterInstrument.Name ?? "";
+			}
+			catch { /* mid-teardown */ }
+			return "";
+		}
+
+		private static Dictionary<string, object> BuildPositionCore(
+			Instrument inst, string marketPosition, int quantity, double averagePrice)
+		{
+			var d = new Dictionary<string, object>
+			{
+				{ "instrument",     inst != null ? (inst.FullName ?? "") : "" },
+				{ "symbol",         SymbolOf(inst) },
+				{ "marketPosition", marketPosition ?? "" },
+				{ "quantity",       quantity },
+			};
+			PutFinite(d, "averagePrice", averagePrice);
+			try
+			{
+				if (inst != null && inst.MasterInstrument != null)
+				{
+					PutFinite(d, "pointValue", inst.MasterInstrument.PointValue);
+					PutFinite(d, "tickSize",   inst.MasterInstrument.TickSize);
+				}
+			}
+			catch { /* master mid-teardown */ }
+			return d;
+		}
+
+		// Snapshot flavor: best-effort unrealized PnL and last market price —
+		// both need flowing NT market data; omit, never guess.
+		private static Dictionary<string, object> BuildPositionSnapshot(Position pos)
+		{
+			var d = BuildPositionCore(pos.Instrument, pos.MarketPosition.ToString(),
+				pos.Quantity, pos.AveragePrice);
+			try
+			{
+				PutFinite(d, "unrealizedPnl",
+					pos.GetUnrealizedProfitLoss(PerformanceUnit.Currency));
+			}
+			catch { /* no market data subscription */ }
+			try
+			{
+				var md = pos.Instrument != null ? pos.Instrument.MarketData : null;
+				if (md != null && md.Last != null)
+				{
+					PutFinite(d, "marketPrice", md.Last.Price);
+					if (md.Last.Time > DateTime.MinValue)
+						d["marketPriceTs"] = ExchangeTimeToUnixSeconds(md.Last.Time);
+				}
+			}
+			catch { /* no market data subscription */ }
+			return d;
+		}
+
+		private static Dictionary<string, object> BuildOrderPayload(Order o)
+		{
+			var d = new Dictionary<string, object>
+			{
+				{ "orderId",    o.OrderId ?? "" },
+				{ "name",       o.Name ?? "" },
+				{ "instrument", o.Instrument != null ? (o.Instrument.FullName ?? "") : "" },
+				{ "symbol",     SymbolOf(o.Instrument) },
+				{ "action",     o.OrderAction.ToString() },
+				{ "orderType",  o.OrderType.ToString() },
+				{ "state",      o.OrderState.ToString() },
+				{ "quantity",   o.Quantity },
+				{ "filled",     o.Filled },
+			};
+			PutFinite(d, "limitPrice",   o.LimitPrice);
+			PutFinite(d, "stopPrice",    o.StopPrice);
+			PutFinite(d, "avgFillPrice", o.AverageFillPrice);
+			try
+			{
+				if (o.Time > DateTime.MinValue)
+					d["time"] = ExchangeTimeToUnixSeconds(o.Time);
+			}
+			catch { /* unparseable order time */ }
+			if (!string.IsNullOrEmpty(o.Oco)) d["oco"] = o.Oco;
+			return d;
+		}
+
+		private static Dictionary<string, object> BuildExecutionPayload(Execution x)
+		{
+			var d = new Dictionary<string, object>
+			{
+				{ "executionId", x.ExecutionId ?? "" },
+				{ "orderId",     x.OrderId ?? "" },
+				{ "instrument",  x.Instrument != null ? (x.Instrument.FullName ?? "") : "" },
+				{ "symbol",      SymbolOf(x.Instrument) },
+				{ "side",        x.MarketPosition.ToString() },
+				{ "quantity",    x.Quantity },
+			};
+			PutFinite(d, "price", x.Price);
+			try
+			{
+				if (x.Time > DateTime.MinValue)
+					d["time"] = ExchangeTimeToUnixSeconds(x.Time);
+			}
+			catch { /* unparseable execution time */ }
+			if (!string.IsNullOrEmpty(x.Name)) d["orderName"] = x.Name;
+			PutFinite(d, "commission", x.Commission);
+			return d;
+		}
+
+		private static bool TryGetAccountItemValue(Account a, AccountItem item, out double value)
+		{
+			value = 0;
+			try
+			{
+				value = a.Get(item, a.Denomination);
+				return !double.IsNaN(value) && !double.IsInfinity(value);
+			}
+			catch { return false; }
+		}
+
+		// Full per-account snapshot: identity, account values, non-flat
+		// positions, and non-terminal (working) orders.
+		private static Dictionary<string, object> BuildAccountSnapshot(Account a)
+		{
+			var d = new Dictionary<string, object> { { "name", a.Name ?? "" } };
+
+			try
+			{
+				var conn = a.Connection;
+				d["connection"] = conn != null && conn.Options != null
+					? (conn.Options.Name ?? "") : "";
+				d["connectionStatus"] = conn != null ? conn.Status.ToString() : "NoConnection";
+			}
+			catch { d["connection"] = ""; d["connectionStatus"] = "Unknown"; }
+
+			try { d["denomination"] = a.Denomination.ToString(); }
+			catch { /* omit */ }
+
+			double v;
+			if (TryGetAccountItemValue(a, AccountItem.RealizedProfitLoss, out v)) d["realizedPnl"]    = v;
+			if (TryGetAccountItemValue(a, AccountItem.CashValue,          out v)) d["cashValue"]      = v;
+			if (TryGetAccountItemValue(a, AccountItem.NetLiquidation,     out v)) d["netLiquidation"] = v;
+
+			var positions = new List<object>();
+			try
+			{
+				var posSnapshot = new List<Position>();
+				lock (a.Positions)
+				{
+					foreach (var p in a.Positions)
+						if (p != null) posSnapshot.Add(p);
+				}
+				foreach (var p in posSnapshot)
+				{
+					try
+					{
+						if (p.MarketPosition == MarketPosition.Flat || p.Quantity == 0) continue;
+						positions.Add(BuildPositionSnapshot(p));
+					}
+					catch (Exception ex) { Log("position snapshot failed: " + ex.Message); }
+				}
+			}
+			catch (Exception ex) { Log("positions enumeration failed for " + d["name"] + ": " + ex.Message); }
+			d["positions"] = positions;
+
+			var orders = new List<object>();
+			try
+			{
+				var ordSnapshot = new List<Order>();
+				lock (a.Orders)
+				{
+					foreach (var o in a.Orders)
+						if (o != null) ordSnapshot.Add(o);
+				}
+				foreach (var o in ordSnapshot)
+				{
+					try
+					{
+						if (Order.IsTerminalState(o.OrderState)) continue;
+						orders.Add(BuildOrderPayload(o));
+					}
+					catch (Exception ex) { Log("order snapshot failed: " + ex.Message); }
+				}
+			}
+			catch (Exception ex) { Log("orders enumeration failed for " + d["name"] + ": " + ex.Message); }
+			d["orders"] = orders;
+
+			return d;
+		}
+
+		private static List<object> BuildAccountsSnapshotList()
+		{
+			var accounts = new List<Account>();
+			lock (Account.All)
+			{
+				foreach (var a in Account.All)
+					if (a != null) accounts.Add(a);
+			}
+			var list = new List<object>();
+			foreach (var a in accounts)
+			{
+				try { list.Add(BuildAccountSnapshot(a)); }
+				catch (Exception ex) { Log("account snapshot failed: " + ex.Message); }
+			}
+			return list;
+		}
+
+		// ---------- position request handlers (Task.Run context) ----------
+
+		private void HandleRequestPositions(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_positions missing id; dropping");
+				return;
+			}
+			try
+			{
+				var accounts = BuildAccountsSnapshotList();
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",        1 },
+					{ "id",       id },
+					{ "type",     "positions_response" },
+					{ "accounts", accounts },
+				};
+				SendFireAndForget(Json.Serialize(payload),
+					"positions_response id=" + id + " accounts=" + accounts.Count);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "request_positions failed: " + ex.Message);
+			}
+		}
+
+		private void HandleSubscribePositions(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("subscribe_positions missing id; dropping");
+				return;
+			}
+			try
+			{
+				WireAccounts();
+
+				bool already;
+				var wired = new List<Account>();
+				lock (posLock)
+				{
+					already = positionsStreaming;
+					positionsStreaming = true;
+					foreach (var a in wiredAccounts.Keys) wired.Add(a);
+				}
+
+				// NT property reads happen outside posLock (leaf-lock discipline).
+				var names = new List<string>();
+				foreach (var a in wired)
+				{
+					try { names.Add(a.Name ?? ""); }
+					catch { /* account mid-teardown */ }
+				}
+
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",             1 },
+					{ "id",            id },
+					{ "type",          "subscribe_positions_ack" },
+					{ "accounts",      names },
+					{ "alreadyActive", already },
+				};
+				SendFireAndForget(Json.Serialize(payload),
+					"subscribe_positions_ack id=" + id + " accounts=" + names.Count);
+				Log("position streaming ON (" + names.Count + " account(s) wired)");
+
+				// Authoritative baseline so the server's state starts anchored.
+				SendPositionSync("subscribed");
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "subscribe_positions failed: " + ex.Message);
+			}
+		}
+
+		private void HandleUnsubscribePositions(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("unsubscribe_positions missing id; dropping");
+				return;
+			}
+			try
+			{
+				bool removed;
+				lock (posLock)
+				{
+					removed = positionsStreaming;
+					positionsStreaming = false;
+				}
+				// Handlers stay wired but gated — cheaper and safer than
+				// re-wiring on every toggle.
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",       1 },
+					{ "id",      id },
+					{ "type",    "unsubscribe_positions_ack" },
+					{ "removed", removed },
+				};
+				SendFireAndForget(Json.Serialize(payload), "unsubscribe_positions_ack id=" + id);
+				Log("position streaming OFF");
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "unsubscribe_positions failed: " + ex.Message);
+			}
+		}
+
+		// Full snapshot via the ORDERED live queue (seq-stamped) so it can't
+		// overtake earlier events. No-op while streaming is off.
+		private void SendPositionSync(string reason)
+		{
+			try
+			{
+				if (!IsStreamingPositions()) return;
+				var accounts = BuildAccountsSnapshotList();
+				var msg = new Dictionary<string, object>
+				{
+					{ "v",        1 },
+					{ "type",     "position_sync" },
+					{ "reason",   reason ?? "" },
+					{ "ts",       (long) (DateTime.UtcNow - UnixEpoch).TotalSeconds },
+					{ "accounts", accounts },
+				};
+				lock (posLock)
+				{
+					if (!positionsStreaming) return;
+					positionSeq++;
+					msg["seq"] = positionSeq;
+					QueueLiveSend(Json.Serialize(msg), "position_sync (" + reason + ")");
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("SendPositionSync failed: " + ex.Message);
 			}
 		}
 

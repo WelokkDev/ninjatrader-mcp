@@ -1,3 +1,4 @@
+import { join } from "path";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
 import {
@@ -16,12 +17,15 @@ import { isValidCandle } from "../bridge/ingest.js";
 import type {
   BarCloseMessage,
   HelloMessage,
+  PositionEventMessage,
+  PositionSyncMessage,
   SubscribeAckMessage,
 } from "../bridge/protocol.js";
 import { LiveSubscriptionRegistry, type LiveTimeframe } from "./registry.js";
 import { LiveBarRecorder, missingStampsBetween } from "./recorder.js";
 import { GapHealer, HEAL_MAX_WINDOW_SECS, TF_SECS } from "./heal.js";
-import { LiveFeedBus } from "./bus.js";
+import { Bus, LiveFeedBus } from "./bus.js";
+import { PositionFeed, type PositionBroadcast } from "./positions.js";
 import { consumerHub } from "../bridge/consumer.js";
 
 export interface LiveFeedRuntimeDeps {
@@ -43,8 +47,12 @@ export interface LiveFeedRuntime {
   recorder: LiveBarRecorder;
   healer: GapHealer;
   bus: LiveFeedBus;
+  positions: PositionFeed;
+  positionBus: Bus<PositionBroadcast>;
   handleBarClose(msg: BarCloseMessage): void;
   handleSubscribeAck(msg: SubscribeAckMessage): void;
+  handlePositionSync(msg: PositionSyncMessage): void;
+  handlePositionEvent(msg: PositionEventMessage): void;
   handleHello(msg: HelloMessage): Promise<void>;
 }
 
@@ -74,8 +82,21 @@ export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntim
       });
     },
   });
+  const positionBus = new Bus<PositionBroadcast>();
+  const positions = new PositionFeed({
+    db: deps.db,
+    request: deps.request,
+    isConnected: deps.isConnected,
+    nowUnix: deps.nowUnix,
+    nowMs: deps.nowMs,
+    diagnosticsDir: deps.recorderDir ?? join(process.cwd(), "data", "diagnostics"),
+    onBroadcast: (b) => positionBus.publish(b),
+  });
 
   registry.loadPersisted();
+  positions.loadPersisted();
+  // Live bar closes feed open-trade excursions and the freshest-price marks.
+  bus.subscribe((e) => positions.noteBar(e));
 
   const handleBarClose = (msg: BarCloseMessage): void => {
     // Same gate as cache ingest: a bar too corrupt for the cache never
@@ -119,6 +140,15 @@ export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntim
       );
     }
 
+    // Position replay runs before the (slow) bar catch-up heals — position
+    // truth should not wait behind history.
+    try {
+      await positions.replay();
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      console.error(`[position-feed] hello replay failed: ${m}`);
+    }
+
     // Catch-up: heal between what the cache holds and the newest bar that
     // must exist by now. Falls back to the last completed session-day when
     // the market is closed (a restart-over-weekend still heals Friday's tail).
@@ -132,7 +162,27 @@ export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntim
     }
   };
 
-  return { registry, recorder, healer, bus, handleBarClose, handleSubscribeAck, handleHello };
+  const handlePositionSync = (msg: PositionSyncMessage): void => {
+    positions.handleSync(msg);
+  };
+
+  const handlePositionEvent = (msg: PositionEventMessage): void => {
+    positions.handleEvent(msg);
+  };
+
+  return {
+    registry,
+    recorder,
+    healer,
+    bus,
+    positions,
+    positionBus,
+    handleBarClose,
+    handleSubscribeAck,
+    handlePositionSync,
+    handlePositionEvent,
+    handleHello,
+  };
 }
 
 async function catchUp(
@@ -207,6 +257,8 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
   });
   onMessage("bar_close", (m) => runtime!.handleBarClose(m));
   onMessage("subscribe_ack", (m) => runtime!.handleSubscribeAck(m));
+  onMessage("position_sync", (m) => runtime!.handlePositionSync(m));
+  onMessage("position_event", (m) => runtime!.handlePositionEvent(m));
   onMessage("hello", (m) => {
     void runtime!.handleHello(m).catch((err) => {
       console.error("[live-feed] hello handling failed:", err);
@@ -221,6 +273,10 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
     },
     runtime.bus,
   );
+  consumerHub.bindPositions(runtime.positionBus, () => {
+    const s = runtime!.positions.status();
+    return { desired: s.desired, upstreamAcked: s.upstreamAcked };
+  });
   return runtime;
 }
 

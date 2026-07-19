@@ -56,6 +56,14 @@ export function initializeSchema(db: Database.Database): void {
       PRIMARY KEY (symbol, timeframe)
     );
 
+    -- Operator-desired live position feed (account-wide, single toggle).
+    -- Enforced on the AddOn on startup and every hello.
+    CREATE TABLE IF NOT EXISTS live_position_feed (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled    INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS backtest_runs (
       run_id        TEXT    PRIMARY KEY,
       strategy_name TEXT    NOT NULL,
