@@ -1,7 +1,7 @@
 import type { Candle, Timeframe } from "../types.js";
 import type { SessionTemplate } from "../sessions/types.js";
 import type { FrozenView } from "./types.js";
-import { sessionDayContaining } from "../sessions/session-day.js";
+import { makeSessionDayResolver } from "../sessions/session-day.js";
 
 // Intraday period lengths in seconds. "1d" is intentionally absent, daily bars come from the private session-aligned daily aggregator, 
 // not here (mirrors core/aggregator.ts, which likewise refuses "1d").
@@ -90,9 +90,10 @@ function bucketAsOf(
     string,
     { bars: Candle[]; sdStart: number; sdEnd: number; index: number }
   >();
+  const resolveDay = makeSessionDayResolver(session);
 
   for (const c of primary) {
-    const sd = sessionDayContaining(c.timestamp, session);
+    const sd = resolveDay(c.timestamp);
     // Bars outside any session-day (maintenance break / weekend gap) are dropped from HTF aggregation, exactly as core/aggregator.ts does.
     // They stay in `primary` (the raw entry-TF series) but never form an HTF bar.
     if (sd === null) continue;

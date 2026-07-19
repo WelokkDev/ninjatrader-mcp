@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   SessionClosedError,
+  makeSessionDayResolver,
   sessionDayContaining,
   sessionDayRange,
   sessionDaysOverlapping,
 } from "../session-day.js";
 import { CME_US_INDEX_FUTURES_ETH, NYSE_RTH } from "../templates.js";
+import type { SessionTemplate } from "../types.js";
 import type { SessionCalendar } from "../calendar.js";
 
 const TEMPLATE = CME_US_INDEX_FUTURES_ETH;
@@ -133,6 +135,76 @@ describe("calendar-aware geometry", () => {
       ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "09:00", source: "manual" as const }],
     ]);
     expect(() => sessionDayRange("2026-02-16", NYSE_RTH, bad)).toThrow(/not after/i);
+  });
+});
+
+describe("makeSessionDayResolver (memoized sessionDayContaining)", () => {
+  // Tue 2026-06-09 session: Mon Jun 8 18:00 EDT → Tue Jun 9 17:00 EDT.
+  const TUE = sessionDayRange("2026-06-09", TEMPLATE);
+
+  it("matches sessionDayContaining across days, gaps, and the weekend — sorted and reversed", () => {
+    const stamps: number[] = [];
+    for (const label of ["2026-06-05", "2026-06-08", "2026-06-09"]) {
+      const { startUnix, endUnix } = sessionDayRange(label, TEMPLATE);
+      for (let t = startUnix + 900; t <= endUnix; t += 900) stamps.push(t);
+      stamps.push(endUnix + 1800); // maintenance gap / weekend after the close
+    }
+    stamps.push(unix(2026, 6, 6, 16)); // Sat noon ET
+
+    const forward = makeSessionDayResolver(TEMPLATE);
+    for (const ts of stamps) {
+      expect(forward(ts)).toEqual(sessionDayContaining(ts, TEMPLATE));
+    }
+    const backward = makeSessionDayResolver(TEMPLATE);
+    for (const ts of [...stamps].reverse()) {
+      expect(backward(ts)).toEqual(sessionDayContaining(ts, TEMPLATE));
+    }
+  });
+
+  it("honors the (startUnix, endUnix] boundaries even with a warm memo", () => {
+    const resolve = makeSessionDayResolver(TEMPLATE);
+    expect(resolve(TUE.startUnix + 900)?.label).toBe("2026-06-09"); // warm the memo
+    expect(resolve(TUE.endUnix)?.label).toBe("2026-06-09"); // close instant is in
+    expect(resolve(TUE.endUnix + 1)).toBeNull(); // first gap second is out
+    expect(resolve(TUE.startUnix)).toBeNull(); // open instant is exclusive
+  });
+
+  it("returns the cached day object for same-day stamps and re-resolves across days", () => {
+    const resolve = makeSessionDayResolver(TEMPLATE);
+    const first = resolve(TUE.startUnix + 900);
+    expect(resolve(TUE.startUnix + 1800)).toBe(first); // memo hit: same object
+    const wed = resolve(TUE.startUnix + 90000); // next session-day
+    expect(wed?.label).toBe("2026-06-10");
+    expect(resolve(TUE.startUnix + 900)).not.toBe(first); // one-entry memo was evicted
+  });
+
+  it("never memoizes for a template with within-session breaks (in-break stays null)", () => {
+    const withLunch: SessionTemplate = {
+      ...NYSE_RTH,
+      name: "nyse_rth_with_lunch",
+      breaks: [{ startTime: "12:00", endTime: "13:00" }],
+    };
+    const resolve = makeSessionDayResolver(withLunch);
+    // Mon 2026-06-08, EDT: 11:00 → 15:00 UTC, 12:30 → 16:30 UTC, 14:00 → 18:00 UTC.
+    const morning = resolve(unix(2026, 6, 8, 15));
+    expect(morning?.label).toBe("2026-06-08");
+    // In-break must resolve null even though the range test would pass.
+    expect(resolve(unix(2026, 6, 8, 16, 30))).toBeNull();
+    expect(sessionDayContaining(unix(2026, 6, 8, 16, 30), withLunch)).toBeNull();
+    const afternoon = resolve(unix(2026, 6, 8, 18));
+    expect(afternoon?.label).toBe("2026-06-08");
+    expect(afternoon).not.toBe(morning); // unmemoized path: fresh object per call
+  });
+
+  it("respects a calendar early close after a warm same-day hit", () => {
+    const cal: SessionCalendar = new Map([
+      ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "13:00", source: "bootstrap" as const }],
+    ]);
+    const resolve = makeSessionDayResolver(TEMPLATE, cal);
+    const inDay = resolve(unix(2026, 2, 16, 17)); // 12:00 EST
+    expect(inDay?.label).toBe("2026-02-16");
+    expect(inDay?.endUnix).toBe(unix(2026, 2, 16, 18)); // 13:00 EST close
+    expect(resolve(unix(2026, 2, 16, 19))).toBeNull(); // 14:00 EST: after early close
   });
 });
 

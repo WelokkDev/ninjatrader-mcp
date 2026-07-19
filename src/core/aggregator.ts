@@ -1,7 +1,10 @@
 import type { Candle, Timeframe } from "./types.js";
 import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
 import type { SessionCalendar } from "./sessions/calendar.js";
-import { sessionDayContaining } from "./sessions/session-day.js";
+import {
+  makeSessionDayResolver,
+  type SessionDayResolver,
+} from "./sessions/session-day.js";
 
 // Derived targets only: "1d" is excluded (see core/constants.ts header)
 // and the raw streams (15s/5m/15m) short-circuit before this map is read.
@@ -61,9 +64,10 @@ export function aggregateCandles(
 
   const periodSeconds = PERIOD_MINUTES[targetTimeframe] * 60;
   const buckets = new Map<string, Candle[]>();
+  const resolveDay = makeSessionDayResolver(options.session, options.calendar);
 
   for (const candle of candles) {
-    const sd = sessionDayContaining(candle.timestamp, options.session, options.calendar);
+    const sd = resolveDay(candle.timestamp);
     if (sd === null) {
       console.error(
         `[aggregator] dropping bar at ${candle.timestamp} — not in any session-day for template "${options.session.name}"`,
@@ -107,7 +111,7 @@ export function aggregateCandles(
   }
 
   result.sort((a, b) => a.timestamp - b.timestamp);
-  return markPartial(result, options);
+  return markPartial(result, options, resolveDay);
 }
 
 function stripPartial(c: Candle): Candle {
@@ -123,10 +127,14 @@ function stripPartial(c: Candle): Candle {
 // Advisory and in-memory only — never persisted. It deliberately differs
 // from the grid-membership rule used for served data: this also flags a
 // trailing bucket that closed exactly on its boundary mid-session.
-function markPartial(sorted: Candle[], options: AggregateOptions): Candle[] {
+function markPartial(
+  sorted: Candle[],
+  options: AggregateOptions,
+  resolveDay: SessionDayResolver = makeSessionDayResolver(options.session, options.calendar),
+): Candle[] {
   if (sorted.length === 0) return sorted;
   const last = sorted[sorted.length - 1];
-  const sd = sessionDayContaining(last.timestamp, options.session, options.calendar);
+  const sd = resolveDay(last.timestamp);
   if (sd === null) return sorted;
   const now = options.now ?? Math.floor(Date.now() / 1000);
   if (sd.endUnix > now) {

@@ -1,7 +1,7 @@
 import type { Candle, Timeframe } from "../types.js";
 import type { SessionTemplate } from "../sessions/types.js";
 import type { FrozenView } from "./types.js";
-import { sessionDayContaining } from "../sessions/session-day.js";
+import { makeSessionDayResolver } from "../sessions/session-day.js";
 import { PERIOD_SECONDS, aggregateBucket, bucketIndexOf } from "./frozen-view.js";
 
 interface SourceBucket {
@@ -88,8 +88,9 @@ function bucketize(
     string,
     { bars: Candle[]; sdStart: number; sdEnd: number; index: number }
   >();
+  const resolveDay = makeSessionDayResolver(session);
   for (const c of primary) {
-    const sd = sessionDayContaining(c.timestamp, session);
+    const sd = resolveDay(c.timestamp);
     if (sd === null) continue;
     const index = bucketIndexOf(c.timestamp, sd.startUnix, periodSeconds);
     const key = `${sd.label}|${index}`;

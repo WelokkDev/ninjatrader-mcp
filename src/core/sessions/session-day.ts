@@ -322,6 +322,31 @@ function isInBreak(
   return false;
 }
 
+export type SessionDayResolver = (unixSec: number) => SessionDay | null;
+
+// One-entry-memo form of sessionDayContaining for per-bar loops (consecutive
+// bars almost always share a session-day). Sound because session-days are
+// disjoint per template+calendar; null results are never cached. Templates
+// with within-session breaks are never memoized — an in-break timestamp
+// satisfies the range test yet must resolve to null.
+export function makeSessionDayResolver(
+  template: SessionTemplate,
+  calendar?: SessionCalendar,
+): SessionDayResolver {
+  if (template.breaks && template.breaks.length > 0) {
+    return (unixSec) => sessionDayContaining(unixSec, template, calendar);
+  }
+  let last: SessionDay | null = null;
+  return (unixSec) => {
+    if (last !== null && unixSec > last.startUnix && unixSec <= last.endUnix) {
+      return last;
+    }
+    const sd = sessionDayContaining(unixSec, template, calendar);
+    if (sd !== null) last = sd;
+    return sd;
+  };
+}
+
 // All session-days whose (startUnix, endUnix] interval overlaps the
 // query range [fromUnix, toUnix]. Used by ingest re-aggregation to
 // compute the affected session-day set.

@@ -3,7 +3,7 @@ import db from "../db/connection.js";
 import { RAW_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
-  sessionDayContaining,
+  makeSessionDayResolver,
   sessionDayRange,
 } from "../core/sessions/session-day.js";
 import { loadCalendar } from "../core/sessions/calendar.js";
@@ -87,8 +87,9 @@ export function ingestCandles(
 
   const inSession: Array<{ candle: Candle; sessionDayLabel: string }> = [];
   const perDayCount = new Map<string, number>();
+  const resolveDay = makeSessionDayResolver(config.session, calendar);
   for (const c of valid) {
-    const sd = sessionDayContaining(c.timestamp, config.session, calendar);
+    const sd = resolveDay(c.timestamp);
     if (sd === null) {
       dropped++;
       console.error(

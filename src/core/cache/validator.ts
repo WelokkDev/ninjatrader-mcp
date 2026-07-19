@@ -15,6 +15,36 @@ const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "4h": 14400,
 };
 
+// NT8 emits a historical bar only for buckets with >=1 tick, so a closed
+// 15s session-day legitimately misses a sliver of stamps in overnight
+// lulls (observed worst on NQ: 0.72% / 45s contiguous; 1.34% on a holiday
+// half-day) and still counts as structurally ok. Denser TFs trade every
+// bucket in practice — they stay exact.
+const SPARSE_TOLERANCE: Partial<
+  Record<Timeframe, { maxMissingFraction: number; maxGapSeconds: number }>
+> = {
+  "15s": { maxMissingFraction: 0.02, maxGapSeconds: 120 },
+};
+
+/** True iff a mismatch is acceptable zero-tick sparseness for its TF. */
+export function isAcceptableSparseMismatch(
+  r: Pick<ValidationResult, "timeframe" | "expected" | "missing" | "extra">,
+): boolean {
+  if (r.timeframe === "1d") return false;
+  const tol = SPARSE_TOLERANCE[r.timeframe];
+  if (!tol || r.extra.length > 0 || r.expected.length === 0) return false;
+  if (r.missing.length / r.expected.length > tol.maxMissingFraction) return false;
+  const period = SECONDS_PER_TIMEFRAME[r.timeframe];
+  let run = 0;
+  let prev = -Infinity;
+  for (const t of r.missing) {
+    run = t - prev === period ? run + 1 : 1;
+    if (run * period > tol.maxGapSeconds) return false;
+    prev = t;
+  }
+  return true;
+}
+
 /**
  * Expected bar count for one (session-day, timeframe) from pure session
  * geometry: full periods within (startUnix, endUnix] plus a trailing stub
@@ -231,8 +261,14 @@ export function validateSessionDay(
   const missing = expected.filter((t) => !actualSet.has(t));
   const extra = actual.filter((t) => !expectedSet.has(t));
 
+  // Sparseness is decided here so every consumer agrees without
+  // re-deciding; `missing` stays populated for diagnostics.
   const status: ValidationStatus =
-    missing.length === 0 && extra.length === 0 ? "ok" : "mismatch";
+    missing.length === 0 && extra.length === 0
+      ? "ok"
+      : isAcceptableSparseMismatch({ timeframe, expected, missing, extra })
+        ? "ok"
+        : "mismatch";
 
   return {
     ...base,

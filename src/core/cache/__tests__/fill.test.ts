@@ -3,12 +3,16 @@ import Database from "better-sqlite3";
 import { initializeSchema } from "../../../db/schema.js";
 import {
   CANDLE_FETCH_TIMEOUT_MS,
+  classifySessionDay,
   ensureCached,
+  observeEarlyClose,
   planFetchWindows,
   type DayClassification,
   type EnsureCachedDeps,
 } from "../fill.js";
+import { expectedCloseStamps } from "../validator.js";
 import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
+import type { SessionCalendar } from "../../sessions/calendar.js";
 
 const unix = (y: number, mo1: number, d: number, h: number): number =>
   Math.floor(Date.UTC(y, mo1 - 1, d, h, 0, 0) / 1000);
@@ -135,5 +139,64 @@ describe("ensureCached fetch loop", () => {
         .all() as Array<{ timestamp: number }>
     ).map((r) => r.timestamp);
     expect(stamps).toContain(stub);
+  });
+});
+
+describe("sparse 15s days through classify and early-close observation", () => {
+  function seed15s(
+    db: Database.Database,
+    window: { startUnix: number; endUnix: number },
+    omit: readonly number[] = [],
+  ): void {
+    const skip = new Set(omit);
+    const stmt = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('NQ', '15s', ?, 1, 2, 0.5, 1.5, 10)`,
+    );
+    db.transaction(() => {
+      for (const t of expectedCloseStamps(window, "15s")) {
+        if (!skip.has(t)) stmt.run(t);
+      }
+    })();
+  }
+
+  it("classifies a scattered-sparse closed 15s day as complete, a gapped one as partial", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const all = expectedCloseStamps(DAYS[0], "15s");
+    seed15s(db, DAYS[0], all.filter((_, i) => i % 200 === 199)); // 27 isolated
+    expect(classifySessionDay(db, "NQ", DAYS[0], "15s", NOW)).toBe("complete");
+    const gapped = new Database(":memory:");
+    initializeSchema(gapped);
+    seed15s(gapped, DAYS[0], all.slice(2000, 2012)); // 3-minute hole
+    expect(classifySessionDay(gapped, "NQ", DAYS[0], "15s", NOW)).toBe("partial");
+  });
+
+  it("records an observed early close over a sparse 15s prefix", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source)
+       VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
+    ).run();
+    // Bars end at a 13:00 ET early close (4h before template close), with
+    // scattered zero-tick gaps in the prefix — the Juneteenth shape.
+    const earlyClose = DAYS[0].endUnix - 4 * 3600;
+    const prefix = { startUnix: DAYS[0].startUnix, endUnix: earlyClose };
+    const all = expectedCloseStamps(prefix, "15s");
+    seed15s(db, prefix, all.filter((_, i) => i % 150 === 149 && i < all.length - 1));
+    const cal: SessionCalendar = new Map([
+      ["2026-05-04", { date: "2026-05-04", kind: "modified" as const, source: "nt8" as const }],
+    ]);
+    expect(observeEarlyClose(db, "NQ", "15s", DAYS[0], CME_US_INDEX_FUTURES_ETH, cal, NOW)).toBe(true);
+    const row = db
+      .prepare(`SELECT close_time, source FROM session_calendar WHERE date = '2026-05-04'`)
+      .get() as { close_time: string; source: string };
+    expect(row.close_time).toBe("13:00");
+    expect(row.source).toBe("nt8-observed");
+    // Under the adjusted geometry the sparse day now classifies complete.
+    expect(
+      classifySessionDay(db, "NQ", { label: "2026-05-04", ...prefix }, "15s", NOW),
+    ).toBe("complete");
   });
 });
