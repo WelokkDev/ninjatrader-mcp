@@ -1,17 +1,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ledger } from "../db/ledger.js";
+import { jsonResult, type ToolResult } from "./result.js";
 
 // list_trades — read the persisted trades table (a thin filter→serialize shell
 // over the ledger DAO). Filter by runId (a backtest run), mode
 // (backtest/paper/live), and/or managementMode (fixed/trailing/constrained) to
 // compare the three exit policies of a backtest run side by side.
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-function ok(payload: unknown): ToolResult {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
-}
 
 const MODES = ["backtest", "paper", "live"] as const;
 const MGMT = ["fixed", "trailing", "constrained"] as const;
@@ -25,7 +20,7 @@ export interface ListTradesArgs {
 export function createListTradesHandler() {
   return async ({ runId, mode, managementMode }: ListTradesArgs): Promise<ToolResult> => {
     const trades = ledger.listTrades({ runId, mode, managementMode });
-    return ok({ count: trades.length, trades });
+    return jsonResult({ count: trades.length, trades });
   };
 }
 

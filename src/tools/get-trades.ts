@@ -7,15 +7,10 @@ import { ledger as defaultLedger, type Ledger } from "../db/ledger.js";
 import { ingestTrades } from "../trade-source/ingest.js";
 import { NinjaTraderSource } from "../trade-source/ninjatrader.js";
 import type { TradeSource } from "../trade-source/types.js";
+import { jsonResult, type ToolResult } from "./result.js";
 
 // get_trades + sync_trades — thin fetch-or-read shells over the ledger + NinjaTrader source.
 // Both tools follow the same pattern as list-trades.ts (createXHandler factory + registerX(server) calling server.tool).
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-function ok(payload: unknown): ToolResult {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,10 +109,10 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
       } catch (err) {
         if (trades.length === 0) {
           // No pre-existing rows and ingest failed — surface the error.
-          return ok({ error: err instanceof Error ? err.message : String(err) });
+          return jsonResult({ error: err instanceof Error ? err.message : String(err) });
         }
         const msg = err instanceof Error ? err.message : String(err);
-        return ok({
+        return jsonResult({
           count: trades.length,
           trades,
           warning: `sync requested but ingest failed: ${msg}; returning existing rows`,
@@ -125,7 +120,7 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
       }
     }
 
-    return ok({ count: trades.length, trades });
+    return jsonResult({ count: trades.length, trades });
   };
 }
 
@@ -163,9 +158,9 @@ export function createSyncTradesHandler(deps?: TradeToolDeps) {
     try {
       const source = resolveSource(account);
       const { fetched, inserted } = await ingestTrades(source, ledger, { from, to });
-      return ok({ fetched, inserted });
+      return jsonResult({ fetched, inserted });
     } catch (err) {
-      return ok({ error: err instanceof Error ? err.message : String(err) });
+      return jsonResult({ error: err instanceof Error ? err.message : String(err) });
     }
   };
 }

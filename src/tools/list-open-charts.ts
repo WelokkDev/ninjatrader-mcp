@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isConnected as defaultIsConnected, request as defaultRequest } from "../bridge/index.js";
 import type { InboundMessage } from "../bridge/protocol.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 export interface ListOpenChartsDeps {
   isConnected: () => boolean;
@@ -11,15 +12,12 @@ export interface ListOpenChartsDeps {
   ) => Promise<InboundMessage>;
 }
 
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
 export const OPEN_CHARTS_TIMEOUT_MS = 5_000;
 
 export function createListOpenChartsHandler(deps: ListOpenChartsDeps) {
-  const text = (t: string): ToolResult => ({ content: [{ type: "text" as const, text: t }] });
   return async (): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return text(
+      return textResult(
         "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling list_open_charts.",
       );
     }
@@ -29,22 +27,20 @@ export function createListOpenChartsHandler(deps: ListOpenChartsDeps) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("timed out")) {
-        return text(
+        return textResult(
           `list_open_charts timed out after ${OPEN_CHARTS_TIMEOUT_MS}ms — either NT8's UI is busy, or the AddOn predates request_open_charts (recompile ninja-addon/addons/mcp-bridge.cs in the NinjaScript Editor).`,
         );
       }
-      return text(`list_open_charts failed: ${msg}`);
+      return textResult(`list_open_charts failed: ${msg}`);
     }
     if (res.type !== "open_charts_response") {
-      return text(`list_open_charts failed: unexpected response type '${res.type}'`);
+      return textResult(`list_open_charts failed: unexpected response type '${res.type}'`);
     }
-    return text(
-      JSON.stringify({
-        chartCount: res.charts.length,
-        charts: res.charts,
-        ...(res.skippedWindows > 0 ? { skippedWindows: res.skippedWindows } : {}),
-      }),
-    );
+    return jsonResult({
+      chartCount: res.charts.length,
+      charts: res.charts,
+      ...(res.skippedWindows > 0 ? { skippedWindows: res.skippedWindows } : {}),
+    });
   };
 }
 

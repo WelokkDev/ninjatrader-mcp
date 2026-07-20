@@ -25,6 +25,7 @@ import {
   writeDerivedForSessionDay,
 } from "../core/cache/derived.js";
 import { prefetchManager } from "../prefetch-instance.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 // A connected call fetches at most this many uncached session-days inline;
 // colder ranges are refused toward prefetch_candles so a synchronous fill
@@ -62,10 +63,6 @@ export interface GetCandlesDeps {
     timeoutMs?: number,
   ) => Promise<unknown>;
 }
-
-type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-};
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -134,25 +131,11 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     limit = 500,
   }: GetCandlesArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`,
-          },
-        ],
-      };
+      return textResult(`Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`);
     }
 
     if (!ISO_DATE_RE.test(start) || !ISO_DATE_RE.test(end)) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "Invalid date format. Use YYYY-MM-DD.",
-          },
-        ],
-      };
+      return textResult("Invalid date format. Use YYYY-MM-DD.");
     }
 
     // Resolve start/end as session-days in the instrument's session
@@ -168,35 +151,16 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       endTs = endRange.endUnix;
     } catch (err) {
       if (err instanceof SessionClosedError) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `"${err.label}" is a market holiday${err.description ? ` (${err.description})` : ""} — no session that day. Pick an adjacent trading day.`,
-            },
-          ],
-        };
+        return textResult(
+          `"${err.label}" is a market holiday${err.description ? ` (${err.description})` : ""} — no session that day. Pick an adjacent trading day.`,
+        );
       }
       const m = err instanceof Error ? err.message : String(err);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Invalid session-day for ${symbol}: ${m}`,
-          },
-        ],
-      };
+      return textResult(`Invalid session-day for ${symbol}: ${m}`);
     }
 
     if (startTs >= endTs) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `start session-day ${start} is not before end session-day ${end}`,
-          },
-        ],
-      };
+      return textResult(`start session-day ${start} is not before end session-day ${end}`);
     }
 
     const requestedDays = sessionDaysOverlapping(startTs, endTs, config.session, calendar);
@@ -205,17 +169,11 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       0,
     );
     if (matched > limit) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text:
-              `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. ` +
-              `If the range is already cached, narrow it or re-issue with limit >= ${matched}. ` +
-              `If it still needs fetching from NinjaTrader, start a background prefetch_candles job instead, then re-read here.`,
-          },
-        ],
-      };
+      return textResult(
+        `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. ` +
+          `If the range is already cached, narrow it or re-issue with limit >= ${matched}. ` +
+          `If it still needs fetching from NinjaTrader, start a background prefetch_candles job instead, then re-read here.`,
+      );
     }
 
     const rawTF = fetchTimeframeFor(timeframe);
@@ -228,18 +186,12 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         (day) => classifySessionDay(deps.db, symbol, day, rawTF, nowUnix) !== "complete",
       );
       if (coldDays.length > MAX_INLINE_COLD_DAYS) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
-                `over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
-                `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
-                `poll prefetch_status until it completes, then re-issue this get_candles.`,
-            },
-          ],
-        };
+        return textResult(
+          `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
+            `over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
+            `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
+            `poll prefetch_status until it completes, then re-issue this get_candles.`,
+        );
       }
     }
 
@@ -476,31 +428,24 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       ? { ...validation, raw_15m: raw15m }
       : validation;
 
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            symbol,
-            timeframe,
-            count: rows.length,
-            // Expected bar count for the full range from session geometry —
-            // count < matched means bars are genuinely absent (gap), never
-            // silently clipped.
-            matched,
-            truncated,
-            data_complete: dataComplete,
-            ...(partialBars > 0 && { partial_bars: partialBars }),
-            ...(interSessionExcluded > 0 && {
-              inter_session_rows_excluded: interSessionExcluded,
-            }),
-            candles: rows,
-            validation: validationOut,
-            ...(warning && { warning }),
-          }),
-        },
-      ],
-    };
+    return jsonResult({
+      symbol,
+      timeframe,
+      count: rows.length,
+      // Expected bar count for the full range from session geometry —
+      // count < matched means bars are genuinely absent (gap), never
+      // silently clipped.
+      matched,
+      truncated,
+      data_complete: dataComplete,
+      ...(partialBars > 0 && { partial_bars: partialBars }),
+      ...(interSessionExcluded > 0 && {
+        inter_session_rows_excluded: interSessionExcluded,
+      }),
+      candles: rows,
+      validation: validationOut,
+      ...(warning && { warning }),
+    });
   };
 }
 

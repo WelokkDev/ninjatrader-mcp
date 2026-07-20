@@ -59,6 +59,7 @@ the N-day high/low:
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import db from "../../db/connection.js";
+import { jsonResult } from "../../tools/result.js";
 
 // Reads candles already in the SQLite cache (candles.db). Timestamps are unix
 // SECONDS. Companion to get_candles: get_candles fills the cache, this reads it.
@@ -84,7 +85,7 @@ export function registerMyFirstScan(server: McpServer): void {
         row.bars === 0
           ? { symbol, days, error: "no cached 5m candles in range — run get_candles first" }
           : { symbol, days, high: row.hi, low: row.lo, bars: row.bars };
-      return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
+      return jsonResult(payload);
     },
   );
 }

@@ -4,12 +4,7 @@ import { getBridgeStatus } from "../bridge/index.js";
 import { consumerHub } from "../bridge/consumer.js";
 import { getLiveFeedRuntime, type LiveFeedRuntime } from "../live/runtime.js";
 import { MCP_SOURCE, type LiveTimeframe } from "../live/registry.js";
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-function json(obj: unknown): ToolResult {
-  return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
-}
+import { jsonResult, type ToolResult } from "./result.js";
 
 const LIVE_TF = z.enum(["15s", "5m", "15m"]);
 
@@ -37,9 +32,9 @@ export function createSubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
     timeframe: LiveTimeframe;
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return json({ ok: false, error: NOT_STARTED });
+    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
     const res = await runtime.registry.ensure(symbol, timeframe, MCP_SOURCE);
-    return json({
+    return jsonResult({
       ok: res.ok,
       symbol,
       timeframe,
@@ -59,9 +54,9 @@ export function createUnsubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
     timeframe: LiveTimeframe;
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return json({ ok: false, error: NOT_STARTED });
+    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
     const res = await runtime.registry.release(symbol, timeframe, MCP_SOURCE);
-    return json({
+    return jsonResult({
       ok: true,
       symbol,
       timeframe,
@@ -75,7 +70,7 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
     if (!runtime) {
-      return json({ error: NOT_STARTED, bridge: deps.bridgeStatus() });
+      return jsonResult({ error: NOT_STARTED, bridge: deps.bridgeStatus() });
     }
     const recorderByKey = new Map(
       runtime.recorder.status().map((s) => [`${s.symbol}:${s.timeframe}`, s]),
@@ -101,7 +96,7 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
       };
     });
     const pendingUnsubscribes = runtime.registry.pendingUnsubscribeKeys();
-    return json({
+    return jsonResult({
       bridge: deps.bridgeStatus(),
       consumers: deps.consumerCount(),
       healsInFlight: runtime.healer.healsInFlight(),

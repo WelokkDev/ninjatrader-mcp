@@ -12,20 +12,12 @@ import {
 import { loadCalendar } from "../core/sessions/calendar.js";
 import type { PrefetchManager } from "../core/cache/prefetch.js";
 import { prefetchManager as defaultManager } from "../prefetch-instance.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 // prefetch_candles / prefetch_status / prefetch_cancel — background,
 // resumable batch ingestion. The tool call returns a job plan instantly;
 // the fetch runs in-process, one NT8 request at a time, each day verified
 // against the cache after its response.
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-const ok = (payload: unknown): ToolResult => ({
-  content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-});
-const err = (text: string): ToolResult => ({
-  content: [{ type: "text" as const, text }],
-});
 
 export interface PrefetchStartArgs {
   symbol: string;
@@ -42,7 +34,7 @@ export interface PrefetchToolDeps {
 export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
   const start = async ({ symbol, timeframe, start, end }: PrefetchStartArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
-      return err(`Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`);
+      return textResult(`Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`);
     }
 
     const config = getInstrumentConfig(symbol);
@@ -54,17 +46,17 @@ export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
       endTs = sessionDayRange(end, config.session, calendar).endUnix;
     } catch (e) {
       if (e instanceof SessionClosedError) {
-        return err(
+        return textResult(
           `"${e.label}" is a market holiday${e.description ? ` (${e.description})` : ""} — no session that day. Pick an adjacent trading day (resolve_session_days shows the nearest ones).`,
         );
       }
       const m = e instanceof Error ? e.message : String(e);
-      return err(
+      return textResult(
         `Invalid session-day for ${symbol}: ${m}. A prefetch is a bounded batch — resolve the range with resolve_session_days first and use real session-day labels.`,
       );
     }
     if (startTs >= endTs) {
-      return err(`start session-day ${start} is not before end session-day ${end}`);
+      return textResult(`start session-day ${start} is not before end session-day ${end}`);
     }
 
     // Closed holidays vanish; early-close days carry adjusted geometry.
@@ -75,24 +67,24 @@ export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
       days,
       template: config.session,
     });
-    if ("error" in res) return err(res.error);
-    return ok({
+    if ("error" in res) return textResult(res.error);
+    return jsonResult({
       ...res.job,
       hint: `Background job started — poll prefetch_status { jobId: "${res.job.jobId}" } for progress; per-day failures are listed there. The job does not survive a server restart, but the cache does: re-issue the same prefetch to resume.`,
     });
   };
 
   const status = async ({ jobId }: { jobId?: string }): Promise<ToolResult> => {
-    if (jobId === undefined) return ok(deps.manager.status());
+    if (jobId === undefined) return jsonResult(deps.manager.status());
     const res = deps.manager.status(jobId);
-    if ("error" in res) return err(res.error);
-    return ok(res.job);
+    if ("error" in res) return textResult(res.error);
+    return jsonResult(res.job);
   };
 
   const cancel = async ({ jobId }: { jobId: string }): Promise<ToolResult> => {
     const res = deps.manager.cancel(jobId);
-    if ("error" in res) return err(res.error);
-    return ok(res.job);
+    if ("error" in res) return textResult(res.error);
+    return jsonResult(res.job);
   };
 
   return { start, status, cancel };

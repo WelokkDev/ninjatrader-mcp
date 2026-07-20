@@ -5,6 +5,7 @@ import {
   send as defaultSend,
 } from "../bridge/index.js";
 import type { ClearZonesMessage, OutboundMessage } from "../bridge/protocol.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 export interface ClearZonesArgs {
   symbol?: string;
@@ -16,19 +17,12 @@ export interface ClearZonesDeps {
   send: (message: OutboundMessage) => boolean;
 }
 
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
 export function createClearZonesHandler(deps: ClearZonesDeps) {
   return async ({ symbol, ids }: ClearZonesArgs): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling clear_zones.",
-          },
-        ],
-      };
+      return textResult(
+        "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling clear_zones.",
+      );
     }
 
     const message: ClearZonesMessage = {
@@ -40,14 +34,7 @@ export function createClearZonesHandler(deps: ClearZonesDeps) {
 
     const dispatched = deps.send(message);
 
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({ dispatched, symbol, ids: ids ?? null }),
-        },
-      ],
-    };
+    return jsonResult({ dispatched, symbol, ids: ids ?? null });
   };
 }
 

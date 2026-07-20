@@ -5,6 +5,7 @@ import {
   send as defaultSend,
 } from "../bridge/index.js";
 import type { DrawZoneMessage, OutboundMessage } from "../bridge/protocol.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 export interface DrawZoneArgs {
   id: string;
@@ -20,8 +21,6 @@ export interface DrawZoneDeps {
   send: (message: OutboundMessage) => boolean;
 }
 
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
 export function createDrawZoneHandler(deps: DrawZoneDeps) {
   return async ({
     id,
@@ -32,14 +31,9 @@ export function createDrawZoneHandler(deps: DrawZoneDeps) {
     toTs,
   }: DrawZoneArgs): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw_zone.",
-          },
-        ],
-      };
+      return textResult(
+        "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw_zone.",
+      );
     }
 
     const message: DrawZoneMessage = {
@@ -55,22 +49,7 @@ export function createDrawZoneHandler(deps: DrawZoneDeps) {
 
     const dispatched = deps.send(message);
 
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            dispatched,
-            id,
-            symbol,
-            proximal,
-            distal,
-            fromTs,
-            toTs,
-          }),
-        },
-      ],
-    };
+    return jsonResult({ dispatched, id, symbol, proximal, distal, fromTs, toTs });
   };
 }
 

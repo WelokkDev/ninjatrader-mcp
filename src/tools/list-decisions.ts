@@ -1,18 +1,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ledger } from "../db/ledger.js";
+import { jsonResult, type ToolResult } from "./result.js";
 
 // list_decisions — read the persisted trade_decisions table (a thin
 // filter→serialize shell over the ledger DAO). One row per evaluated bar of a
 // backtest walk, with verdict ('yes'/'no'), the short reason code, and the
 // full per-step trace. Filter by runId and/or verdict to build the "stall
 // funnel": how many bars died at each decision step, by reason.
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-function ok(payload: unknown): ToolResult {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload) }] };
-}
 
 export interface ListDecisionsArgs {
   runId?: string;
@@ -35,11 +30,11 @@ export function createListDecisionsHandler() {
         if (d.verdict === "yes") yes++;
         else funnel[d.reason ?? "unknown"] = (funnel[d.reason ?? "unknown"] ?? 0) + 1;
       }
-      return ok({ count: decisions.length, yes, funnel });
+      return jsonResult({ count: decisions.length, yes, funnel });
     }
     const cap = Math.max(1, Math.min(limit, 2000));
     const capped = decisions.slice(0, cap);
-    return ok({ count: decisions.length, returned: capped.length, decisions: capped });
+    return jsonResult({ count: decisions.length, returned: capped.length, decisions: capped });
   };
 }
 

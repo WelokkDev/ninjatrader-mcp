@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isConnected as defaultIsConnected, send as defaultSend, getBridgeStatus } from "../bridge/index.js";
 import type { DrawMessage, DrawShape, DrawStyle, OutboundMessage } from "../bridge/protocol.js";
 import { drawTargetWarning } from "./draw-target.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 export interface DrawArgs {
   id: string;
@@ -16,8 +17,6 @@ export interface DrawDeps {
   send: (message: OutboundMessage) => boolean;
   knownInstruments: () => string[];
 }
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
 const shapeSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -48,14 +47,9 @@ const styleSchema = z
 export function createDrawHandler(deps: DrawDeps) {
   return async ({ id, symbol, shape, style }: DrawArgs): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw.",
-          },
-        ],
-      };
+      return textResult(
+        "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw.",
+      );
     }
     const message: DrawMessage = {
       v: 1,
@@ -67,14 +61,7 @@ export function createDrawHandler(deps: DrawDeps) {
     };
     const dispatched = deps.send(message);
     const warning = drawTargetWarning(symbol, deps.knownInstruments());
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({ dispatched, id, symbol, shape, style, ...(warning ? { warning } : {}) }),
-        },
-      ],
-    };
+    return jsonResult({ dispatched, id, symbol, shape, style, ...(warning ? { warning } : {}) });
   };
 }
 

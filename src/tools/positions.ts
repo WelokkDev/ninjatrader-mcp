@@ -9,12 +9,7 @@ import {
   type TrackedOrder,
   type TrackedPosition,
 } from "../live/positions.js";
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-
-function json(obj: unknown): ToolResult {
-  return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
-}
+import { jsonResult, type ToolResult } from "./result.js";
 
 const NOT_STARTED =
   "live feed runtime not started — startRuntime() has not run in this process";
@@ -278,7 +273,7 @@ function buildAccountsView(
 export function createGetPositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return json({ ok: false, error: NOT_STARTED });
+    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
     const now = deps.nowUnix ? deps.nowUnix() : Math.floor(Date.now() / 1000);
     const bridge = deps.bridgeStatus();
 
@@ -299,7 +294,7 @@ export function createGetPositionsHandler(deps: PositionsToolsDeps) {
       (n, a) => n + (a.positions as unknown[]).length,
       0,
     );
-    return json({
+    return jsonResult({
       ok: true,
       source,
       asOf: now,
@@ -326,9 +321,9 @@ export function createGetPositionsHandler(deps: PositionsToolsDeps) {
 export function createSubscribeLivePositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return json({ ok: false, error: NOT_STARTED });
+    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
     const res = await runtime.positions.subscribe();
-    return json({
+    return jsonResult({
       ok: res.ok,
       accounts: res.accounts,
       alreadyActive: res.alreadyActive,
@@ -340,9 +335,9 @@ export function createSubscribeLivePositionsHandler(deps: PositionsToolsDeps) {
 export function createUnsubscribeLivePositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return json({ ok: false, error: NOT_STARTED });
+    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
     const res = await runtime.positions.unsubscribe();
-    return json({
+    return jsonResult({
       ok: res.ok,
       removed: res.removed,
       ...(res.error ? { error: res.error } : {}),

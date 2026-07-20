@@ -2,16 +2,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Lab } from "../lab/lab.js";
 import type { ExperimentSpec, Prediction } from "../lab/types.js";
+import { jsonResult, type ToolResult } from "./result.js";
 
 // start_experiment — fire-and-forget launch of a backtest experiment. Returns an
 // experimentId + a launch-time ETA immediately; the run happens in a detached
 // process. Poll experiment_status / experiment_result. A real run is ~100 min,
 // so this NEVER runs the backtest inside the tool call.
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-const ok = (payload: unknown): ToolResult => ({
-  content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-});
 
 export function registerStartExperiment(server: McpServer, lab: Lab): void {
   server.tool(
@@ -63,7 +59,7 @@ export function registerStartExperiment(server: McpServer, lab: Lab): void {
         prediction,
       };
       const res = await lab.start(spec);
-      return ok(res);
+      return jsonResult(res);
     },
   );
 }

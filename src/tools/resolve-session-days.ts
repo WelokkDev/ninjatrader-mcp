@@ -19,6 +19,7 @@ import type { SessionDay, SessionTemplate } from "../core/sessions/types.js";
 import type { Timeframe } from "../core/types.js";
 import { expectedBarCount } from "../core/cache/validator.js";
 import { formatLocalDateTime } from "../core/time.js";
+import { jsonResult, textResult, type ToolResult } from "./result.js";
 
 const RELATIVE_ANCHORS = [
   "today",
@@ -44,10 +45,6 @@ export interface ResolveSessionDaysDeps {
   // Without it the tool runs calendar-blind and reports holidaysModeled:false.
   db?: Database;
 }
-
-type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-};
 
 interface SessionDayOut {
   label: string;
@@ -266,10 +263,6 @@ function weekSessionDays(
   return days;
 }
 
-function err(text: string): ToolResult {
-  return { content: [{ type: "text" as const, text }] };
-}
-
 export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {}) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
 
@@ -281,7 +274,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     n,
   }: ResolveSessionDaysArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
-      return err(
+      return textResult(
         `Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`,
       );
     }
@@ -289,17 +282,17 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     const hasExplicit = start !== undefined || end !== undefined;
     const hasRelative = relative !== undefined;
     if (hasExplicit === hasRelative) {
-      return err(
+      return textResult(
         "Provide either an explicit range (start + end, YYYY-MM-DD) or a relative anchor — exactly one of the two.",
       );
     }
     if (hasExplicit && (start === undefined || end === undefined)) {
-      return err(
+      return textResult(
         "Provide either start + end together (YYYY-MM-DD) — an explicit range needs both.",
       );
     }
     if (relative === "last-n-sessions" && (n === undefined || !Number.isInteger(n) || n < 1)) {
-      return err('relative "last-n-sessions" requires `n` — a positive integer session count.');
+      return textResult('relative "last-n-sessions" requires `n` — a positive integer session count.');
     }
 
     const config = getInstrumentConfig(symbol);
@@ -328,7 +321,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
         if (endEp.flag && endEp.flag.input !== startEp.flag?.input) flags.push(endEp.flag);
 
         if (!startEp.flag && !endEp.flag && startEp.day.startUnix >= endEp.day.endUnix) {
-          return err(
+          return textResult(
             `start session-day ${start} is not before end session-day ${end}`,
           );
         }
@@ -378,7 +371,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      return err(`Could not resolve session-days for ${symbol}: ${m}`);
+      return textResult(`Could not resolve session-days for ${symbol}: ${m}`);
     }
 
     // Surface calendar-closed dates inside the resolved window as flags —
@@ -423,23 +416,16 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
       ]),
     );
 
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            today,
-            requested,
-            sessionDays,
-            flags,
-            // False = calendar-blind for this template: holidays may
-            // appear as normal session-days.
-            holidaysModeled: calendar.size > 0,
-            barCountEstimate,
-          }),
-        },
-      ],
-    };
+    return jsonResult({
+      today,
+      requested,
+      sessionDays,
+      flags,
+      // False = calendar-blind for this template: holidays may
+      // appear as normal session-days.
+      holidaysModeled: calendar.size > 0,
+      barCountEstimate,
+    });
   };
 }
 

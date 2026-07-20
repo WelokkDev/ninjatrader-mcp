@@ -1,14 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Lab } from "../lab/lab.js";
+import { jsonResult, type ToolResult } from "./result.js";
 
 // list_experiments — compact summaries (id, status, label, yes-count, trades by
 // mode, integrity ok). Explicit small fields only; never the full records.
-
-type ToolResult = { content: Array<{ type: "text"; text: string }> };
-const ok = (payload: unknown): ToolResult => ({
-  content: [{ type: "text" as const, text: JSON.stringify(payload) }],
-});
 
 export function registerListExperiments(server: McpServer, lab: Lab): void {
   server.tool(
@@ -22,7 +18,7 @@ export function registerListExperiments(server: McpServer, lab: Lab): void {
     },
     async ({ status }): Promise<ToolResult> => {
       const rows = lab.list(status ? { status } : undefined);
-      return ok({ count: rows.length, experiments: rows });
+      return jsonResult({ count: rows.length, experiments: rows });
     },
   );
 }

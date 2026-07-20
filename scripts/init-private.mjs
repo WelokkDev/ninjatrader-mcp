@@ -66,10 +66,13 @@ main().catch((error) => {
 
 const MY_TOOL_TS = `import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { textResult } from "../../tools/result.js";
 
 // Example private tool. Everything under src/private/ is gitignored, so this
 // file never reaches the public repo. Copy it, rename it, put your own logic in
 // the handler, then add a register line in src/private/index.ts.
+// Return results with textResult(message) / jsonResult(payload) from
+// src/tools/result.ts.
 
 export function registerMyTool(server: McpServer): void {
   server.tool(
@@ -78,14 +81,8 @@ export function registerMyTool(server: McpServer): void {
     {
       symbol: z.string().min(1).describe("Instrument symbol, e.g. MNQ"),
     },
-    async ({ symbol }: { symbol: string }) => ({
-      content: [
-        {
-          type: "text" as const,
-          text: \`Hello from my_tool -- you passed symbol=\${symbol}\`,
-        },
-      ],
-    }),
+    async ({ symbol }: { symbol: string }) =>
+      textResult(\`Hello from my_tool -- you passed symbol=\${symbol}\`),
   );
 }
 `;
