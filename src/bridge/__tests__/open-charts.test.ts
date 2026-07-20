@@ -40,7 +40,8 @@ describe("parseMessage: open_charts_response", () => {
 
   it("rejects a missing id", () => {
     const res = parseMessage(JSON.stringify({ v: 1, type: "open_charts_response", charts: [] }));
-    expect(res).toEqual({ ok: false, reason: "open_charts_response: missing id" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain("open_charts_response: id");
   });
 
   it("rejects a malformed chart entry", () => {
@@ -48,6 +49,14 @@ describe("parseMessage: open_charts_response", () => {
     const res = parseMessage(
       JSON.stringify({ v: 1, type: "open_charts_response", id: "r1", charts: [bad] }),
     );
-    expect(res).toEqual({ ok: false, reason: "open_charts_response: bad charts" });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain("charts");
+  });
+
+  it("rejects a wrong-typed skippedWindows instead of coercing it", () => {
+    const res = parseMessage(
+      JSON.stringify({ v: 1, type: "open_charts_response", id: "r1", charts: [], skippedWindows: "3" }),
+    );
+    expect(res.ok).toBe(false);
   });
 });

@@ -102,6 +102,48 @@ describe("parseMessage", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("rejects Object.prototype key names as unknown types instead of crashing", () => {
+    for (const type of ["constructor", "toString", "valueOf", "__proto__"]) {
+      const r = parseMessage(JSON.stringify({ v: 1, type }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe(`unknown type: ${type}`);
+    }
+  });
+
+  it("strips unknown keys, top-level and nested", () => {
+    const r = parseMessage(
+      JSON.stringify({
+        v: 1,
+        type: "bar_close",
+        symbol: "NQ",
+        timeframe: "15m",
+        candle: {
+          timestamp: 1700000000,
+          open: 100,
+          high: 110,
+          low: 95,
+          close: 105,
+          volume: 1000,
+          futureField: "dropped",
+        },
+        futureField: "dropped",
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok && r.message.type === "bar_close") {
+      expect(r.message).not.toHaveProperty("futureField");
+      expect(r.message.candle).not.toHaveProperty("futureField");
+    }
+  });
+
+  it("rejects a wrong-typed optional field instead of dropping it (hello.timeZone)", () => {
+    const r = parseMessage(
+      JSON.stringify({ v: 1, type: "hello", ntVersion: "NT8", instruments: [], timeZone: 42 }),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("timeZone");
+  });
+
   it("rejects candles_response missing id", () => {
     const r = parseMessage(
       JSON.stringify({

@@ -1,368 +1,370 @@
+import { z } from "zod";
+
 export const PROTOCOL_VERSION = 1;
 
-export interface HelloMessage {
-  v: 1;
-  type: "hello";
-  ntVersion: string;
-  instruments: string[];
+// Each message shape is defined once as a zod schema; the TS types are z.infer
+// of them. The C# AddOn (ninja-addon/addons/mcp-bridge.cs) mirrors these shapes
+// by hand. Parsing strips unknown keys, rejects missing/wrong-typed/non-finite
+// fields, and keeps absent optionals absent.
+
+/** Envelope for unsolicited messages. */
+function msg<T extends string, S extends z.ZodRawShape>(type: T, shape: S) {
+  return z.object({ v: z.literal(1), type: z.literal(type), ...shape });
+}
+
+/** Envelope for request/response messages correlated by id. */
+function reqMsg<T extends string, S extends z.ZodRawShape>(type: T, shape: S) {
+  return z.object({ v: z.literal(1), id: z.string(), type: z.literal(type), ...shape });
+}
+
+export const helloMessageSchema = msg("hello", {
+  ntVersion: z.string(),
+  instruments: z.array(z.string()),
   // NT8-configured timezone id (bars are stamped in it); older AddOns omit it.
-  timeZone?: string;
-}
+  timeZone: z.string().optional(),
+});
+export type HelloMessage = z.infer<typeof helloMessageSchema>;
 
-export interface InstrumentsUpdateMessage {
-  v: 1;
-  type: "instruments_update";
-  instruments: string[];
-}
+export const instrumentsUpdateMessageSchema = msg("instruments_update", {
+  instruments: z.array(z.string()),
+});
+export type InstrumentsUpdateMessage = z.infer<typeof instrumentsUpdateMessageSchema>;
 
-export interface HeartbeatMessage {
-  v: 1;
-  type: "heartbeat";
-}
+export const heartbeatMessageSchema = msg("heartbeat", {});
+export type HeartbeatMessage = z.infer<typeof heartbeatMessageSchema>;
 
-export interface HelloAckMessage {
-  v: 1;
-  type: "hello_ack";
-  serverVersion: string;
-}
+export const helloAckMessageSchema = msg("hello_ack", {
+  serverVersion: z.string(),
+});
+export type HelloAckMessage = z.infer<typeof helloAckMessageSchema>;
 
-export interface DrawZoneMessage {
-  v: 1;
-  type: "draw_zone";
-  id: string;
-  symbol: string;
-  proximal: number;
-  distal: number;
-  // Unix seconds, matching the candle protocol. Both optional:
-  // omit fromTs to anchor the rectangle to a fixed bars-back fallback,
-  // omit toTs to extend it to the current bar.
-  fromTs?: number;
-  toTs?: number;
-}
+/** Shared with the draw_zone MCP tool's params (draw-zone.ts). */
+export const drawZoneFields = {
+  id: z.string().min(1),
+  symbol: z.string().min(1),
+  proximal: z.number(),
+  distal: z.number(),
+  // Unix seconds; omit fromTs for the bars-back fallback anchor, toTs to
+  // extend to the current bar.
+  fromTs: z.number().int().optional(),
+  toTs: z.number().int().optional(),
+};
+export const drawZoneMessageSchema = msg("draw_zone", drawZoneFields);
+export type DrawZoneMessage = z.infer<typeof drawZoneMessageSchema>;
 
-export interface DrawStyle {
-  color?: string; // "#rrggbb"
-  opacity?: number; // 0..1 fill opacity (rectangles)
-  label?: string; // optional companion text rendered at the shape's anchor
-}
+export const drawStyleSchema = z.object({
+  color: z.string().optional(), // "#rrggbb"
+  opacity: z.number().min(0).max(1).optional(), // 0..1 fill opacity (rectangles)
+  label: z.string().optional(), // companion text at the shape's anchor
+});
+export type DrawStyle = z.infer<typeof drawStyleSchema>;
 
-/** Discriminated chart primitives. Timestamps are unix seconds (ET calendar
- *  dates per the draw_zone timezone convention). */
-export type DrawShape =
-  | { kind: "rectangle"; proximal: number; distal: number; fromTs?: number; toTs?: number }
-  | { kind: "hline"; price: number; fromTs?: number; toTs?: number }
-  | { kind: "vline"; ts: number }
-  | { kind: "text"; ts: number; price: number; text: string };
+/** Chart primitives; timestamps are unix seconds (draw_zone ET convention). */
+export const drawShapeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("rectangle"),
+    proximal: z.number(),
+    distal: z.number(),
+    fromTs: z.number().int().optional(),
+    toTs: z.number().int().optional(),
+  }),
+  z.object({
+    kind: z.literal("hline"),
+    price: z.number(),
+    fromTs: z.number().int().optional(),
+    toTs: z.number().int().optional(),
+  }),
+  z.object({ kind: z.literal("vline"), ts: z.number().int() }),
+  z.object({
+    kind: z.literal("text"),
+    ts: z.number().int(),
+    price: z.number(),
+    text: z.string().min(1),
+  }),
+]);
+export type DrawShape = z.infer<typeof drawShapeSchema>;
 
-export interface DrawMessage {
-  v: 1;
-  type: "draw";
-  id: string;
-  symbol: string;
-  shape: DrawShape;
-  style?: DrawStyle;
-}
+export const drawMessageSchema = msg("draw", {
+  id: z.string().min(1),
+  symbol: z.string().min(1),
+  shape: drawShapeSchema,
+  style: drawStyleSchema.optional(),
+});
+export type DrawMessage = z.infer<typeof drawMessageSchema>;
 
-export interface ClearZonesMessage {
-  v: 1;
-  type: "clear_zones";
-  // Optional: omit to clear on every chart that has the renderer attached.
-  symbol?: string;
-  // Single-id form (kept for compatibility); prefer `ids` for batches.
-  id?: string;
-  ids?: string[];
-}
+export const clearZonesMessageSchema = msg("clear_zones", {
+  // Omit symbol to clear every renderer-attached chart.
+  symbol: z.string().optional(),
+  // Legacy single-id form; prefer `ids`.
+  id: z.string().optional(),
+  ids: z.array(z.string()).optional(),
+});
+export type ClearZonesMessage = z.infer<typeof clearZonesMessageSchema>;
 
-export interface RequestCandlesMessage {
-  v: 1;
-  id: string;
-  type: "request_candles";
-  symbol: string;
-  timeframe: string;
-  from: number;
-  to: number;
-  // Internal session-template name (e.g. "cme_us_index_futures_eth").
-  // Required: the NT8 add-on fails the request closed if missing or
-  // unknown rather than falling back to a default
-  tradingHoursTemplate: string;
-}
+export const requestCandlesMessageSchema = reqMsg("request_candles", {
+  symbol: z.string(),
+  timeframe: z.string(),
+  from: z.number(),
+  to: z.number(),
+  // Session-template name (e.g. "cme_us_index_futures_eth"); the AddOn fails
+  // the request closed on a missing/unknown template.
+  tradingHoursTemplate: z.string(),
+});
+export type RequestCandlesMessage = z.infer<typeof requestCandlesMessageSchema>;
 
-export interface CandlePayload {
-  timestamp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
+export const candlePayloadSchema = z.object({
+  timestamp: z.number(),
+  open: z.number(),
+  high: z.number(),
+  low: z.number(),
+  close: z.number(),
+  volume: z.number(),
+});
+export type CandlePayload = z.infer<typeof candlePayloadSchema>;
 
-export interface CandlesResponseMessage {
-  v: 1;
-  id: string;
-  type: "candles_response";
-  symbol: string;
-  timeframe: string;
-  candles: CandlePayload[];
-}
+export const candlesResponseMessageSchema = reqMsg("candles_response", {
+  symbol: z.string(),
+  timeframe: z.string(),
+  candles: z.array(candlePayloadSchema),
+});
+export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
-export interface BarCloseMessage {
-  v: 1;
-  type: "bar_close";
-  symbol: string;
-  timeframe: string;
-  candle: CandlePayload;
-  // Live-feed extensions — optional so a legacy AddOn stays parseable.
+export const barCloseMessageSchema = msg("bar_close", {
+  symbol: z.string(),
+  timeframe: z.string(),
+  candle: candlePayloadSchema,
   // Monotonic per subscription; a jump = undelivered bars, a reset = re-seed.
-  seq?: number;
+  seq: z.number().optional(),
   // Resolved NT8 contract (e.g. "MNQ 09-26") — makes rolls visible.
-  contract?: string;
-  // Closed well before emission (catch-up); act-on-close consumers skip these.
-  backfill?: boolean;
-}
+  contract: z.string().optional(),
+  // Closed well before emission; act-on-close consumers skip these.
+  backfill: z.boolean().optional(),
+});
+export type BarCloseMessage = z.infer<typeof barCloseMessageSchema>;
 
-export interface SubscribeBarsMessage {
-  v: 1;
-  id: string;
-  type: "subscribe_bars";
-  symbol: string;
-  timeframe: string;
+export const subscribeBarsMessageSchema = reqMsg("subscribe_bars", {
+  symbol: z.string(),
+  timeframe: z.string(),
   // Same fail-closed template contract as request_candles.
-  tradingHoursTemplate: string;
-}
+  tradingHoursTemplate: z.string(),
+});
+export type SubscribeBarsMessage = z.infer<typeof subscribeBarsMessageSchema>;
 
-export interface UnsubscribeBarsMessage {
-  v: 1;
-  id: string;
-  type: "unsubscribe_bars";
-  symbol: string;
-  timeframe: string;
-}
+export const unsubscribeBarsMessageSchema = reqMsg("unsubscribe_bars", {
+  symbol: z.string(),
+  timeframe: z.string(),
+});
+export type UnsubscribeBarsMessage = z.infer<typeof unsubscribeBarsMessageSchema>;
 
-export interface SubscribeAckMessage {
-  v: 1;
-  id: string;
-  type: "subscribe_ack";
-  symbol: string;
-  timeframe: string;
+export const subscribeAckMessageSchema = reqMsg("subscribe_ack", {
+  symbol: z.string(),
+  timeframe: z.string(),
   // Resolved NT8 contract FullName the stream is bound to.
-  contract: string;
-  // Bars in the C# seed request (0 on an alreadyActive re-subscribe ack).
-  seedCount: number;
+  contract: z.string(),
+  // Bars in the C# seed request; 0 on an alreadyActive re-subscribe.
+  seedCount: z.number(),
   // Unix seconds of the last seeded bar; 0 when none.
-  seedLastTs: number;
-  // The subscription already existed C#-side (idempotent re-subscribe).
-  alreadyActive: boolean;
-}
+  seedLastTs: z.number(),
+  // The subscription already existed C#-side.
+  alreadyActive: z.boolean(),
+});
+export type SubscribeAckMessage = z.infer<typeof subscribeAckMessageSchema>;
 
-export interface UnsubscribeAckMessage {
-  v: 1;
-  id: string;
-  type: "unsubscribe_ack";
-  symbol: string;
-  timeframe: string;
-  removed: boolean;
-}
+export const unsubscribeAckMessageSchema = reqMsg("unsubscribe_ack", {
+  symbol: z.string(),
+  timeframe: z.string(),
+  removed: z.boolean(),
+});
+export type UnsubscribeAckMessage = z.infer<typeof unsubscribeAckMessageSchema>;
 
-export interface RequestSessionCalendarMessage {
-  v: 1;
-  id: string;
-  type: "request_session_calendar";
-  // Internal session-template name (e.g. "cme_us_index_futures_eth").
-  tradingHoursTemplate: string;
-}
+export const requestSessionCalendarMessageSchema = reqMsg("request_session_calendar", {
+  tradingHoursTemplate: z.string(),
+});
+export type RequestSessionCalendarMessage = z.infer<typeof requestSessionCalendarMessageSchema>;
 
-export interface SessionCalendarResponseMessage {
-  v: 1;
-  id: string;
-  type: "session_calendar_response";
+export const sessionCalendarResponseMessageSchema = reqMsg("session_calendar_response", {
   // NT8 TradingHours.Holidays — fully-closed dates (YYYY-MM-DD).
-  holidays: Array<{ date: string; description: string }>;
+  holidays: z.array(z.object({ date: z.string(), description: z.string() })),
   // NT8 TradingHours.PartialHolidays — dates only; NT8 exposes no times.
-  partialHolidays: Array<{
-    date: string;
-    isEarlyClose: boolean;
-    isLateBegin: boolean;
-    description: string;
-  }>;
-}
+  partialHolidays: z.array(
+    z.object({
+      date: z.string(),
+      isEarlyClose: z.boolean(),
+      isLateBegin: z.boolean(),
+      description: z.string(),
+    }),
+  ),
+});
+export type SessionCalendarResponseMessage = z.infer<typeof sessionCalendarResponseMessageSchema>;
 
-export interface RequestOpenChartsMessage {
-  v: 1;
-  id: string;
-  type: "request_open_charts";
-}
+export const requestOpenChartsMessageSchema = reqMsg("request_open_charts", {});
+export type RequestOpenChartsMessage = z.infer<typeof requestOpenChartsMessageSchema>;
 
-/** One open chart tab. `symbol` uses the roster/draw convention
- *  (MasterInstrument.Name); `timeframe` is compact ("5m"/"1h") when the
- *  NT8 bars type maps to the SUPPORTED_TIMEFRAMES vocabulary, otherwise
- *  NT8's own display string (e.g. "150 Tick"). Empty strings mean the tab
- *  hadn't finished loading when read. */
-export interface OpenChartEntry {
-  window: string;
-  symbol: string;
-  instrument: string;
-  timeframe: string;
-  isActive: boolean;
-  hasRenderer: boolean;
-}
+/** One open chart tab. `timeframe` is compact ("5m") when the bars type maps
+ *  to SUPPORTED_TIMEFRAMES, else NT8's display string ("150 Tick"); empty
+ *  strings mean the tab hadn't finished loading. */
+export const openChartEntrySchema = z.object({
+  window: z.string(),
+  symbol: z.string(),
+  instrument: z.string(),
+  timeframe: z.string(),
+  isActive: z.boolean(),
+  hasRenderer: z.boolean(),
+});
+export type OpenChartEntry = z.infer<typeof openChartEntrySchema>;
 
-export interface OpenChartsResponseMessage {
-  v: 1;
-  id: string;
-  type: "open_charts_response";
-  charts: OpenChartEntry[];
-  skippedWindows: number;
-}
+export const openChartsResponseMessageSchema = reqMsg("open_charts_response", {
+  charts: z.array(openChartEntrySchema),
+  skippedWindows: z.number().default(0),
+});
+export type OpenChartsResponseMessage = z.infer<typeof openChartsResponseMessageSchema>;
 
-// ---------- live position tracking ----------
-// Read-only account observation. Enum-ish fields carry NT8's own ToString()
-// values ("Long", "StopMarket", "Working", ...) so new values pass through.
+// ---------- live position tracking (read-only) ----------
+// Enum-ish fields carry NT8's own ToString() values so new values pass through.
 
-export interface PositionPayload {
-  instrument: string; // resolved contract, e.g. "MNQ 09-26"
-  symbol: string; // master symbol, e.g. "MNQ" — matches the roster/draw convention
-  marketPosition: string;
-  quantity: number;
-  averagePrice?: number;
-  pointValue?: number;
-  tickSize?: number;
+export const positionPayloadSchema = z.object({
+  instrument: z.string(), // resolved contract, e.g. "MNQ 09-26"
+  symbol: z.string(), // master symbol, e.g. "MNQ" (roster/draw convention)
+  marketPosition: z.string(),
+  quantity: z.number(),
+  averagePrice: z.number().optional(),
+  pointValue: z.number().optional(),
+  tickSize: z.number().optional(),
   // Best-effort from NT8 market data; omitted when no data is flowing.
-  unrealizedPnl?: number;
-  marketPrice?: number;
-  marketPriceTs?: number;
-}
+  unrealizedPnl: z.number().optional(),
+  marketPrice: z.number().optional(),
+  marketPriceTs: z.number().optional(),
+});
+export type PositionPayload = z.infer<typeof positionPayloadSchema>;
 
-export interface WorkingOrderPayload {
-  orderId: string;
-  name: string; // NT8 order name, e.g. "Stop loss" / "Profit target"
-  instrument: string;
-  symbol: string;
-  action: string; // Buy | Sell | SellShort | BuyToCover
-  orderType: string; // Market | Limit | StopMarket | StopLimit | ...
-  state: string; // NT8 OrderState string
-  quantity: number;
-  filled: number;
-  limitPrice?: number;
-  stopPrice?: number;
-  avgFillPrice?: number;
-  time?: number; // unix seconds
-  oco?: string;
-}
+export const workingOrderPayloadSchema = z.object({
+  orderId: z.string(),
+  name: z.string(), // NT8 order name, e.g. "Stop loss" / "Profit target"
+  instrument: z.string(),
+  symbol: z.string(),
+  action: z.string(),
+  orderType: z.string(),
+  state: z.string(),
+  quantity: z.number(),
+  filled: z.number(),
+  limitPrice: z.number().optional(),
+  stopPrice: z.number().optional(),
+  avgFillPrice: z.number().optional(),
+  time: z.number().optional(), // unix seconds
+  oco: z.string().optional(),
+});
+export type WorkingOrderPayload = z.infer<typeof workingOrderPayloadSchema>;
 
-export interface ExecutionPayload {
-  executionId: string;
-  orderId: string;
-  instrument: string;
-  symbol: string;
-  side: string; // NT8 MarketPosition of the fill: "Long" = buy, "Short" = sell
-  quantity: number;
-  price?: number;
-  time?: number; // unix seconds
-  orderName?: string;
-  commission?: number;
-}
+export const executionPayloadSchema = z.object({
+  executionId: z.string(),
+  orderId: z.string(),
+  instrument: z.string(),
+  symbol: z.string(),
+  side: z.string(), // NT8 MarketPosition of the fill: "Long" = buy, "Short" = sell
+  quantity: z.number(),
+  price: z.number().optional(),
+  time: z.number().optional(), // unix seconds
+  orderName: z.string().optional(),
+  commission: z.number().optional(),
+});
+export type ExecutionPayload = z.infer<typeof executionPayloadSchema>;
 
-export interface AccountSnapshotPayload {
-  name: string;
-  connection?: string;
-  connectionStatus?: string;
-  denomination?: string;
-  realizedPnl?: number;
-  cashValue?: number;
-  netLiquidation?: number;
-  positions: PositionPayload[];
-  orders: WorkingOrderPayload[]; // working (non-terminal) orders only
-}
+export const accountSnapshotPayloadSchema = z.object({
+  name: z.string(),
+  connection: z.string().optional(),
+  connectionStatus: z.string().optional(),
+  denomination: z.string().optional(),
+  realizedPnl: z.number().optional(),
+  cashValue: z.number().optional(),
+  netLiquidation: z.number().optional(),
+  positions: z.array(positionPayloadSchema),
+  orders: z.array(workingOrderPayloadSchema), // working (non-terminal) orders only
+});
+export type AccountSnapshotPayload = z.infer<typeof accountSnapshotPayloadSchema>;
 
-export interface RequestPositionsMessage {
-  v: 1;
-  id: string;
-  type: "request_positions";
-}
+export const requestPositionsMessageSchema = reqMsg("request_positions", {});
+export type RequestPositionsMessage = z.infer<typeof requestPositionsMessageSchema>;
 
-export interface PositionsResponseMessage {
-  v: 1;
-  id: string;
-  type: "positions_response";
-  accounts: AccountSnapshotPayload[];
-}
+export const positionsResponseMessageSchema = reqMsg("positions_response", {
+  accounts: z.array(accountSnapshotPayloadSchema),
+});
+export type PositionsResponseMessage = z.infer<typeof positionsResponseMessageSchema>;
 
-export interface SubscribePositionsMessage {
-  v: 1;
-  id: string;
-  type: "subscribe_positions";
-}
+export const subscribePositionsMessageSchema = reqMsg("subscribe_positions", {});
+export type SubscribePositionsMessage = z.infer<typeof subscribePositionsMessageSchema>;
 
-export interface SubscribePositionsAckMessage {
-  v: 1;
-  id: string;
-  type: "subscribe_positions_ack";
-  accounts: string[];
-  alreadyActive: boolean;
-}
+export const subscribePositionsAckMessageSchema = reqMsg("subscribe_positions_ack", {
+  accounts: z.array(z.string()),
+  alreadyActive: z.boolean(),
+});
+export type SubscribePositionsAckMessage = z.infer<typeof subscribePositionsAckMessageSchema>;
 
-export interface UnsubscribePositionsMessage {
-  v: 1;
-  id: string;
-  type: "unsubscribe_positions";
-}
+export const unsubscribePositionsMessageSchema = reqMsg("unsubscribe_positions", {});
+export type UnsubscribePositionsMessage = z.infer<typeof unsubscribePositionsMessageSchema>;
 
-export interface UnsubscribePositionsAckMessage {
-  v: 1;
-  id: string;
-  type: "unsubscribe_positions_ack";
-  removed: boolean;
-}
+export const unsubscribePositionsAckMessageSchema = reqMsg("unsubscribe_positions_ack", {
+  removed: z.boolean(),
+});
+export type UnsubscribePositionsAckMessage = z.infer<typeof unsubscribePositionsAckMessageSchema>;
 
-/** Unsolicited full snapshot (after subscribe / reconnect / roster change);
- *  shares the position_event seq stream for ordering and drop detection. */
-export interface PositionSyncMessage {
-  v: 1;
-  type: "position_sync";
-  accounts: AccountSnapshotPayload[];
-  seq?: number;
-  reason?: string;
-  ts?: number; // unix seconds at emit
-}
+/** Unsolicited full snapshot (subscribe / reconnect / roster change); shares
+ *  the position_event seq stream. */
+export const positionSyncMessageSchema = msg("position_sync", {
+  accounts: z.array(accountSnapshotPayloadSchema),
+  seq: z.number().optional(),
+  reason: z.string().optional(),
+  ts: z.number().optional(), // unix seconds at emit
+});
+export type PositionSyncMessage = z.infer<typeof positionSyncMessageSchema>;
 
-export interface PositionEventMessage {
-  v: 1;
-  type: "position_event";
-  account: string;
-  kind: "position" | "order" | "execution";
-  seq?: number;
-  ts?: number; // unix seconds at emit
+export const positionEventMessageSchema = msg("position_event", {
+  account: z.string(),
+  kind: z.enum(["position", "order", "execution"]),
+  seq: z.number().optional(),
+  ts: z.number().optional(), // unix seconds at emit
   // Exactly one of these is present, matching `kind`.
-  position?: PositionPayload;
-  order?: WorkingOrderPayload;
-  execution?: ExecutionPayload;
+  position: positionPayloadSchema.optional(),
+  order: workingOrderPayloadSchema.optional(),
+  execution: executionPayloadSchema.optional(),
   // kind="position" only: NT8 Operation (Add | Update | Remove).
-  operation?: string;
-}
+  operation: z.string().optional(),
+}).superRefine((data, ctx) => {
+  // Only the payload named by `kind` is required; extras pass through.
+  if (data[data.kind] === undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: [data.kind],
+      message: `missing ${data.kind} payload for kind=${data.kind}`,
+    });
+  }
+});
+export type PositionEventMessage = z.infer<typeof positionEventMessageSchema>;
 
-export interface ErrorMessage {
-  v: 1;
-  id: string;
-  type: "error";
-  message: string;
-}
+export const errorMessageSchema = reqMsg("error", {
+  message: z.string(),
+});
+export type ErrorMessage = z.infer<typeof errorMessageSchema>;
 
-export type InboundMessage =
-  | HelloMessage
-  | HeartbeatMessage
-  | InstrumentsUpdateMessage
-  | CandlesResponseMessage
-  | BarCloseMessage
-  | SessionCalendarResponseMessage
-  | OpenChartsResponseMessage
-  | SubscribeAckMessage
-  | UnsubscribeAckMessage
-  | PositionsResponseMessage
-  | SubscribePositionsAckMessage
-  | UnsubscribePositionsAckMessage
-  | PositionSyncMessage
-  | PositionEventMessage
-  | ErrorMessage;
+// Registering here both admits a type to parseMessage and adds it to InboundMessage.
+const INBOUND_SCHEMAS = {
+  hello: helloMessageSchema,
+  heartbeat: heartbeatMessageSchema,
+  instruments_update: instrumentsUpdateMessageSchema,
+  candles_response: candlesResponseMessageSchema,
+  bar_close: barCloseMessageSchema,
+  session_calendar_response: sessionCalendarResponseMessageSchema,
+  open_charts_response: openChartsResponseMessageSchema,
+  subscribe_ack: subscribeAckMessageSchema,
+  unsubscribe_ack: unsubscribeAckMessageSchema,
+  positions_response: positionsResponseMessageSchema,
+  subscribe_positions_ack: subscribePositionsAckMessageSchema,
+  unsubscribe_positions_ack: unsubscribePositionsAckMessageSchema,
+  position_sync: positionSyncMessageSchema,
+  position_event: positionEventMessageSchema,
+  error: errorMessageSchema,
+};
+
+export type InboundMessage = z.infer<(typeof INBOUND_SCHEMAS)[keyof typeof INBOUND_SCHEMAS]>;
 export type OutboundMessage =
   | HelloAckMessage
   | DrawZoneMessage
@@ -382,98 +384,11 @@ export type ParseResult =
   | { ok: true; message: AnyMessage }
   | { ok: false; reason: string };
 
-function isCandlePayload(v: unknown): v is CandlePayload {
-  if (!v || typeof v !== "object") return false;
-  const c = v as Record<string, unknown>;
-  return (
-    typeof c.timestamp === "number" &&
-    typeof c.open === "number" &&
-    typeof c.high === "number" &&
-    typeof c.low === "number" &&
-    typeof c.close === "number" &&
-    typeof c.volume === "number"
-  );
-}
-
-// Optional-field check: absent is fine, present-but-wrong-type is not.
-function optNum(v: unknown): boolean {
-  return v === undefined || typeof v === "number";
-}
-function optStr(v: unknown): boolean {
-  return v === undefined || typeof v === "string";
-}
-
-function isPositionPayload(v: unknown): v is PositionPayload {
-  if (!v || typeof v !== "object") return false;
-  const p = v as Record<string, unknown>;
-  return (
-    typeof p.instrument === "string" &&
-    typeof p.symbol === "string" &&
-    typeof p.marketPosition === "string" &&
-    typeof p.quantity === "number" &&
-    optNum(p.averagePrice) &&
-    optNum(p.pointValue) &&
-    optNum(p.tickSize) &&
-    optNum(p.unrealizedPnl) &&
-    optNum(p.marketPrice) &&
-    optNum(p.marketPriceTs)
-  );
-}
-
-function isWorkingOrderPayload(v: unknown): v is WorkingOrderPayload {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.orderId === "string" &&
-    typeof o.name === "string" &&
-    typeof o.instrument === "string" &&
-    typeof o.symbol === "string" &&
-    typeof o.action === "string" &&
-    typeof o.orderType === "string" &&
-    typeof o.state === "string" &&
-    typeof o.quantity === "number" &&
-    typeof o.filled === "number" &&
-    optNum(o.limitPrice) &&
-    optNum(o.stopPrice) &&
-    optNum(o.avgFillPrice) &&
-    optNum(o.time) &&
-    optStr(o.oco)
-  );
-}
-
-function isExecutionPayload(v: unknown): v is ExecutionPayload {
-  if (!v || typeof v !== "object") return false;
-  const x = v as Record<string, unknown>;
-  return (
-    typeof x.executionId === "string" &&
-    typeof x.orderId === "string" &&
-    typeof x.instrument === "string" &&
-    typeof x.symbol === "string" &&
-    typeof x.side === "string" &&
-    typeof x.quantity === "number" &&
-    optNum(x.price) &&
-    optNum(x.time) &&
-    optStr(x.orderName) &&
-    optNum(x.commission)
-  );
-}
-
-function isAccountSnapshotPayload(v: unknown): v is AccountSnapshotPayload {
-  if (!v || typeof v !== "object") return false;
-  const a = v as Record<string, unknown>;
-  return (
-    typeof a.name === "string" &&
-    optStr(a.connection) &&
-    optStr(a.connectionStatus) &&
-    optStr(a.denomination) &&
-    optNum(a.realizedPnl) &&
-    optNum(a.cashValue) &&
-    optNum(a.netLiquidation) &&
-    Array.isArray(a.positions) &&
-    a.positions.every(isPositionPayload) &&
-    Array.isArray(a.orders) &&
-    a.orders.every(isWorkingOrderPayload)
-  );
+function issueReason(type: string, error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (!issue) return `${type}: invalid`;
+  const path = issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+  return `${type}: ${path}${issue.message}`;
 }
 
 export function parseMessage(raw: string): ParseResult {
@@ -493,350 +408,15 @@ export function parseMessage(raw: string): ParseResult {
   if (typeof obj.type !== "string") {
     return { ok: false, reason: "missing type" };
   }
-
-  switch (obj.type) {
-    case "hello": {
-      if (typeof obj.ntVersion !== "string") {
-        return { ok: false, reason: "hello: missing ntVersion" };
-      }
-      if (!Array.isArray(obj.instruments) || !obj.instruments.every((s) => typeof s === "string")) {
-        return { ok: false, reason: "hello: instruments must be string[]" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "hello",
-          ntVersion: obj.ntVersion,
-          instruments: obj.instruments as string[],
-          ...(typeof obj.timeZone === "string" ? { timeZone: obj.timeZone } : {}),
-        },
-      };
-    }
-    case "heartbeat":
-      return { ok: true, message: { v: 1, type: "heartbeat" } };
-    case "instruments_update": {
-      if (!Array.isArray(obj.instruments) || !obj.instruments.every((s) => typeof s === "string")) {
-        return { ok: false, reason: "instruments_update: instruments must be string[]" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "instruments_update",
-          instruments: obj.instruments as string[],
-        },
-      };
-    }
-    case "candles_response": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "candles_response: missing id" };
-      }
-      if (typeof obj.symbol !== "string") {
-        return { ok: false, reason: "candles_response: missing symbol" };
-      }
-      if (typeof obj.timeframe !== "string") {
-        return { ok: false, reason: "candles_response: missing timeframe" };
-      }
-      if (!Array.isArray(obj.candles) || !obj.candles.every(isCandlePayload)) {
-        return { ok: false, reason: "candles_response: candles must be CandlePayload[]" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "candles_response",
-          id: obj.id,
-          symbol: obj.symbol,
-          timeframe: obj.timeframe,
-          candles: obj.candles as CandlePayload[],
-        },
-      };
-    }
-    case "bar_close": {
-      if (typeof obj.symbol !== "string") {
-        return { ok: false, reason: "bar_close: missing symbol" };
-      }
-      if (typeof obj.timeframe !== "string") {
-        return { ok: false, reason: "bar_close: missing timeframe" };
-      }
-      if (!isCandlePayload(obj.candle)) {
-        return { ok: false, reason: "bar_close: invalid candle" };
-      }
-      if (obj.seq !== undefined && typeof obj.seq !== "number") {
-        return { ok: false, reason: "bar_close: seq must be a number" };
-      }
-      if (obj.contract !== undefined && typeof obj.contract !== "string") {
-        return { ok: false, reason: "bar_close: contract must be a string" };
-      }
-      if (obj.backfill !== undefined && typeof obj.backfill !== "boolean") {
-        return { ok: false, reason: "bar_close: backfill must be a boolean" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "bar_close",
-          symbol: obj.symbol,
-          timeframe: obj.timeframe,
-          candle: obj.candle,
-          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
-          ...(typeof obj.contract === "string" ? { contract: obj.contract } : {}),
-          ...(typeof obj.backfill === "boolean" ? { backfill: obj.backfill } : {}),
-        },
-      };
-    }
-    case "session_calendar_response": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "session_calendar_response: missing id" };
-      }
-      const isHoliday = (v: unknown): v is { date: string; description: string } => {
-        if (!v || typeof v !== "object") return false;
-        const h = v as Record<string, unknown>;
-        return typeof h.date === "string" && typeof h.description === "string";
-      };
-      const isPartial = (
-        v: unknown,
-      ): v is { date: string; isEarlyClose: boolean; isLateBegin: boolean; description: string } => {
-        if (!v || typeof v !== "object") return false;
-        const p = v as Record<string, unknown>;
-        return (
-          typeof p.date === "string" &&
-          typeof p.isEarlyClose === "boolean" &&
-          typeof p.isLateBegin === "boolean" &&
-          typeof p.description === "string"
-        );
-      };
-      if (!Array.isArray(obj.holidays) || !obj.holidays.every(isHoliday)) {
-        return { ok: false, reason: "session_calendar_response: bad holidays" };
-      }
-      if (!Array.isArray(obj.partialHolidays) || !obj.partialHolidays.every(isPartial)) {
-        return { ok: false, reason: "session_calendar_response: bad partialHolidays" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "session_calendar_response",
-          id: obj.id,
-          holidays: obj.holidays,
-          partialHolidays: obj.partialHolidays,
-        },
-      };
-    }
-    case "open_charts_response": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "open_charts_response: missing id" };
-      }
-      const isEntry = (v: unknown): v is OpenChartEntry => {
-        if (!v || typeof v !== "object") return false;
-        const e = v as Record<string, unknown>;
-        return (
-          typeof e.window === "string" &&
-          typeof e.symbol === "string" &&
-          typeof e.instrument === "string" &&
-          typeof e.timeframe === "string" &&
-          typeof e.isActive === "boolean" &&
-          typeof e.hasRenderer === "boolean"
-        );
-      };
-      if (!Array.isArray(obj.charts) || !obj.charts.every(isEntry)) {
-        return { ok: false, reason: "open_charts_response: bad charts" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "open_charts_response",
-          id: obj.id,
-          charts: obj.charts as OpenChartEntry[],
-          skippedWindows: typeof obj.skippedWindows === "number" ? obj.skippedWindows : 0,
-        },
-      };
-    }
-    case "subscribe_ack": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "subscribe_ack: missing id" };
-      }
-      if (typeof obj.symbol !== "string") {
-        return { ok: false, reason: "subscribe_ack: missing symbol" };
-      }
-      if (typeof obj.timeframe !== "string") {
-        return { ok: false, reason: "subscribe_ack: missing timeframe" };
-      }
-      if (typeof obj.contract !== "string") {
-        return { ok: false, reason: "subscribe_ack: missing contract" };
-      }
-      if (typeof obj.seedCount !== "number") {
-        return { ok: false, reason: "subscribe_ack: missing seedCount" };
-      }
-      if (typeof obj.seedLastTs !== "number") {
-        return { ok: false, reason: "subscribe_ack: missing seedLastTs" };
-      }
-      if (typeof obj.alreadyActive !== "boolean") {
-        return { ok: false, reason: "subscribe_ack: missing alreadyActive" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "subscribe_ack",
-          id: obj.id,
-          symbol: obj.symbol,
-          timeframe: obj.timeframe,
-          contract: obj.contract,
-          seedCount: obj.seedCount,
-          seedLastTs: obj.seedLastTs,
-          alreadyActive: obj.alreadyActive,
-        },
-      };
-    }
-    case "unsubscribe_ack": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "unsubscribe_ack: missing id" };
-      }
-      if (typeof obj.symbol !== "string") {
-        return { ok: false, reason: "unsubscribe_ack: missing symbol" };
-      }
-      if (typeof obj.timeframe !== "string") {
-        return { ok: false, reason: "unsubscribe_ack: missing timeframe" };
-      }
-      if (typeof obj.removed !== "boolean") {
-        return { ok: false, reason: "unsubscribe_ack: missing removed" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "unsubscribe_ack",
-          id: obj.id,
-          symbol: obj.symbol,
-          timeframe: obj.timeframe,
-          removed: obj.removed,
-        },
-      };
-    }
-    case "positions_response": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "positions_response: missing id" };
-      }
-      if (!Array.isArray(obj.accounts) || !obj.accounts.every(isAccountSnapshotPayload)) {
-        return { ok: false, reason: "positions_response: bad accounts" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "positions_response",
-          id: obj.id,
-          accounts: obj.accounts as AccountSnapshotPayload[],
-        },
-      };
-    }
-    case "subscribe_positions_ack": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "subscribe_positions_ack: missing id" };
-      }
-      if (!Array.isArray(obj.accounts) || !obj.accounts.every((s) => typeof s === "string")) {
-        return { ok: false, reason: "subscribe_positions_ack: accounts must be string[]" };
-      }
-      if (typeof obj.alreadyActive !== "boolean") {
-        return { ok: false, reason: "subscribe_positions_ack: missing alreadyActive" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "subscribe_positions_ack",
-          id: obj.id,
-          accounts: obj.accounts as string[],
-          alreadyActive: obj.alreadyActive,
-        },
-      };
-    }
-    case "unsubscribe_positions_ack": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "unsubscribe_positions_ack: missing id" };
-      }
-      if (typeof obj.removed !== "boolean") {
-        return { ok: false, reason: "unsubscribe_positions_ack: missing removed" };
-      }
-      return {
-        ok: true,
-        message: { v: 1, type: "unsubscribe_positions_ack", id: obj.id, removed: obj.removed },
-      };
-    }
-    case "position_sync": {
-      if (!Array.isArray(obj.accounts) || !obj.accounts.every(isAccountSnapshotPayload)) {
-        return { ok: false, reason: "position_sync: bad accounts" };
-      }
-      if (!optNum(obj.seq) || !optNum(obj.ts) || !optStr(obj.reason)) {
-        return { ok: false, reason: "position_sync: bad seq/ts/reason" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "position_sync",
-          accounts: obj.accounts as AccountSnapshotPayload[],
-          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
-          ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
-          ...(typeof obj.ts === "number" ? { ts: obj.ts } : {}),
-        },
-      };
-    }
-    case "position_event": {
-      if (typeof obj.account !== "string") {
-        return { ok: false, reason: "position_event: missing account" };
-      }
-      if (obj.kind !== "position" && obj.kind !== "order" && obj.kind !== "execution") {
-        return { ok: false, reason: `position_event: bad kind ${String(obj.kind)}` };
-      }
-      if (!optNum(obj.seq) || !optNum(obj.ts) || !optStr(obj.operation)) {
-        return { ok: false, reason: "position_event: bad seq/ts/operation" };
-      }
-      if (obj.kind === "position" && !isPositionPayload(obj.position)) {
-        return { ok: false, reason: "position_event: invalid position payload" };
-      }
-      if (obj.kind === "order" && !isWorkingOrderPayload(obj.order)) {
-        return { ok: false, reason: "position_event: invalid order payload" };
-      }
-      if (obj.kind === "execution" && !isExecutionPayload(obj.execution)) {
-        return { ok: false, reason: "position_event: invalid execution payload" };
-      }
-      return {
-        ok: true,
-        message: {
-          v: 1,
-          type: "position_event",
-          account: obj.account,
-          kind: obj.kind,
-          ...(typeof obj.seq === "number" ? { seq: obj.seq } : {}),
-          ...(typeof obj.ts === "number" ? { ts: obj.ts } : {}),
-          ...(obj.kind === "position" ? { position: obj.position as PositionPayload } : {}),
-          ...(obj.kind === "order" ? { order: obj.order as WorkingOrderPayload } : {}),
-          ...(obj.kind === "execution"
-            ? { execution: obj.execution as ExecutionPayload }
-            : {}),
-          ...(typeof obj.operation === "string" ? { operation: obj.operation } : {}),
-        },
-      };
-    }
-    case "error": {
-      if (typeof obj.id !== "string") {
-        return { ok: false, reason: "error: missing id" };
-      }
-      if (typeof obj.message !== "string") {
-        return { ok: false, reason: "error: missing message" };
-      }
-      return {
-        ok: true,
-        message: { v: 1, type: "error", id: obj.id, message: obj.message },
-      };
-    }
-    default:
-      return { ok: false, reason: `unknown type: ${obj.type}` };
+  // hasOwn: inherited keys like "constructor" are unknown types, not prototype hits.
+  if (!Object.hasOwn(INBOUND_SCHEMAS, obj.type)) {
+    return { ok: false, reason: `unknown type: ${obj.type}` };
   }
+  const result = INBOUND_SCHEMAS[obj.type as keyof typeof INBOUND_SCHEMAS].safeParse(obj);
+  if (!result.success) {
+    return { ok: false, reason: issueReason(obj.type, result.error) };
+  }
+  return { ok: true, message: result.data };
 }
 
 export function encode(message: OutboundMessage): string {

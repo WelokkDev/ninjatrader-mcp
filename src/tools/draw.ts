@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isConnected as defaultIsConnected, send as defaultSend, getBridgeStatus } from "../bridge/index.js";
+import { drawShapeSchema, drawStyleSchema } from "../bridge/protocol.js";
 import type { DrawMessage, DrawShape, DrawStyle, OutboundMessage } from "../bridge/protocol.js";
 import { drawTargetWarning } from "./draw-target.js";
 import { jsonResult, textResult, type ToolResult } from "./result.js";
@@ -17,32 +18,6 @@ export interface DrawDeps {
   send: (message: OutboundMessage) => boolean;
   knownInstruments: () => string[];
 }
-
-const shapeSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("rectangle"),
-    proximal: z.number(),
-    distal: z.number(),
-    fromTs: z.number().int().optional(),
-    toTs: z.number().int().optional(),
-  }),
-  z.object({
-    kind: z.literal("hline"),
-    price: z.number(),
-    fromTs: z.number().int().optional(),
-    toTs: z.number().int().optional(),
-  }),
-  z.object({ kind: z.literal("vline"), ts: z.number().int() }),
-  z.object({ kind: z.literal("text"), ts: z.number().int(), price: z.number(), text: z.string().min(1) }),
-]);
-
-const styleSchema = z
-  .object({
-    color: z.string().optional(),
-    opacity: z.number().min(0).max(1).optional(),
-    label: z.string().optional(),
-  })
-  .optional();
 
 export function createDrawHandler(deps: DrawDeps) {
   return async ({ id, symbol, shape, style }: DrawArgs): Promise<ToolResult> => {
@@ -74,7 +49,7 @@ export function registerDraw(server: McpServer): void {
   server.tool(
     "draw",
     "Draw a chart primitive on the matching NinjaTrader chart. shape is one of: rectangle {proximal,distal,fromTs?,toTs?}, hline {price,fromTs?,toTs?}, vline {ts}, text {ts,price,text}. Optional style {color '#rrggbb', opacity 0..1, label}. id is the draw tag (use clear_zones to remove). TIMEZONE: interpret natural-language dates as America/New_York calendar dates (see src/core/time.ts etDayStart/etDayEnd). For zone/analysis requests ('draw the two zones', 'analyze my chart and draw supply & demand'), consult draw.md at repo root (if present) for the role->style palette and the analyze->draw recipe before drawing.",
-    { id: z.string().min(1), symbol: z.string().min(1), shape: shapeSchema, style: styleSchema },
+    { id: z.string().min(1), symbol: z.string().min(1), shape: drawShapeSchema, style: drawStyleSchema.optional() },
     handler,
   );
 }
