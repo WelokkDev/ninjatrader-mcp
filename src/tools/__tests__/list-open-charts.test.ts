@@ -33,7 +33,8 @@ describe("list_open_charts handler", () => {
       },
     });
     const res = await handler();
-    expect(res.content[0].text).toContain("not connected");
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toContain("not connected");
     expect(called).toBe(false);
   });
 

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Lab } from "../lab/lab.js";
-import { jsonResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 // experiment_result — the ~3KB normalized verdict (funnel + per-mode metrics +
 // provenance + integrity report). NEVER the 176-307MB decisions.jsonl.
@@ -15,7 +15,7 @@ export function registerExperimentResult(server: McpServer, lab: Lab): void {
     },
     async ({ experimentId }): Promise<ToolResult> => {
       const status = lab.status(experimentId);
-      if (!status) return jsonResult({ error: `unknown experiment ${experimentId}` });
+      if (!status) return errorResult(`unknown experiment ${experimentId}`);
       const result = lab.result(experimentId);
       if (!result) return jsonResult({ pending: true, status: status.status, etaText: status.etaText });
       return jsonResult(result);

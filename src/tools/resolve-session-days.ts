@@ -19,7 +19,7 @@ import type { SessionDay, SessionTemplate } from "../core/sessions/types.js";
 import type { Timeframe } from "../core/types.js";
 import { expectedBarCount } from "../core/cache/validator.js";
 import { formatLocalDateTime } from "../core/time.js";
-import { jsonResult, textResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 const RELATIVE_ANCHORS = [
   "today",
@@ -274,7 +274,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     n,
   }: ResolveSessionDaysArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
-      return textResult(
+      return errorResult(
         `Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`,
       );
     }
@@ -282,17 +282,17 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     const hasExplicit = start !== undefined || end !== undefined;
     const hasRelative = relative !== undefined;
     if (hasExplicit === hasRelative) {
-      return textResult(
+      return errorResult(
         "Provide either an explicit range (start + end, YYYY-MM-DD) or a relative anchor — exactly one of the two.",
       );
     }
     if (hasExplicit && (start === undefined || end === undefined)) {
-      return textResult(
+      return errorResult(
         "Provide either start + end together (YYYY-MM-DD) — an explicit range needs both.",
       );
     }
     if (relative === "last-n-sessions" && (n === undefined || !Number.isInteger(n) || n < 1)) {
-      return textResult('relative "last-n-sessions" requires `n` — a positive integer session count.');
+      return errorResult('relative "last-n-sessions" requires `n` — a positive integer session count.');
     }
 
     const config = getInstrumentConfig(symbol);
@@ -321,7 +321,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
         if (endEp.flag && endEp.flag.input !== startEp.flag?.input) flags.push(endEp.flag);
 
         if (!startEp.flag && !endEp.flag && startEp.day.startUnix >= endEp.day.endUnix) {
-          return textResult(
+          return errorResult(
             `start session-day ${start} is not before end session-day ${end}`,
           );
         }
@@ -371,7 +371,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
       }
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      return textResult(`Could not resolve session-days for ${symbol}: ${m}`);
+      return errorResult(`Could not resolve session-days for ${symbol}: ${m}`);
     }
 
     // Surface calendar-closed dates inside the resolved window as flags —

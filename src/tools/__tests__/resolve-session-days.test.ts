@@ -215,6 +215,7 @@ describe("resolve_session_days input validation", () => {
   it("rejects unsupported symbols", async () => {
     const handler = harness(WED_1500_ET);
     const res = await handler({ symbol: "ZZ", relative: "today" } as never);
-    expect(res.content[0].text).toMatch(/Unsupported symbol/);
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toMatch(/Unsupported symbol/);
   });
 });

@@ -5,7 +5,7 @@ import {
 } from "../bridge/index.js";
 import { drawZoneFields } from "../bridge/protocol.js";
 import type { DrawZoneMessage, OutboundMessage } from "../bridge/protocol.js";
-import { jsonResult, textResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 export interface DrawZoneArgs {
   id: string;
@@ -31,7 +31,7 @@ export function createDrawZoneHandler(deps: DrawZoneDeps) {
     toTs,
   }: DrawZoneArgs): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return textResult(
+      return errorResult(
         "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw_zone.",
       );
     }

@@ -7,7 +7,7 @@ import { ledger as defaultLedger, type Ledger } from "../db/ledger.js";
 import { ingestTrades } from "../trade-source/ingest.js";
 import { NinjaTraderSource } from "../trade-source/ninjatrader.js";
 import type { TradeSource } from "../trade-source/types.js";
-import { jsonResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 // get_trades + sync_trades — thin fetch-or-read shells over the ledger + NinjaTrader source.
 // Both tools follow the same pattern as list-trades.ts (createXHandler factory + registerX(server) calling server.tool).
@@ -109,7 +109,7 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
       } catch (err) {
         if (trades.length === 0) {
           // No pre-existing rows and ingest failed — surface the error.
-          return jsonResult({ error: err instanceof Error ? err.message : String(err) });
+          return errorResult(err instanceof Error ? err.message : String(err));
         }
         const msg = err instanceof Error ? err.message : String(err);
         return jsonResult({
@@ -160,7 +160,7 @@ export function createSyncTradesHandler(deps?: TradeToolDeps) {
       const { fetched, inserted } = await ingestTrades(source, ledger, { from, to });
       return jsonResult({ fetched, inserted });
     } catch (err) {
-      return jsonResult({ error: err instanceof Error ? err.message : String(err) });
+      return errorResult(err instanceof Error ? err.message : String(err));
     }
   };
 }

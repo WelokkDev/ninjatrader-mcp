@@ -25,7 +25,7 @@ import {
   writeDerivedForSessionDay,
 } from "../core/cache/derived.js";
 import { prefetchManager } from "../prefetch-instance.js";
-import { jsonResult, textResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 // A connected call fetches at most this many uncached session-days inline;
 // colder ranges are refused toward prefetch_candles so a synchronous fill
@@ -131,11 +131,11 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     limit = 500,
   }: GetCandlesArgs): Promise<ToolResult> => {
     if (!SUPPORTED_SYMBOLS.includes(symbol)) {
-      return textResult(`Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`);
+      return errorResult(`Unsupported symbol: ${symbol}. Supported: ${SUPPORTED_SYMBOLS.join(", ")}`);
     }
 
     if (!ISO_DATE_RE.test(start) || !ISO_DATE_RE.test(end)) {
-      return textResult("Invalid date format. Use YYYY-MM-DD.");
+      return errorResult("Invalid date format. Use YYYY-MM-DD.");
     }
 
     // Resolve start/end as session-days in the instrument's session
@@ -151,16 +151,16 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       endTs = endRange.endUnix;
     } catch (err) {
       if (err instanceof SessionClosedError) {
-        return textResult(
+        return errorResult(
           `"${err.label}" is a market holiday${err.description ? ` (${err.description})` : ""} — no session that day. Pick an adjacent trading day.`,
         );
       }
       const m = err instanceof Error ? err.message : String(err);
-      return textResult(`Invalid session-day for ${symbol}: ${m}`);
+      return errorResult(`Invalid session-day for ${symbol}: ${m}`);
     }
 
     if (startTs >= endTs) {
-      return textResult(`start session-day ${start} is not before end session-day ${end}`);
+      return errorResult(`start session-day ${start} is not before end session-day ${end}`);
     }
 
     const requestedDays = sessionDaysOverlapping(startTs, endTs, config.session, calendar);
@@ -169,7 +169,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       0,
     );
     if (matched > limit) {
-      return textResult(
+      return errorResult(
         `Range [${start}, ${end}] at ${timeframe} holds ~${matched} bars, over the limit ${limit}. ` +
           `If the range is already cached, narrow it or re-issue with limit >= ${matched}. ` +
           `If it still needs fetching from NinjaTrader, start a background prefetch_candles job instead, then re-read here.`,
@@ -186,7 +186,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         (day) => classifySessionDay(deps.db, symbol, day, rawTF, nowUnix) !== "complete",
       );
       if (coldDays.length > MAX_INLINE_COLD_DAYS) {
-        return textResult(
+        return errorResult(
           `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
             `over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
             `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +

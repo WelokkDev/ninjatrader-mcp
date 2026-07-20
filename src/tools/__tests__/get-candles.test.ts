@@ -150,8 +150,8 @@ describe("get_candles 15s raw stream", () => {
   it("computes 15s geometry and fails closed at the default limit", async () => {
     const { handler, request } = harness({ connected: true });
     const text = await call(handler, { timeframe: "15s" });
+    expect(JSON.parse(text).error).toMatch(/over the limit 500/);
     expect(text).toMatch(/5520/);
-    expect(text).toMatch(/over the limit 500/);
     expect(request).not.toHaveBeenCalled();
   });
 });

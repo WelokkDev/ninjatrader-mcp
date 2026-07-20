@@ -4,7 +4,7 @@ import { isConnected as defaultIsConnected, send as defaultSend, getBridgeStatus
 import { drawShapeSchema, drawStyleSchema } from "../bridge/protocol.js";
 import type { DrawMessage, DrawShape, DrawStyle, OutboundMessage } from "../bridge/protocol.js";
 import { drawTargetWarning } from "./draw-target.js";
-import { jsonResult, textResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 export interface DrawArgs {
   id: string;
@@ -22,7 +22,7 @@ export interface DrawDeps {
 export function createDrawHandler(deps: DrawDeps) {
   return async ({ id, symbol, shape, style }: DrawArgs): Promise<ToolResult> => {
     if (!deps.isConnected()) {
-      return textResult(
+      return errorResult(
         "NinjaTrader is not connected — start NT8 with the McpBridge AddOn before calling draw.",
       );
     }

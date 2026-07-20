@@ -9,7 +9,7 @@ import {
   type TrackedOrder,
   type TrackedPosition,
 } from "../live/positions.js";
-import { jsonResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 const NOT_STARTED =
   "live feed runtime not started — startRuntime() has not run in this process";
@@ -273,7 +273,7 @@ function buildAccountsView(
 export function createGetPositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
+    if (!runtime) return errorResult(NOT_STARTED, { ok: false });
     const now = deps.nowUnix ? deps.nowUnix() : Math.floor(Date.now() / 1000);
     const bridge = deps.bridgeStatus();
 
@@ -321,26 +321,32 @@ export function createGetPositionsHandler(deps: PositionsToolsDeps) {
 export function createSubscribeLivePositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
+    if (!runtime) return errorResult(NOT_STARTED, { ok: false });
     const res = await runtime.positions.subscribe();
-    return jsonResult({
-      ok: res.ok,
-      accounts: res.accounts,
-      alreadyActive: res.alreadyActive,
-      ...(res.error ? { error: res.error } : {}),
-    });
+    const view = { ok: res.ok, accounts: res.accounts, alreadyActive: res.alreadyActive };
+    return res.ok
+      ? jsonResult(view)
+      : errorResult(res.error ?? "subscribe_live_positions failed", view);
   };
 }
 
 export function createUnsubscribeLivePositionsHandler(deps: PositionsToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
+    if (!runtime) return errorResult(NOT_STARTED, { ok: false });
     const res = await runtime.positions.unsubscribe();
+    if (!res.ok) {
+      return errorResult(res.error ?? "unsubscribe_live_positions failed", {
+        ok: false,
+        removed: res.removed,
+      });
+    }
+    // An error string on ok:true means the NT8-side release is unconfirmed —
+    // desired OFF is durable and re-enforced on reconnect, so only a warning.
     return jsonResult({
-      ok: res.ok,
+      ok: true,
       removed: res.removed,
-      ...(res.error ? { error: res.error } : {}),
+      ...(res.error ? { warning: res.error } : {}),
     });
   };
 }

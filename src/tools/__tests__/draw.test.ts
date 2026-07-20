@@ -53,7 +53,8 @@ describe("draw tool", () => {
     const { handler, sent } = harness(false);
     const res = await handler({ id: "x", symbol: "NQ", shape: { kind: "vline", ts: 100 } });
     expect(sent).toHaveLength(0);
-    expect(res.content[0].text).toMatch(/not connected/i);
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(res.content[0].text).error).toMatch(/not connected/i);
   });
 
   it("adds a warning when the target symbol has no attached chart", async () => {

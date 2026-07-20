@@ -59,7 +59,7 @@ the N-day high/low:
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import db from "../../db/connection.js";
-import { jsonResult } from "../../tools/result.js";
+import { errorResult, jsonResult } from "../../tools/result.js";
 
 // Reads candles already in the SQLite cache (candles.db). Timestamps are unix
 // SECONDS. Companion to get_candles: get_candles fills the cache, this reads it.
@@ -81,15 +81,22 @@ export function registerMyFirstScan(server: McpServer): void {
             WHERE symbol = ? AND timeframe = '5m' AND timestamp > ?`,
         )
         .get(symbol, cutoff) as { hi: number | null; lo: number | null; bars: number };
-      const payload =
-        row.bars === 0
-          ? { symbol, days, error: "no cached 5m candles in range — run get_candles first" }
-          : { symbol, days, high: row.hi, low: row.lo, bars: row.bars };
-      return jsonResult(payload);
+      if (row.bars === 0) {
+        return errorResult("no cached 5m candles in range — run get_candles first", {
+          symbol,
+          days,
+        });
+      }
+      return jsonResult({ symbol, days, high: row.hi, low: row.lo, bars: row.bars });
     },
   );
 }
 ```
+
+Result convention, used by every public tool: `jsonResult(payload)` for
+success (add a `warning` key for partial results), `errorResult(message,
+extra?)` for failure — JSON `{ ...extra, error }` with the MCP `isError`
+flag set.
 
 Wire it into `src/private/index.ts` (two lines):
 

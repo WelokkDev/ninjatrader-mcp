@@ -60,7 +60,9 @@ function parse(res: { content: Array<{ text: string }> }): Record<string, unknow
 describe("subscribe_live_bars", () => {
   it("errors cleanly when the live runtime is not started", async () => {
     const handler = createSubscribeLiveBarsHandler(makeDeps(null));
-    const out = parse(await handler({ symbol: "NQ", timeframe: "5m" }));
+    const res = await handler({ symbol: "NQ", timeframe: "5m" });
+    const out = parse(res);
+    expect(res.isError).toBe(true);
     expect(out.ok).toBe(false);
     expect(out.error).toMatch(/runtime not started/i);
   });
@@ -78,7 +80,9 @@ describe("subscribe_live_bars", () => {
       throw new Error("Request subscribe_bars (x) timed out after 15000ms");
     });
     const handler = createSubscribeLiveBarsHandler(makeDeps(makeRuntime({ request })));
-    const out = parse(await handler({ symbol: "NQ", timeframe: "5m" }));
+    const res = await handler({ symbol: "NQ", timeframe: "5m" });
+    const out = parse(res);
+    expect(res.isError).toBe(true);
     expect(out.ok).toBe(false);
     expect(out.error).toMatch(/timed out/);
     expect(out.acked).toBe(false);
@@ -143,7 +147,10 @@ describe("live_feed_status", () => {
 
   it("reports an empty-but-valid shape with no runtime", async () => {
     const handler = createLiveFeedStatusHandler(makeDeps(null));
-    const out = parse(await handler({}));
+    const res = await handler({});
+    const out = parse(res);
+    expect(res.isError).toBe(true);
     expect(out.error).toMatch(/runtime not started/i);
+    expect(out.bridge).toBeDefined();
   });
 });

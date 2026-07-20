@@ -207,7 +207,9 @@ function parse(res: { content: Array<{ text: string }> }): Record<string, unknow
 
 describe("get_positions", () => {
   it("errors cleanly when the runtime is not started", async () => {
-    const out = parse(await createGetPositionsHandler(makeDeps(null))({}));
+    const res = await createGetPositionsHandler(makeDeps(null))({});
+    const out = parse(res);
+    expect(res.isError).toBe(true);
     expect(out.ok).toBe(false);
     expect(out.error).toMatch(/runtime not started/i);
   });

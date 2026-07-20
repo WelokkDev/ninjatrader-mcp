@@ -4,7 +4,7 @@ import { getBridgeStatus } from "../bridge/index.js";
 import { consumerHub } from "../bridge/consumer.js";
 import { getLiveFeedRuntime, type LiveFeedRuntime } from "../live/runtime.js";
 import { MCP_SOURCE, type LiveTimeframe } from "../live/registry.js";
-import { jsonResult, type ToolResult } from "./result.js";
+import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 const LIVE_TF = z.enum(["15s", "5m", "15m"]);
 
@@ -32,16 +32,18 @@ export function createSubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
     timeframe: LiveTimeframe;
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
+    if (!runtime) return errorResult(NOT_STARTED, { ok: false });
     const res = await runtime.registry.ensure(symbol, timeframe, MCP_SOURCE);
-    return jsonResult({
+    const view = {
       ok: res.ok,
       symbol,
       timeframe,
       acked: res.state.acked,
       contract: res.state.contract,
-      ...(res.error ? { error: res.error } : {}),
-    });
+    };
+    return res.ok
+      ? jsonResult(view)
+      : errorResult(res.error ?? "subscribe_live_bars failed", view);
   };
 }
 
@@ -54,7 +56,7 @@ export function createUnsubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
     timeframe: LiveTimeframe;
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
-    if (!runtime) return jsonResult({ ok: false, error: NOT_STARTED });
+    if (!runtime) return errorResult(NOT_STARTED, { ok: false });
     const res = await runtime.registry.release(symbol, timeframe, MCP_SOURCE);
     return jsonResult({
       ok: true,
@@ -70,7 +72,7 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
   return async (_args: Record<string, never>): Promise<ToolResult> => {
     const runtime = deps.runtime();
     if (!runtime) {
-      return jsonResult({ error: NOT_STARTED, bridge: deps.bridgeStatus() });
+      return errorResult(NOT_STARTED, { bridge: deps.bridgeStatus() });
     }
     const recorderByKey = new Map(
       runtime.recorder.status().map((s) => [`${s.symbol}:${s.timeframe}`, s]),

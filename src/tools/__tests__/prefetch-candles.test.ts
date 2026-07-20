@@ -74,7 +74,8 @@ describe("prefetch_candles input validation", () => {
   it("refuses to start while NinjaTrader is disconnected", async () => {
     const { handlers } = harness({ connected: false });
     const res = await handlers.start({ symbol: "NQ", timeframe: "15m", start: "2026-05-04", end: "2026-05-05" });
-    expect(text(res)).toMatch(/not connected/i);
+    expect(res.isError).toBe(true);
+    expect(JSON.parse(text(res)).error).toMatch(/not connected/i);
   });
 
   it("rejects a market-holiday endpoint and excludes closed days mid-range", async () => {
