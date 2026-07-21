@@ -118,10 +118,40 @@ export function initializeSchema(db: Database.Database): void {
       updated_at    INTEGER NOT NULL
     );
 
+    -- Append-only audit of every order-submission attempt — allowed, blocked,
+    -- or failed. Distinct from the trades table (filled round-trips): this is
+    -- the forensic record of what the write path was ASKED to do. Surrogate PK
+    -- so retries with the same client_order_id each get their own row.
+    CREATE TABLE IF NOT EXISTS order_submissions (
+      id              INTEGER PRIMARY KEY,
+      ts              INTEGER NOT NULL,   -- unix seconds
+      source          TEXT    NOT NULL,   -- 'claude' | 'algo' | ...
+      client_order_id TEXT    NOT NULL,   -- idempotency key (= NT8 order Name)
+      account         TEXT    NOT NULL,
+      symbol          TEXT    NOT NULL,
+      action          TEXT    NOT NULL,   -- 'Buy' | 'Sell'
+      order_type      TEXT    NOT NULL,   -- 'Market' | 'Limit' | 'Stop' | 'StopLimit'
+      quantity        INTEGER NOT NULL,
+      limit_price     REAL,
+      stop_price      REAL,
+      tif             TEXT    NOT NULL,   -- 'Day' | 'Gtc'
+      decision        TEXT    NOT NULL,   -- 'submitted' | 'blocked' | 'failed'
+      deny_reason     TEXT,               -- gate reason when decision='blocked'
+      contract        TEXT,               -- resolved contract on submit
+      order_id        TEXT,               -- NT8 order id on submit (may be null)
+      state           TEXT,               -- initial NT8 order state on submit
+      error           TEXT,               -- error text when decision='failed'
+      reason          TEXT                -- caller-supplied rationale
+    );
+
     CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades (run_id);
     CREATE INDEX IF NOT EXISTS idx_trades_mode ON trades (mode);
     CREATE INDEX IF NOT EXISTS idx_trade_decisions_run_id
       ON trade_decisions (run_id);
+    CREATE INDEX IF NOT EXISTS idx_order_submissions_client_order_id
+      ON order_submissions (client_order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_submissions_ts
+      ON order_submissions (ts);
   `);
 
   // Forward migrations for columns added after a `trades` table already existed.

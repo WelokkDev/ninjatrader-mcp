@@ -340,6 +340,44 @@ export const positionEventMessageSchema = msg("position_event", {
 });
 export type PositionEventMessage = z.infer<typeof positionEventMessageSchema>;
 
+// ---------- order placement (write path) ----------
+// Fields are shared with the place_order tool's params so the wire and tool
+// surfaces never drift. Cross-field rules (a Limit needs limitPrice) live in
+// the ExecutionService. clientOrderId is the idempotency key — it rides
+// through as the NT8 order Name and the C# side dedupes retries on it.
+
+export const ORDER_ACTIONS = ["Buy", "Sell"] as const;
+export const ORDER_TYPES = ["Market", "Limit", "Stop", "StopLimit"] as const;
+export const ORDER_TIFS = ["Day", "Gtc"] as const;
+
+export const placeOrderFields = {
+  account: z.string().min(1),
+  symbol: z.string().min(1),
+  action: z.enum(ORDER_ACTIONS),
+  orderType: z.enum(ORDER_TYPES),
+  quantity: z.number().int().positive(),
+  limitPrice: z.number().optional(),
+  stopPrice: z.number().optional(),
+  tif: z.enum(ORDER_TIFS),
+  clientOrderId: z.string().min(1).max(50),
+};
+export const placeOrderMessageSchema = reqMsg("place_order", placeOrderFields);
+export type PlaceOrderMessage = z.infer<typeof placeOrderMessageSchema>;
+
+/** Synchronous accept of a submit call — NOT a fill and NOT a broker accept.
+ *  The order then transitions asynchronously (Accepted → Working → Filled, or
+ *  → Rejected) via the position_event order stream. `orderId` may be absent
+ *  until NT8 assigns one; correlate on `clientOrderId` (the order Name). */
+export const orderAckMessageSchema = reqMsg("order_ack", {
+  clientOrderId: z.string(),
+  contract: z.string(), // resolved NT8 contract, e.g. "MNQ 09-26"
+  orderId: z.string().optional(),
+  state: z.string(), // initial NT8 OrderState, e.g. "Submitted"
+  // The C# gate/dedup short-circuited without a fresh Submit (idempotent replay).
+  deduped: z.boolean().optional(),
+});
+export type OrderAckMessage = z.infer<typeof orderAckMessageSchema>;
+
 export const errorMessageSchema = reqMsg("error", {
   message: z.string(),
 });
@@ -361,6 +399,7 @@ const INBOUND_SCHEMAS = {
   unsubscribe_positions_ack: unsubscribePositionsAckMessageSchema,
   position_sync: positionSyncMessageSchema,
   position_event: positionEventMessageSchema,
+  order_ack: orderAckMessageSchema,
   error: errorMessageSchema,
 };
 
@@ -377,7 +416,8 @@ export type OutboundMessage =
   | UnsubscribeBarsMessage
   | RequestPositionsMessage
   | SubscribePositionsMessage
-  | UnsubscribePositionsMessage;
+  | UnsubscribePositionsMessage
+  | PlaceOrderMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

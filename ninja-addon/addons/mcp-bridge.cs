@@ -800,6 +800,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 					break;
 				}
 
+				// Off the read thread: ResolveInstrument can block and Submit
+				// must never stall heartbeats.
+				case "place_order":
+				{
+					var o = obj;
+					Task.Run(() => HandlePlaceOrder(o));
+					break;
+				}
+
 				default:
 					Log("unknown message type: " + type);
 					break;
@@ -2634,6 +2643,233 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				Log("SendPositionSync failed: " + ex.Message);
 			}
+		}
+
+		// ---------- order placement (write path) ----------
+		//
+		// Crosses the historically read-only boundary. This is the KEYSTONE
+		// safety gate: it is independent of the TS-side gate and, because there
+		// is no C# compiler on the trading machine, it cannot be recompiled away
+		// by an agent. It fails closed — a missing/garbled trading.config.json,
+		// a disabled flag, an off-allow-list account, or an over-cap quantity all
+		// reject before Submit(). Idempotency: a repeated clientOrderId replays
+		// the prior ack instead of firing a second order.
+
+		private const string TradingConfigFileName = "trading.config.json";
+
+		private readonly object orderLock = new object();
+		private readonly Dictionary<string, SubmittedOrder> submittedOrders =
+			new Dictionary<string, SubmittedOrder>(StringComparer.Ordinal);
+
+		private class SubmittedOrder
+		{
+			public string Contract;
+			public string OrderId;
+			public string State;
+		}
+
+		private class TradingGateConfig
+		{
+			public bool         enabled;
+			public List<string> allowAccounts;
+			public int          maxQty;
+		}
+
+		// Re-read every submit so the gate can be toggled without an NT8 restart.
+		// Returns null on any problem — the caller treats null as "disabled."
+		private TradingGateConfig LoadTradingGate()
+		{
+			var path = Path.Combine(Globals.UserDataDir, TradingConfigFileName);
+			if (!File.Exists(path))
+			{
+				Log("trading gate: no " + TradingConfigFileName + " at " + path + " — write path disabled (create it with {\"enabled\":true,\"allowAccounts\":[\"Sim101\"],\"maxQty\":2})");
+				return null;
+			}
+			try
+			{
+				var json = File.ReadAllText(path);
+				return Json.Deserialize<TradingGateConfig>(json);
+			}
+			catch (Exception ex)
+			{
+				Log("trading gate: failed to parse " + TradingConfigFileName + " — write path disabled: " + ex.Message);
+				return null;
+			}
+		}
+
+		private Account FindAccount(string name)
+		{
+			try
+			{
+				lock (Account.All)
+				{
+					foreach (var a in Account.All)
+					{
+						if (a == null) continue;
+						try { if (string.Equals(a.Name, name, StringComparison.Ordinal)) return a; }
+						catch { /* account mid-teardown */ }
+					}
+				}
+			}
+			catch (Exception ex) { Log("FindAccount failed: " + ex.Message); }
+			return null;
+		}
+
+		private static bool TryParseAction(string s, out OrderAction a)
+		{
+			a = OrderAction.Buy;
+			if (string.Equals(s, "Buy",  StringComparison.OrdinalIgnoreCase)) { a = OrderAction.Buy;  return true; }
+			if (string.Equals(s, "Sell", StringComparison.OrdinalIgnoreCase)) { a = OrderAction.Sell; return true; }
+			return false;
+		}
+
+		private static bool TryParseOrderType(string s, out OrderType t)
+		{
+			t = OrderType.Market;
+			if (string.Equals(s, "Market",    StringComparison.OrdinalIgnoreCase)) { t = OrderType.Market;     return true; }
+			if (string.Equals(s, "Limit",     StringComparison.OrdinalIgnoreCase)) { t = OrderType.Limit;      return true; }
+			if (string.Equals(s, "Stop",      StringComparison.OrdinalIgnoreCase)) { t = OrderType.StopMarket; return true; }
+			if (string.Equals(s, "StopLimit", StringComparison.OrdinalIgnoreCase)) { t = OrderType.StopLimit;  return true; }
+			return false;
+		}
+
+		private static bool TryParseTif(string s, out TimeInForce t)
+		{
+			t = TimeInForce.Day;
+			if (string.Equals(s, "Day", StringComparison.OrdinalIgnoreCase)) { t = TimeInForce.Day; return true; }
+			if (string.Equals(s, "Gtc", StringComparison.OrdinalIgnoreCase)) { t = TimeInForce.Gtc; return true; }
+			return false;
+		}
+
+		private void HandlePlaceOrder(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("place_order missing id; dropping"); return; }
+
+			try
+			{
+				var clientOrderId = GetString(obj, "clientOrderId");
+				var accountName   = GetString(obj, "account");
+				var symbol        = GetString(obj, "symbol");
+				var actionStr     = GetString(obj, "action");
+				var typeStr       = GetString(obj, "orderType");
+				var tifStr        = GetString(obj, "tif");
+				var qtyN          = GetInt(obj, "quantity");
+
+				if (string.IsNullOrEmpty(clientOrderId)) { SendErrorResponse(id, "place_order missing clientOrderId"); return; }
+				if (string.IsNullOrEmpty(accountName))   { SendErrorResponse(id, "place_order missing account");       return; }
+				if (string.IsNullOrEmpty(symbol))        { SendErrorResponse(id, "place_order missing symbol");        return; }
+				if (!qtyN.HasValue || qtyN.Value <= 0)   { SendErrorResponse(id, "place_order quantity must be a positive integer"); return; }
+				var quantity = qtyN.Value;
+
+				// Idempotency: a repeated clientOrderId never fires a second
+				// order — replay the original ack. Only submitted orders are
+				// remembered, so a previously-blocked id can still be retried.
+				lock (orderLock)
+				{
+					SubmittedOrder prior;
+					if (submittedOrders.TryGetValue(clientOrderId, out prior))
+					{
+						Log("place_order dedup: clientOrderId=" + clientOrderId + " already submitted; replaying ack");
+						SendOrderAck(id, clientOrderId, prior.Contract, prior.OrderId, prior.State, true);
+						return;
+					}
+				}
+
+				// Gate — keystone, fail-closed, re-read fresh every submit.
+				var gate = LoadTradingGate();
+				if (gate == null || !gate.enabled)
+				{
+					SendErrorResponse(id, "AddOn trading gate disabled (trading.config.json missing or enabled=false)");
+					Log("place_order BLOCKED (gate disabled) account=" + accountName + " " + actionStr + " " + quantity + " " + symbol);
+					return;
+				}
+				if (gate.allowAccounts == null || !gate.allowAccounts.Contains(accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list");
+					Log("place_order BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+				if (quantity > gate.maxQty)
+				{
+					SendErrorResponse(id, "quantity " + quantity + " exceeds AddOn maxQty " + gate.maxQty);
+					Log("place_order BLOCKED (qty>max) qty=" + quantity + " max=" + gate.maxQty + " account=" + accountName);
+					return;
+				}
+
+				OrderAction action;
+				OrderType   orderType;
+				TimeInForce tif;
+				if (!TryParseAction(actionStr, out action))     { SendErrorResponse(id, "invalid action: "    + actionStr); return; }
+				if (!TryParseOrderType(typeStr, out orderType)) { SendErrorResponse(id, "invalid orderType: " + typeStr);   return; }
+				if (!TryParseTif(tifStr, out tif))              { SendErrorResponse(id, "invalid tif: "       + tifStr);    return; }
+
+				var needLimit = orderType == OrderType.Limit || orderType == OrderType.StopLimit;
+				var needStop  = orderType == OrderType.StopMarket || orderType == OrderType.StopLimit;
+				var limitPrice = GetDouble(obj, "limitPrice");
+				var stopPrice  = GetDouble(obj, "stopPrice");
+				if (needLimit && !(limitPrice > 0)) { SendErrorResponse(id, typeStr + " requires a positive limitPrice"); return; }
+				if (needStop  && !(stopPrice  > 0)) { SendErrorResponse(id, typeStr + " requires a positive stopPrice");  return; }
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName); return; }
+
+				var instrument = ResolveInstrument(symbol);
+				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol); return; }
+
+				Order order;
+				try
+				{
+					order = account.CreateOrder(
+						instrument, action, orderType, OrderEntry.Automated, tif,
+						quantity, limitPrice, stopPrice,
+						"",              // oco — no bracket in phase 1
+						clientOrderId,   // name — correlation + dedupe key (<= 50 chars)
+						Globals.MaxDate, // gtd — non-GTD
+						null);           // customOrder
+				}
+				catch (Exception ex) { SendErrorResponse(id, "CreateOrder failed: " + ex.Message); return; }
+
+				try { account.Submit(new[] { order }); }
+				catch (Exception ex) { SendErrorResponse(id, "Submit failed: " + ex.Message); return; }
+
+				var contract = instrument.FullName ?? symbol;
+				string orderId = null;
+				var state = "Submitted";
+				try { orderId = order.OrderId; }          catch { /* not assigned yet */ }
+				try { state = order.OrderState.ToString(); } catch { /* transient */ }
+
+				lock (orderLock)
+				{
+					submittedOrders[clientOrderId] =
+						new SubmittedOrder { Contract = contract, OrderId = orderId, State = state };
+				}
+
+				Log("place_order SUBMITTED account=" + accountName + " " + actionStr + " " + quantity
+					+ " " + contract + " type=" + typeStr + " coid=" + clientOrderId + " state=" + state);
+				SendOrderAck(id, clientOrderId, contract, orderId, state, false);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "place_order failed: " + ex.Message);
+			}
+		}
+
+		private void SendOrderAck(string id, string clientOrderId, string contract,
+			string orderId, string state, bool deduped)
+		{
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",             1 },
+				{ "id",            id },
+				{ "type",          "order_ack" },
+				{ "clientOrderId", clientOrderId ?? "" },
+				{ "contract",      contract ?? "" },
+				{ "state",         state ?? "" },
+				{ "deduped",       deduped },
+			};
+			if (!string.IsNullOrEmpty(orderId)) payload["orderId"] = orderId;
+			SendFireAndForget(Json.Serialize(payload), "order_ack coid=" + clientOrderId + " id=" + id);
 		}
 
 		// ---------- logging ----------
