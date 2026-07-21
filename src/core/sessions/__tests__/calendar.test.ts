@@ -6,7 +6,6 @@ import {
   loadCalendar,
   recordObservedClose,
   upsertFromSync,
-  wallClockHHMM,
 } from "../calendar.js";
 
 const TPL = "cme_us_index_futures_eth";
@@ -136,13 +135,5 @@ describe("upsertFromSync", () => {
       source: "manual",
       description: "operator override",
     });
-  });
-});
-
-describe("wallClockHHMM", () => {
-  it("renders ET wall clock under EST and EDT", () => {
-    // 2026-02-16 13:00 EST = 18:00 UTC; 2026-04-03 09:15 EDT = 13:15 UTC.
-    expect(wallClockHHMM(Math.floor(Date.UTC(2026, 1, 16, 18, 0, 0) / 1000), "America/New_York")).toBe("13:00");
-    expect(wallClockHHMM(Math.floor(Date.UTC(2026, 3, 3, 13, 15, 0) / 1000), "America/New_York")).toBe("09:15");
   });
 });

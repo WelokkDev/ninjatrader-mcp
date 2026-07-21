@@ -117,22 +117,3 @@ export function upsertFromSync(
      WHERE session_calendar.source != 'manual'`,
   ).run(templateName, e.date, e.kind, e.description ?? null);
 }
-
-const HHMM_FMT_CACHE = new Map<string, Intl.DateTimeFormat>();
-
-/** "HH:MM" wall clock of a unix instant in `tz` (h23, DST-safe via Intl). */
-export function wallClockHHMM(unix: number, tz: string): string {
-  let fmt = HHMM_FMT_CACHE.get(tz);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    });
-    HHMM_FMT_CACHE.set(tz, fmt);
-  }
-  const parts = fmt.formatToParts(new Date(unix * 1000));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  return `${get("hour")}:${get("minute")}`;
-}

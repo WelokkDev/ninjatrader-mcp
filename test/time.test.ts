@@ -6,6 +6,8 @@ import {
   formatExchangeTime,
   formatUtc,
   formatLocalISO,
+  wallClockHHMM,
+  wallClockToUnix,
 } from "../src/core/time.js";
 
 // These tests pin down the canonical timezone convention used across the
@@ -96,5 +98,90 @@ describe("formatLocalISO — ISO-8601 with explicit offset", () => {
       const parsed = Math.floor(new Date(iso).getTime() / 1000);
       expect(parsed).toBe(ts);
     }
+  });
+});
+
+describe("wallClockHHMM", () => {
+  it("renders ET wall clock under EST and EDT", () => {
+    // 2026-02-16 13:00 EST = 18:00 UTC; 2026-04-03 09:15 EDT = 13:15 UTC.
+    expect(wallClockHHMM(Math.floor(Date.UTC(2026, 1, 16, 18, 0, 0) / 1000), "America/New_York")).toBe("13:00");
+    expect(wallClockHHMM(Math.floor(Date.UTC(2026, 3, 3, 13, 15, 0) / 1000), "America/New_York")).toBe("09:15");
+  });
+});
+
+// DST transition days: ET springs forward 2026-03-08 / 2025-03-09 and
+// falls back 2026-11-01 / 2025-11-02 (transitions at 02:00 local).
+// Midnight on those dates is the regression trap. Expected values are
+// explicit UTC constants — never computed with a converter under test.
+describe("etDayStart / etDayEnd on DST transition days", () => {
+  it("spring forward 2026-03-08: day-start is 05:00Z (EST midnight), day-end 03:59:59Z next day", () => {
+    const start = etDayStart("2026-03-08");
+    expect(start).toBe(1772946000);
+    expect(formatUtc(start)).toBe("2026-03-08T05:00:00.000Z");
+    expect(formatExchangeTime(start)).toBe("2026-03-08 00:00:00");
+    const end = etDayEnd("2026-03-08");
+    expect(end).toBe(1773028799);
+    expect(formatUtc(end)).toBe("2026-03-09T03:59:59.000Z");
+    expect(formatExchangeTime(end)).toBe("2026-03-08 23:59:59");
+    // 23-hour day: one hour shorter than the usual 86399-second span.
+    expect(end - start).toBe(86399 - 3600);
+  });
+
+  it("fall back 2026-11-01: day-start is 04:00Z (EDT midnight), day-end 04:59:59Z next day", () => {
+    const start = etDayStart("2026-11-01");
+    expect(start).toBe(1793505600);
+    expect(formatUtc(start)).toBe("2026-11-01T04:00:00.000Z");
+    expect(formatExchangeTime(start)).toBe("2026-11-01 00:00:00");
+    const end = etDayEnd("2026-11-01");
+    expect(end).toBe(1793595599);
+    expect(formatUtc(end)).toBe("2026-11-02T04:59:59.000Z");
+    expect(formatExchangeTime(end)).toBe("2026-11-01 23:59:59");
+    // 25-hour day.
+    expect(end - start).toBe(86399 + 3600);
+  });
+
+  it("2025 transition days pin the same convention", () => {
+    expect(formatUtc(etDayStart("2025-03-09"))).toBe("2025-03-09T05:00:00.000Z");
+    expect(formatUtc(etDayEnd("2025-03-09"))).toBe("2025-03-10T03:59:59.000Z");
+    expect(formatUtc(etDayStart("2025-11-02"))).toBe("2025-11-02T04:00:00.000Z");
+    expect(formatUtc(etDayEnd("2025-11-02"))).toBe("2025-11-03T04:59:59.000Z");
+  });
+});
+
+describe("wallClockToUnix DST semantics (America/New_York)", () => {
+  const et = (y: number, mo: number, d: number, h: number, mi = 0) =>
+    wallClockToUnix(y, mo, d, h, mi, 0, EXCHANGE_TZ);
+  const utc = (y: number, mo: number, d: number, h: number, mi = 0) =>
+    Math.floor(Date.UTC(y, mo - 1, d, h, mi, 0) / 1000);
+
+  it("spring-forward day 2026-03-08: pre-transition wall clocks use EST", () => {
+    expect(et(2026, 3, 8, 0, 0)).toBe(utc(2026, 3, 8, 5, 0)); // midnight EST
+    expect(et(2026, 3, 8, 1, 30)).toBe(utc(2026, 3, 8, 6, 30)); // 01:30 EST
+  });
+
+  it("spring-forward gap (02:00-02:59 does not exist): maps forward by the gap width", () => {
+    expect(et(2026, 3, 8, 2, 0)).toBe(utc(2026, 3, 8, 7, 0)); // → 03:00 EDT
+    expect(et(2026, 3, 8, 2, 30)).toBe(utc(2026, 3, 8, 7, 30)); // → 03:30 EDT
+  });
+
+  it("spring-forward day: post-transition wall clocks use EDT", () => {
+    expect(et(2026, 3, 8, 3, 0)).toBe(utc(2026, 3, 8, 7, 0)); // 03:00 EDT
+    expect(et(2026, 3, 8, 18, 0)).toBe(utc(2026, 3, 8, 22, 0)); // CME Sunday open
+  });
+
+  it("fall-back day 2026-11-01: ambiguous 01:xx resolves to the first (EDT) occurrence", () => {
+    expect(et(2026, 11, 1, 0, 30)).toBe(utc(2026, 11, 1, 4, 30)); // 00:30 EDT
+    expect(et(2026, 11, 1, 1, 30)).toBe(utc(2026, 11, 1, 5, 30)); // 01:30 EDT, not 06:30Z EST
+  });
+
+  it("fall-back day: post-transition wall clocks use EST", () => {
+    expect(et(2026, 11, 1, 2, 0)).toBe(utc(2026, 11, 1, 7, 0)); // 02:00 EST
+    expect(et(2026, 11, 1, 18, 0)).toBe(utc(2026, 11, 1, 23, 0)); // CME Sunday open
+  });
+
+  it("UTC is the identity mapping", () => {
+    expect(wallClockToUnix(2026, 7, 15, 12, 34, 56, "UTC")).toBe(
+      Math.floor(Date.UTC(2026, 6, 15, 12, 34, 56) / 1000),
+    );
   });
 });

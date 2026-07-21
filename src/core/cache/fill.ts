@@ -5,9 +5,9 @@ import { sessionDaysOverlapping } from "../sessions/session-day.js";
 import {
   loadCalendar,
   recordObservedClose,
-  wallClockHHMM,
   type SessionCalendar,
 } from "../sessions/calendar.js";
+import { wallClockHHMM } from "../time.js";
 import { getInstrumentConfig } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";

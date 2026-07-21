@@ -4,12 +4,18 @@ import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
 import { SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
+import { sessionDaysOverlapping } from "../core/sessions/session-day.js";
 import {
-  SessionClosedError,
-  sessionDayContaining,
-  sessionDayRange,
-  sessionDaysOverlapping,
-} from "../core/sessions/session-day.js";
+  WEEKDAY_NAMES,
+  addDaysToLabel,
+  currentOrPreviousSessionDay,
+  labelWeekdayName,
+  mondayOfWeek,
+  nearestSessionDays,
+  previousSessionDay,
+  snapToSessionDay,
+  weekSessionDays,
+} from "../core/sessions/navigation.js";
 import {
   EMPTY_CALENDAR,
   loadCalendar,
@@ -18,7 +24,7 @@ import {
 import type { SessionDay, SessionTemplate } from "../core/sessions/types.js";
 import type { Timeframe } from "../core/types.js";
 import { expectedBarCount } from "../core/cache/validator.js";
-import { formatLocalDateTime } from "../core/time.js";
+import { formatLocalDateTime, tzParts } from "../core/time.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 const RELATIVE_ANCHORS = [
@@ -61,54 +67,18 @@ interface RangeFlag {
   nearest?: { prev?: string; next?: string };
 }
 
-const WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
-const LABEL_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+// ---------- presentation helpers (core math lives in sessions/navigation) ----------
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-// Pure calendar-day arithmetic on YYYY-MM-DD labels (no timezone — a
-// label's calendar identity is intrinsic). Assumes a well-formed label;
-// impossible dates are rejected downstream by sessionDayRange's guard.
-function addDaysToLabel(label: string, days: number): string {
-  const m = LABEL_RE.exec(label);
-  if (!m) throw new Error(`bad session-day label: "${label}"`);
-  const d = new Date(Date.UTC(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]) + days));
-  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
-}
-
-function labelWeekdayName(label: string): string {
-  const m = LABEL_RE.exec(label);
-  if (!m) throw new Error(`bad session-day label: "${label}"`);
-  const dow = new Date(
-    Date.UTC(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3])),
-  ).getUTCDay();
-  return WEEKDAY_NAMES[dow];
-}
-
-// "Wed 18:00" wall-clock rendering of a unix instant in `tz`.
-const SPAN_FMT_CACHE = new Map<string, Intl.DateTimeFormat>();
-
-function getSpanFmt(tz: string): Intl.DateTimeFormat {
-  let fmt = SPAN_FMT_CACHE.get(tz);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      weekday: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    });
-    SPAN_FMT_CACHE.set(tz, fmt);
-  }
-  return fmt;
-}
-
+// "Wed 18:00" wall-clock rendering of a unix instant in `tz` (weekday is
+// that of the tz-local calendar date).
 function wallClock(unixSec: number, tz: string): string {
-  const parts = getSpanFmt(tz).formatToParts(new Date(unixSec * 1000));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  return `${get("weekday")} ${get("hour")}:${get("minute")}`;
+  const p = tzParts(unixSec, tz);
+  const wd = WEEKDAY_NAMES[new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay()];
+  return `${wd} ${pad2(p.hour)}:${pad2(p.minute)}`;
 }
 
 function tzSuffix(tz: string): string {
@@ -117,24 +87,6 @@ function tzSuffix(tz: string): string {
 
 function formatEtSpan(startUnix: number, endUnix: number, tz: string): string {
   return `${wallClock(startUnix, tz)} → ${wallClock(endUnix, tz)} ${tzSuffix(tz)}`;
-}
-
-function isNoSpanError(err: unknown): boolean {
-  return err instanceof Error && /No session span/.test(err.message);
-}
-
-function tryRange(
-  label: string,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-): { startUnix: number; endUnix: number } | null {
-  try {
-    return sessionDayRange(label, template, calendar);
-  } catch (err) {
-    // Weekends and calendar-closed holidays both mean "not a session-day".
-    if (isNoSpanError(err) || err instanceof SessionClosedError) return null;
-    throw err;
-  }
 }
 
 // Flag copy: a holiday (with description) beats the generic weekday reason.
@@ -146,24 +98,12 @@ function nonSessionReason(label: string, calendar: SessionCalendar): string {
   return `${labelWeekdayName(label)} (no session)`;
 }
 
-// Nearest real session-days around a non-session label, formatted
-// "2026-07-03 (Fri)". Bounded walk; 7 calendar days always spans a gap
-// for the registered weekly templates.
-function nearestSessionDays(
-  label: string,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-): { prev?: string; next?: string } {
-  const nearest: { prev?: string; next?: string } = {};
-  for (let k = 1; k <= 7 && nearest.prev === undefined; k++) {
-    const cand = addDaysToLabel(label, -k);
-    if (tryRange(cand, template, calendar)) nearest.prev = `${cand} (${labelWeekdayName(cand)})`;
-  }
-  for (let k = 1; k <= 7 && nearest.next === undefined; k++) {
-    const cand = addDaysToLabel(label, k);
-    if (tryRange(cand, template, calendar)) nearest.next = `${cand} (${labelWeekdayName(cand)})`;
-  }
-  return nearest;
+// "2026-07-03 (Fri)" presentation of bare nearest-session labels.
+function fmtNearest(n: { prev?: string; next?: string }): { prev?: string; next?: string } {
+  const out: { prev?: string; next?: string } = {};
+  if (n.prev !== undefined) out.prev = `${n.prev} (${labelWeekdayName(n.prev)})`;
+  if (n.next !== undefined) out.next = `${n.next} (${labelWeekdayName(n.next)})`;
+  return out;
 }
 
 interface ResolvedEndpoint {
@@ -180,87 +120,16 @@ function resolveEndpoint(
   kind: "start" | "end",
   calendar: SessionCalendar,
 ): ResolvedEndpoint {
-  const direct = tryRange(label, template, calendar);
-  if (direct) return { day: { label, ...direct } };
-
-  const step = kind === "start" ? 1 : -1;
-  for (let k = 1; k <= 7; k++) {
-    const cand = addDaysToLabel(label, step * k);
-    const range = tryRange(cand, template, calendar);
-    if (range) {
-      return {
-        day: { label: cand, ...range },
-        flag: {
-          input: label,
-          reason: nonSessionReason(label, calendar),
-          nearest: nearestSessionDays(label, template, calendar),
-        },
-      };
-    }
-  }
-  throw new Error(`no session-day within 7 days of "${label}" in template "${template.name}"`);
-}
-
-// The session-day containing `now`, or — when now sits in a maintenance
-// break or weekend gap — the most recent session-day that has started.
-function currentOrPreviousSessionDay(
-  nowUnix: number,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-): { day: SessionDay; inGap: boolean } {
-  const containing = sessionDayContaining(nowUnix, template, calendar);
-  if (containing) return { day: containing, inGap: false };
-
-  const todayLabel = formatLocalDateTime(nowUnix, template.timezone).slice(0, 10);
-  for (let k = 0; k <= 7; k++) {
-    const label = addDaysToLabel(todayLabel, -k);
-    const range = tryRange(label, template, calendar);
-    if (range && range.startUnix < nowUnix) {
-      return { day: { label, ...range }, inGap: true };
-    }
-  }
-  throw new Error(
-    `no session-day within 7 days before now for template "${template.name}"`,
-  );
-}
-
-function previousSessionDay(
-  day: SessionDay,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-): SessionDay {
-  for (let k = 1; k <= 7; k++) {
-    const label = addDaysToLabel(day.label, -k);
-    const range = tryRange(label, template, calendar);
-    if (range) return { label, ...range };
-  }
-  throw new Error(
-    `no session-day within 7 days before "${day.label}" in template "${template.name}"`,
-  );
-}
-
-// Monday-label of the trading week containing `label`.
-function mondayOfWeek(label: string): string {
-  const m = LABEL_RE.exec(label);
-  if (!m) throw new Error(`bad session-day label: "${label}"`);
-  const dow = new Date(
-    Date.UTC(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3])),
-  ).getUTCDay();
-  return addDaysToLabel(label, -((dow + 6) % 7));
-}
-
-function weekSessionDays(
-  mondayLabel: string,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-): SessionDay[] {
-  const days: SessionDay[] = [];
-  for (let k = 0; k < 5; k++) {
-    const label = addDaysToLabel(mondayLabel, k);
-    const range = tryRange(label, template, calendar);
-    if (range) days.push({ label, ...range });
-  }
-  return days;
+  const res = snapToSessionDay(label, template, kind === "start" ? 1 : -1, calendar);
+  if (!res.snapped) return { day: res.day };
+  return {
+    day: res.day,
+    flag: {
+      input: label,
+      reason: nonSessionReason(label, calendar),
+      nearest: fmtNearest(nearestSessionDays(label, template, calendar)),
+    },
+  };
 }
 
 export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {}) {
@@ -390,7 +259,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
             flags.push({
               input: date,
               reason: nonSessionReason(date, calendar),
-              nearest: nearestSessionDays(date, template, calendar),
+              nearest: fmtNearest(nearestSessionDays(date, template, calendar)),
             });
           }
         }

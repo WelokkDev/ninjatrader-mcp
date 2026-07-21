@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  NoSessionSpanError,
   SessionClosedError,
   makeSessionDayResolver,
   sessionDayContaining,
@@ -36,6 +37,17 @@ describe("sessionDayRange impossible-date guard", () => {
     // 2026-07-04 is a Saturday — a real calendar date with no session span.
     expect(() => sessionDayRange("2026-07-04", TEMPLATE)).toThrow(/No session span/);
   });
+
+  it("the no-span failure is typed (NoSessionSpanError) with the same message", () => {
+    try {
+      sessionDayRange("2026-07-04", TEMPLATE);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoSessionSpanError);
+      expect((err as NoSessionSpanError).label).toBe("2026-07-04");
+      expect((err as Error).message).toMatch(/No session span/);
+    }
+  });
 });
 
 describe("sessionDayRange valid dates", () => {
@@ -43,6 +55,22 @@ describe("sessionDayRange valid dates", () => {
     const { startUnix, endUnix } = sessionDayRange("2026-05-01", TEMPLATE);
     expect(startUnix).toBe(unix(2026, 4, 30, 22)); // Apr 30 18:00 EDT
     expect(endUnix).toBe(unix(2026, 5, 1, 21)); // May 1 17:00 EDT
+  });
+});
+
+describe("sessionDayRange across DST transition weekends", () => {
+  it("Monday session over spring forward: Sun 2026-03-08 18:00 EDT → Mon 17:00 EDT (23h session)", () => {
+    const { startUnix, endUnix } = sessionDayRange("2026-03-09", TEMPLATE);
+    expect(startUnix).toBe(unix(2026, 3, 8, 22)); // Sun 18:00 EDT (post-transition)
+    expect(endUnix).toBe(unix(2026, 3, 9, 21)); // Mon 17:00 EDT
+    expect(endUnix - startUnix).toBe(23 * 3600);
+  });
+
+  it("Monday session over fall back: Sun 2026-11-01 18:00 EST → Mon 17:00 EST (23h session)", () => {
+    const { startUnix, endUnix } = sessionDayRange("2026-11-02", TEMPLATE);
+    expect(startUnix).toBe(unix(2026, 11, 1, 23)); // Sun 18:00 EST (post-transition)
+    expect(endUnix).toBe(unix(2026, 11, 2, 22)); // Mon 17:00 EST
+    expect(endUnix - startUnix).toBe(23 * 3600);
   });
 });
 
@@ -135,6 +163,46 @@ describe("calendar-aware geometry", () => {
       ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "09:00", source: "manual" as const }],
     ]);
     expect(() => sessionDayRange("2026-02-16", NYSE_RTH, bad)).toThrow(/not after/i);
+  });
+});
+
+describe("enumeration paths propagate data-integrity errors loudly", () => {
+  // Expected "not a session-day" outcomes (weekend, holiday) are skipped
+  // silently; a corrupt calendar row must NOT silently vanish a day from
+  // cache fill / validation — it throws out of the enumeration.
+  const inverted: SessionCalendar = new Map([
+    ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "09:00", source: "manual" as const }],
+  ]);
+  const malformed: SessionCalendar = new Map([
+    ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "9:00", source: "manual" as const }],
+  ]);
+
+  it("sessionDaysOverlapping throws on an inverted override instead of skipping the day", () => {
+    expect(() =>
+      sessionDaysOverlapping(unix(2026, 2, 16, 0), unix(2026, 2, 17, 0), NYSE_RTH, inverted),
+    ).toThrow(/not after/i);
+  });
+
+  it("sessionDayContaining throws on an inverted override instead of returning null", () => {
+    // Mon 2026-02-16 12:00 EST — the corrupt label is a containment candidate.
+    expect(() => sessionDayContaining(unix(2026, 2, 16, 17), NYSE_RTH, inverted)).toThrow(
+      /not after/i,
+    );
+  });
+
+  it("malformed override time strings also propagate", () => {
+    expect(() =>
+      sessionDaysOverlapping(unix(2026, 2, 16, 0), unix(2026, 2, 17, 0), NYSE_RTH, malformed),
+    ).toThrow(/bad time string/);
+  });
+
+  it("weekends and holidays are still skipped silently", () => {
+    const holiday: SessionCalendar = new Map([
+      ["2026-02-16", { date: "2026-02-16", kind: "closed" as const, source: "manual" as const }],
+    ]);
+    // Sat 2026-02-14 through Tue 2026-02-17 with Monday closed: only Tuesday remains.
+    const days = sessionDaysOverlapping(unix(2026, 2, 14, 0), unix(2026, 2, 18, 0), NYSE_RTH, holiday);
+    expect(days.map((d) => d.label)).toEqual(["2026-02-17"]);
   });
 });
 

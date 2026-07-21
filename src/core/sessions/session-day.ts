@@ -5,6 +5,7 @@ import type {
   Weekday,
 } from "./types.js";
 import type { SessionCalendar } from "./calendar.js";
+import { tzParts, wallClockToUnix } from "../time.js";
 
 /** Thrown by sessionDayRange when the calendar declares the date fully
  *  closed (market holiday). Distinct from the "No session span" weekend
@@ -21,100 +22,21 @@ export class SessionClosedError extends Error {
   }
 }
 
-// ---------- Intl helpers (DST-safe wall-clock arithmetic) ----------
-
-const PARTS_FMT_CACHE = new Map<string, Intl.DateTimeFormat>();
-const WEEKDAY_FMT_CACHE = new Map<string, Intl.DateTimeFormat>();
-
-function getPartsFmt(tz: string): Intl.DateTimeFormat {
-  let fmt = PARTS_FMT_CACHE.get(tz);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    });
-    PARTS_FMT_CACHE.set(tz, fmt);
+/** Thrown by sessionDayRange when no span closes on the label's weekday
+ *  (Sat/Sun for the weekly ETH templates). With SessionClosedError, one of
+ *  the two expected "not a session-day" outcomes — anything else is data
+ *  corruption. Message text is pinned by tests (/No session span/). */
+export class NoSessionSpanError extends Error {
+  constructor(
+    readonly label: string,
+    readonly closeWeekday: Weekday,
+    readonly templateName: string,
+  ) {
+    super(
+      `No session span with closeWeekday=${closeWeekday} for label "${label}" in template "${templateName}"`,
+    );
+    this.name = "NoSessionSpanError";
   }
-  return fmt;
-}
-
-function getWeekdayFmt(tz: string): Intl.DateTimeFormat {
-  let fmt = WEEKDAY_FMT_CACHE.get(tz);
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      weekday: "short",
-    });
-    WEEKDAY_FMT_CACHE.set(tz, fmt);
-  }
-  return fmt;
-}
-
-const WEEKDAY_NAME_TO_INDEX: Record<string, Weekday> = {
-  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-};
-
-interface TzParts {
-  year: number;
-  month: number; // 1-12
-  day: number;
-  hour: number;
-  minute: number;
-  second: number;
-}
-
-function getTzParts(unixSec: number, tz: string): TzParts {
-  const parts = getPartsFmt(tz).formatToParts(new Date(unixSec * 1000));
-  const get = (t: string) => parts.find((p) => p.type === t)!.value;
-  return {
-    year: parseInt(get("year")),
-    month: parseInt(get("month")),
-    day: parseInt(get("day")),
-    hour: parseInt(get("hour")),
-    minute: parseInt(get("minute")),
-    second: parseInt(get("second")),
-  };
-}
-
-function getWeekdayInTz(unixSec: number, tz: string): Weekday {
-  const name = getWeekdayFmt(tz).format(new Date(unixSec * 1000));
-  const w = WEEKDAY_NAME_TO_INDEX[name];
-  if (w === undefined) throw new Error(`unrecognized weekday: ${name}`);
-  return w;
-}
-
-// Convert a wall-clock instant in `tz` (year/month/day/hour/min/sec) to
-// unix seconds. DST-safe via offset probe at noon UTC of the same date.
-function tzInstantToUnix(
-  year: number,
-  month: number, // 1-12
-  day: number,
-  hour: number,
-  minute: number,
-  second: number,
-  tz: string,
-): number {
-  // Probe at noon UTC — guaranteed to land on the same local calendar day
-  // in any reasonable IANA timezone, regardless of DST.
-  const probeUtcMs = Date.UTC(year, month - 1, day, 12, 0, 0);
-  const parts = getTzParts(Math.floor(probeUtcMs / 1000), tz);
-  const localAsUtcMs = Date.UTC(
-    parts.year,
-    parts.month - 1,
-    parts.day,
-    parts.hour,
-    parts.minute,
-    parts.second,
-  );
-  const offsetMs = localAsUtcMs - probeUtcMs;
-  const targetMs = Date.UTC(year, month - 1, day, hour, minute, second) - offsetMs;
-  return Math.floor(targetMs / 1000);
 }
 
 interface ParsedTime {
@@ -186,16 +108,13 @@ export function sessionDayRange(
     throw new Error(`impossible calendar date: "${label}"`);
   }
 
-  // Determine the close-date weekday in the template's timezone. We probe
-  // at noon local time on the close date to avoid any DST edge weirdness.
-  const closeNoonUnix = tzInstantToUnix(closeY, closeMo, closeD, 12, 0, 0, template.timezone);
-  const closeWeekday = getWeekdayInTz(closeNoonUnix, template.timezone);
+  // A calendar date's weekday is timezone-independent (Weekday matches
+  // Date.getUTCDay), so no Intl probe is needed.
+  const closeWeekday = rt.getUTCDay() as Weekday;
 
   const span = findSpanByCloseWeekday(template.spans, closeWeekday);
   if (!span) {
-    throw new Error(
-      `No session span with closeWeekday=${closeWeekday} for label "${label}" in template "${template.name}"`,
-    );
+    throw new NoSessionSpanError(label, closeWeekday, template.name);
   }
 
   const calEntry = calendar?.get(label);
@@ -212,9 +131,9 @@ export function sessionDayRange(
   if (closeT.nextDay) {
     // "24:00" — endUnix lands at 00:00:00 of the next calendar day.
     const next = addDays(closeY, closeMo, closeD, 1);
-    endUnix = tzInstantToUnix(next.year, next.month, next.day, 0, 0, 0, template.timezone);
+    endUnix = wallClockToUnix(next.year, next.month, next.day, 0, 0, 0, template.timezone);
   } else {
-    endUnix = tzInstantToUnix(
+    endUnix = wallClockToUnix(
       closeY, closeMo, closeD,
       closeT.hour, closeT.minute, closeT.second,
       template.timezone,
@@ -236,8 +155,8 @@ export function sessionDayRange(
     ? addDays(openDate.year, openDate.month, openDate.day, 1)
     : openDate;
   const startUnix = openT.nextDay
-    ? tzInstantToUnix(openDay.year, openDay.month, openDay.day, 0, 0, 0, template.timezone)
-    : tzInstantToUnix(
+    ? wallClockToUnix(openDay.year, openDay.month, openDay.day, 0, 0, 0, template.timezone)
+    : wallClockToUnix(
         openDay.year, openDay.month, openDay.day,
         openT.hour, openT.minute, openT.second,
         template.timezone,
@@ -274,17 +193,20 @@ export function sessionDayContaining(
   // A session-day's close calendar date may be the day before, of, or
   // after the input's local calendar date (most can be at most ±1, but
   // we widen to ±2 for any pathological edge case in extreme timezones).
-  const inputParts = getTzParts(unixSec, template.timezone);
+  const inputParts = tzParts(unixSec, template.timezone);
   for (let offset = -1; offset <= 2; offset++) {
     const cand = addDays(inputParts.year, inputParts.month, inputParts.day, offset);
     const label = `${cand.year}-${pad2(cand.month)}-${pad2(cand.day)}`;
     let range: { startUnix: number; endUnix: number };
     try {
       range = sessionDayRange(label, template, calendar);
-    } catch {
-      // No span closes on that weekday (Sat/Sun for ETH), or the calendar
-      // declares the date closed — either way, not a session-day.
-      continue;
+    } catch (err) {
+      // Weekend (no span) or calendar-closed date — not a session-day.
+      // Anything else is data corruption and must propagate loudly.
+      if (err instanceof NoSessionSpanError || err instanceof SessionClosedError) {
+        continue;
+      }
+      throw err;
     }
     if (unixSec > range.startUnix && unixSec <= range.endUnix) {
       // Within-span break check (none of the production templates use
@@ -315,8 +237,8 @@ function isInBreak(
     const start = parseTime(br.startTime);
     const end = parseTime(br.endTime);
     if (start.nextDay || end.nextDay) continue; // not supported for breaks
-    const startUnix = tzInstantToUnix(y, mo, d, start.hour, start.minute, start.second, template.timezone);
-    const endUnix = tzInstantToUnix(y, mo, d, end.hour, end.minute, end.second, template.timezone);
+    const startUnix = wallClockToUnix(y, mo, d, start.hour, start.minute, start.second, template.timezone);
+    const endUnix = wallClockToUnix(y, mo, d, end.hour, end.minute, end.second, template.timezone);
     if (unixSec > startUnix && unixSec <= endUnix) return true;
   }
   return false;
@@ -359,8 +281,8 @@ export function sessionDaysOverlapping(
   if (toUnix < fromUnix) return [];
   // Pad ±2 calendar days on each side so we catch sessions that span
   // midnight (CME ETH session opens 18:00 ET prior day).
-  const fromParts = getTzParts(fromUnix, template.timezone);
-  const toParts = getTzParts(toUnix, template.timezone);
+  const fromParts = tzParts(fromUnix, template.timezone);
+  const toParts = tzParts(toUnix, template.timezone);
   const startCal = addDays(fromParts.year, fromParts.month, fromParts.day, -2);
   const endCal = addDays(toParts.year, toParts.month, toParts.day, 2);
 
@@ -377,8 +299,11 @@ export function sessionDaysOverlapping(
       if (range.startUnix < toUnix && range.endUnix >= fromUnix) {
         result.push({ label, startUnix: range.startUnix, endUnix: range.endUnix });
       }
-    } catch {
-      // No span for this weekday, or calendar-closed date; skip.
+    } catch (err) {
+      // Weekend or calendar-closed date: skip. Corruption propagates.
+      if (!(err instanceof NoSessionSpanError || err instanceof SessionClosedError)) {
+        throw err;
+      }
     }
     if (cur.year === endCal.year && cur.month === endCal.month && cur.day === endCal.day) break;
     cur = addDays(cur.year, cur.month, cur.day, 1);
