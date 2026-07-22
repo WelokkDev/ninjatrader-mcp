@@ -153,8 +153,10 @@ describe("late candles_response through the connection layer", () => {
       { symbol: "NQ", timeframe: "5m", from: DAY_START, to: DAY_START + 900 },
       10,
     );
-    await expect(pending).rejects.toThrow(/heal on the next query/);
-    await expect(pending).rejects.toThrow(/downloading history/);
+    // The bridge core timeout message is neutral now (the "downloading history"
+    // hint moved to the candle call sites); it just says the request timed out.
+    await expect(pending).rejects.toThrow(/timed out/);
+    await expect(pending).rejects.not.toThrow(/downloading history/);
 
     // NT8 finishes late and sends the correlated response anyway.
     const envelope = JSON.parse(sent[0]) as { id: string };

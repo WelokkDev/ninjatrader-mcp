@@ -3,7 +3,12 @@ import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import type { Timeframe } from "../types.js";
 import { loadCalendar } from "../sessions/calendar.js";
 import { sessionDayRange } from "../sessions/session-day.js";
-import { classifySessionDay, CANDLE_FETCH_TIMEOUT_MS, observeEarlyClose } from "./fill.js";
+import {
+  classifySessionDay,
+  CANDLE_FETCH_TIMEOUT_MS,
+  observeEarlyClose,
+  withCandleTimeoutHint,
+} from "./fill.js";
 import { expectedBarCount } from "./validator.js";
 
 // PrefetchManager — the single owner of request_candles traffic.
@@ -336,7 +341,7 @@ export class PrefetchManager {
       job.durationsMs.push(this.nowMs() - t0);
     } catch (err) {
       d.state = "failed";
-      d.error = err instanceof Error ? err.message : String(err);
+      d.error = withCandleTimeoutHint(err instanceof Error ? err.message : String(err));
     }
     this.finalizeIfDone(job);
   }

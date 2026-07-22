@@ -2,13 +2,40 @@ import { randomUUID } from "crypto";
 import {
   isConnected as bridgeIsConnected,
   request as bridgeRequest,
+  BridgeRequestError,
 } from "../bridge/index.js";
 import type { OrderAckMessage } from "../bridge/protocol.js";
 import { getLiveFeedRuntime } from "../live/runtime.js";
 import { evaluateGate } from "./gate.js";
 import { loadTradingConfig, type TradingConfig } from "./config.js";
 import { orderAudit, type OrderAudit, type OrderDecision } from "./audit.js";
-import type { OrderIntent, OrderResult } from "./types.js";
+import type { BlockReason, OrderIntent, OrderResult } from "./types.js";
+
+// NT8 caps an order Name at 50 chars; clientOrderId rides through as the Name.
+const MAX_CLIENT_ORDER_ID_LEN = 50;
+
+/** How a dispatch failure (post-gate, at/after the wire) is classified. */
+interface DispatchOutcome {
+  decision: OrderDecision;
+  /** Error text for the caller — may be augmented with retry guidance. */
+  error: string;
+  /** True only when the order provably never reached NT8. */
+  certainlyNotSubmitted: boolean;
+  blockedBy?: BlockReason;
+  denyReason?: string;
+}
+
+// C# `error` codes for rejections raised BEFORE Submit() — safe to treat as
+// certainly-not-submitted. Kept in sync with HandlePlaceOrder in mcp-bridge.cs.
+const PRE_SUBMIT_CODES = new Set<string>([
+  "gate-disabled",
+  "account-not-allowed",
+  "qty-exceeds-max",
+  "invalid-params",
+  "account-not-found",
+  "instrument-not-found",
+  "create-order-failed",
+]);
 
 // A submit ack is fast (Submit() returns as soon as NT8 accepts the call), so a
 // short ceiling is right. A timeout here does NOT mean the order was rejected —
@@ -43,6 +70,15 @@ export interface ExecutionServiceDeps {
 export function validateIntent(intent: OrderIntent): string | null {
   if (!Number.isInteger(intent.quantity) || intent.quantity <= 0) {
     return `quantity must be a positive integer (got ${intent.quantity})`;
+  }
+  // The wire schema's max(50) is never runtime-enforced on outbound messages,
+  // so enforce it here — the single seam every caller (incl. a future Python
+  // one that bypasses zod) passes through. NT8 rejects an over-long order Name.
+  if (
+    intent.clientOrderId !== undefined &&
+    (intent.clientOrderId.length < 1 || intent.clientOrderId.length > MAX_CLIENT_ORDER_ID_LEN)
+  ) {
+    return `clientOrderId must be 1–${MAX_CLIENT_ORDER_ID_LEN} characters (got ${intent.clientOrderId.length})`;
   }
   const needsLimit = intent.orderType === "Limit" || intent.orderType === "StopLimit";
   const needsStop = intent.orderType === "Stop" || intent.orderType === "StopLimit";
@@ -145,9 +181,10 @@ export class ExecutionService {
 
     // Fresh read so a live toggle (or disable) applies to this order.
     const config = this.deps.loadConfig();
+    const nowMs = this.nowMs();
     const verdict = evaluateGate(intent, config, {
       recentSubmitsMs: this.recentSubmitsMs,
-      nowMs: this.nowMs(),
+      nowMs,
     });
     if (!verdict.allowed) {
       const detail = verdict.detail ?? "blocked by trading gate";
@@ -160,6 +197,12 @@ export class ExecutionService {
       this.audit(intent, clientOrderId, "failed", { error });
       return { ok: false, clientOrderId, error, blockedBy: "not-connected", certainlyNotSubmitted: true };
     }
+
+    // Claim the rate slot synchronously, before any await — otherwise concurrent
+    // submits can all clear the gate during the feed await below and overshoot
+    // maxOrdersPerMin by the in-flight count.
+    this.recentSubmitsMs.push(nowMs);
+    this.pruneRate(nowMs);
 
     // Make fills / async rejections observable. Best-effort — never blocks.
     let warning: string | undefined;
@@ -174,11 +217,6 @@ export class ExecutionService {
       const m = err instanceof Error ? err.message : String(err);
       warning = `position feed subscribe threw (${m}) — poll get_positions to confirm the outcome`;
     }
-
-    // Claim a rate slot — this order is about to hit NT8.
-    const nowMs = this.nowMs();
-    this.recentSubmitsMs.push(nowMs);
-    this.pruneRate(nowMs);
 
     // Only the wire fields cross the bridge — never source/reason.
     try {
@@ -214,21 +252,83 @@ export class ExecutionService {
         ...(warning ? { warning } : {}),
       };
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      // A timeout is ambiguous — the order may have reached NT8. A send failure
-      // means it definitely did not.
-      const timedOut = /timed out/i.test(error);
-      const sendFailed = /failed to send|not connected|disconnected/i.test(error);
-      this.audit(intent, clientOrderId, "failed", { error });
+      const rawError = err instanceof Error ? err.message : String(err);
+      const outcome = this.classifyDispatchError(err, rawError, clientOrderId);
+      this.audit(intent, clientOrderId, outcome.decision, {
+        error: rawError,
+        ...(outcome.denyReason ? { denyReason: outcome.denyReason } : {}),
+      });
       return {
         ok: false,
         clientOrderId,
-        error: timedOut
-          ? `${error} — the order MAY have been submitted; check get_positions before retrying, and reuse clientOrderId "${clientOrderId}" if you do`
-          : error,
-        certainlyNotSubmitted: sendFailed && !timedOut,
+        error: outcome.error,
+        ...(outcome.blockedBy ? { blockedBy: outcome.blockedBy } : {}),
+        certainlyNotSubmitted: outcome.certainlyNotSubmitted,
       };
     }
+  }
+
+  /** Classify a dispatch failure by TYPE, never by sniffing the message string.
+   *  `certainlyNotSubmitted` is true ONLY when the order provably never reached
+   *  NT8; everything else is ambiguous (fail-safe). */
+  private classifyDispatchError(
+    err: unknown,
+    rawError: string,
+    clientOrderId: string,
+  ): DispatchOutcome {
+    const ambiguousGuidance =
+      `${rawError} — the order MAY have been submitted; check get_positions before ` +
+      `retrying, and reuse clientOrderId "${clientOrderId}" if you do`;
+
+    if (err instanceof BridgeRequestError) {
+      switch (err.kind) {
+        case "not-connected":
+        case "send-failed":
+          // Provably never crossed the wire.
+          return { decision: "failed", error: rawError, certainlyNotSubmitted: true };
+        case "timeout":
+        case "disconnected":
+          // On the wire, outcome unknown — same treatment.
+          return { decision: "failed", error: ambiguousGuidance, certainlyNotSubmitted: false };
+        case "remote-error":
+          return this.classifyRemoteError(err.code, rawError, ambiguousGuidance);
+      }
+    }
+
+    // Untyped / legacy error (e.g. a non-bridge throw). Fail safe: ambiguous.
+    // Preserve the timeout guidance when the message looks like one.
+    const timedOut = /timed out/i.test(rawError);
+    return {
+      decision: "failed",
+      error: timedOut ? ambiguousGuidance : rawError,
+      certainlyNotSubmitted: false,
+    };
+  }
+
+  /** A C# `error` envelope. A pre-Submit code ⇒ a definitive keystone block
+   *  (audited as `blocked`); submit-failed / in-flight ⇒ ambiguous; a codeless
+   *  error (old AddOn, deploy skew) keeps today's conservative ambiguous form. */
+  private classifyRemoteError(
+    code: string | undefined,
+    rawError: string,
+    ambiguousGuidance: string,
+  ): DispatchOutcome {
+    if (code && PRE_SUBMIT_CODES.has(code)) {
+      return {
+        decision: "blocked",
+        error: rawError,
+        certainlyNotSubmitted: true,
+        blockedBy: "addon-blocked",
+        denyReason: code,
+      };
+    }
+    if (code === "submit-failed") {
+      // Submit() threw — may have partially landed. Ambiguous.
+      return { decision: "failed", error: ambiguousGuidance, certainlyNotSubmitted: false };
+    }
+    // in-flight: the C# message already says "do not resubmit; check shortly".
+    // Codeless/unknown: today's conservative ambiguous handling. Neither augments.
+    return { decision: "failed", error: rawError, certainlyNotSubmitted: false };
   }
 
   private pruneRate(nowMs: number): void {

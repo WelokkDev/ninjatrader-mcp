@@ -34,3 +34,11 @@ Follow [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md): scaffold with
 `npm run init-private`, build with `npm run build:private`, point the MCP
 client at `build/private/index.js`, and run exactly one server process (it
 owns the NT8 bridge and the candle cache).
+
+## The order write path
+
+Follow [TRADING.md](TRADING.md) for the `place_order` write path: one submit
+seam (`ExecutionService.submit()`), three independent fail-closed gates, and the
+C# keystone gate that must be recompiled by the developer (never by you — see the
+boundary rules above). Read it before touching anything under `src/execution/`
+or the `place_order` handler in `ninja-addon/addons/mcp-bridge.cs`.

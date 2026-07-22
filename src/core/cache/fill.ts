@@ -83,6 +83,15 @@ export function planFetchWindows(
 // candles_response is ingested by the global handler in bridge/ingest.ts.
 export const CANDLE_FETCH_TIMEOUT_MS = 30_000;
 
+/** Append the candle-specific "downloading history" hint to a timed-out message.
+ *  Lives here, not in the bridge core, so an order submit is never told NT8 is
+ *  downloading history. */
+export function withCandleTimeoutHint(message: string): string {
+  return /timed out/i.test(message)
+    ? `${message} — NT8 may still be downloading history; it will heal on the next query.`
+    : message;
+}
+
 export interface EnsureCachedDeps {
   isConnected: () => boolean;
   request: (
@@ -202,7 +211,7 @@ export async function ensureCached(
     } catch (err) {
       result.windowsFailed++;
       const msg = err instanceof Error ? err.message : String(err);
-      result.errors.push({ window: window.labels.join(","), message: msg });
+      result.errors.push({ window: window.labels.join(","), message: withCandleTimeoutHint(msg) });
     }
   }
 

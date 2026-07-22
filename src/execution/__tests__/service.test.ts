@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { initializeSchema } from "../../db/schema.js";
+import { BridgeRequestError } from "../../bridge/connection.js";
 import { createOrderAudit, type OrderAudit } from "../audit.js";
 import {
   ExecutionService,
@@ -91,6 +92,12 @@ describe("validateIntent", () => {
   });
   it("rejects non-positive quantity", () => {
     expect(validateIntent(marketBuy({ quantity: 0 }))).toMatch(/quantity/);
+  });
+  it("rejects a clientOrderId longer than 50 chars", () => {
+    expect(validateIntent(marketBuy({ clientOrderId: "x".repeat(51) }))).toMatch(/clientOrderId/);
+  });
+  it("accepts a 50-char clientOrderId", () => {
+    expect(validateIntent(marketBuy({ clientOrderId: "x".repeat(50) }))).toBeNull();
   });
 });
 
@@ -199,5 +206,145 @@ describe("ExecutionService.submit", () => {
     expect(r.clientOrderId).toBe("coid-1");
     const [, payload] = h.request.mock.calls[0];
     expect(payload).toMatchObject({ clientOrderId: "coid-1" });
+  });
+
+  // --- dispatch-failure classification (A1/A2): by typed error, never by string ---
+
+  function throwing(err: unknown): Partial<ExecutionServiceDeps> {
+    return {
+      request: vi.fn(async () => {
+        throw err;
+      }) as ExecutionServiceDeps["request"],
+    };
+  }
+
+  it("a disconnect WHILE WAITING is ambiguous, NOT certainlyNotSubmitted", async () => {
+    // Regression: this used to match /disconnected/ and be reported as certainly
+    // not submitted → the caller retried with a fresh id → double order.
+    h = makeService(
+      throwing(
+        new BridgeRequestError(
+          "NinjaTrader disconnected while waiting for response",
+          "disconnected",
+          true,
+        ),
+      ),
+    );
+    const r = await h.service.submit(marketBuy());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(false);
+      expect(r.error).toMatch(/MAY have been submitted/);
+    }
+    expect(h.audit.recent()[0]).toMatchObject({ decision: "failed" });
+  });
+
+  it("a send failure IS certainlyNotSubmitted", async () => {
+    h = makeService(
+      throwing(
+        new BridgeRequestError("failed to send request place_order (x): closed", "send-failed", false),
+      ),
+    );
+    const r = await h.service.submit(marketBuy());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.certainlyNotSubmitted).toBe(true);
+    expect(h.audit.recent()[0]).toMatchObject({ decision: "failed" });
+  });
+
+  it("a not-connected error (racing disconnect) IS certainlyNotSubmitted", async () => {
+    h = makeService(throwing(new BridgeRequestError("bridge not connected", "not-connected", false)));
+    const r = await h.service.submit(marketBuy());
+    if (!r.ok) expect(r.certainlyNotSubmitted).toBe(true);
+  });
+
+  it("a typed ack timeout stays ambiguous", async () => {
+    h = makeService(
+      throwing(new BridgeRequestError("Request place_order (x) timed out after 10000ms", "timeout", true)),
+    );
+    const r = await h.service.submit(marketBuy());
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(false);
+      expect(r.error).toMatch(/MAY have been submitted/);
+    }
+  });
+
+  it("a coded AddOn gate block → blocked audit + certainlyNotSubmitted + addon-blocked", async () => {
+    h = makeService(
+      throwing(new BridgeRequestError("AddOn trading gate disabled", "remote-error", true, "gate-disabled")),
+    );
+    const r = await h.service.submit(marketBuy());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(true);
+      expect(r.blockedBy).toBe("addon-blocked");
+    }
+    expect(h.audit.recent()[0]).toMatchObject({ decision: "blocked", denyReason: "gate-disabled" });
+  });
+
+  it("a submit-failed code is ambiguous (Submit() threw — may have landed)", async () => {
+    h = makeService(
+      throwing(new BridgeRequestError("Submit failed: margin", "remote-error", true, "submit-failed")),
+    );
+    const r = await h.service.submit(marketBuy());
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(false);
+      expect(r.error).toMatch(/MAY have been submitted/);
+    }
+    expect(h.audit.recent()[0]).toMatchObject({ decision: "failed" });
+  });
+
+  it("an in-flight code is ambiguous and keeps the do-not-resubmit guidance", async () => {
+    h = makeService(
+      throwing(
+        new BridgeRequestError(
+          "order with clientOrderId 'x' is currently in flight — do not resubmit; check again shortly",
+          "remote-error",
+          true,
+          "in-flight",
+        ),
+      ),
+    );
+    const r = await h.service.submit(marketBuy());
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(false);
+      expect(r.error).toMatch(/do not resubmit/);
+      expect(r.error).not.toMatch(/MAY have been submitted/);
+    }
+  });
+
+  it("a codeless AddOn error keeps today's conservative ambiguous handling (deploy skew)", async () => {
+    h = makeService(
+      throwing(new BridgeRequestError("account 'X' is not in the AddOn allow-list", "remote-error", true)),
+    );
+    const r = await h.service.submit(marketBuy());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.certainlyNotSubmitted).toBe(false);
+      expect(r.blockedBy).toBeUndefined();
+    }
+    expect(h.audit.recent()[0]).toMatchObject({ decision: "failed" });
+  });
+
+  it("(B1) claims the rate slot before awaiting — concurrent submits can't both pass (limit 1)", async () => {
+    // Hold the feed subscribe open so both submits are in flight at once. The
+    // slot must be claimed synchronously (pre-await) or both clear the gate.
+    let releaseFeed: () => void = () => {};
+    const feedGate = new Promise<void>((res) => {
+      releaseFeed = res;
+    });
+    h = makeService({
+      loadConfig: () => ({ ...CONFIG, maxOrdersPerMin: 1 }),
+      ensurePositionFeed: vi.fn(async () => {
+        await feedGate;
+        return { ok: true };
+      }),
+    });
+    const p1 = h.service.submit(marketBuy({ clientOrderId: "a" }));
+    const p2 = h.service.submit(marketBuy({ clientOrderId: "b" }));
+    releaseFeed();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect([r1, r2].filter((r) => r.ok)).toHaveLength(1);
+    expect([r1, r2].filter((r) => !r.ok && r.blockedBy === "rate-limited")).toHaveLength(1);
+    expect(h.request).toHaveBeenCalledOnce();
   });
 });

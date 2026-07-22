@@ -1311,6 +1311,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private void SendErrorResponse(string id, string message)
 		{
+			SendErrorResponse(id, message, null);
+		}
+
+		// `code` is an optional machine-readable classifier (place_order only).
+		// Non-order rejections pass null, so the key is omitted on the wire.
+		private void SendErrorResponse(string id, string message, string code)
+		{
 			var payload = new Dictionary<string, object>
 			{
 				{ "v",       1 },
@@ -1318,8 +1325,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "type",    "error" },
 				{ "message", message },
 			};
+			if (!string.IsNullOrEmpty(code)) payload["code"] = code;
 			SendFireAndForget(Json.Serialize(payload),
-				"error id=" + id + " msg=" + message);
+				"error id=" + id + " msg=" + message + (string.IsNullOrEmpty(code) ? "" : " code=" + code));
 		}
 
 		private void SendFireAndForget(string json, string logTag)
@@ -2666,6 +2674,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			public string Contract;
 			public string OrderId;
 			public string State;
+			// false = an in-flight reservation (a submit holds this clientOrderId
+			// but Submit() has not yet succeeded); true = a real, submitted order
+			// whose ack can be replayed. See HandlePlaceOrder's dedup section.
+			public bool   Completed;
 		}
 
 		private class TradingGateConfig
@@ -2746,9 +2758,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 			var id = GetString(obj, "id");
 			if (string.IsNullOrEmpty(id)) { Log("place_order missing id; dropping"); return; }
 
+			// reserved  : an in-flight placeholder was inserted for clientOrderId.
+			// committed : Submit() succeeded — never auto-remove the reservation
+			//             past this point, or a retry would double-fire.
+			// ambiguous : Submit() itself threw, so it's not provably unsent either
+			//             — keep the reservation so a same-id retry is refused
+			//             rather than silently resubmitted.
+			// The finally below removes the reservation only when none of the above
+			// hold, so a genuinely pre-Submit blocked/failed id stays retryable.
+			string clientOrderId = null;
+			bool   reserved  = false;
+			bool   committed = false;
+			bool   ambiguous = false;
+
 			try
 			{
-				var clientOrderId = GetString(obj, "clientOrderId");
+				clientOrderId     = GetString(obj, "clientOrderId");
 				var accountName   = GetString(obj, "account");
 				var symbol        = GetString(obj, "symbol");
 				var actionStr     = GetString(obj, "action");
@@ -2756,43 +2781,57 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var tifStr        = GetString(obj, "tif");
 				var qtyN          = GetInt(obj, "quantity");
 
-				if (string.IsNullOrEmpty(clientOrderId)) { SendErrorResponse(id, "place_order missing clientOrderId"); return; }
-				if (string.IsNullOrEmpty(accountName))   { SendErrorResponse(id, "place_order missing account");       return; }
-				if (string.IsNullOrEmpty(symbol))        { SendErrorResponse(id, "place_order missing symbol");        return; }
-				if (!qtyN.HasValue || qtyN.Value <= 0)   { SendErrorResponse(id, "place_order quantity must be a positive integer"); return; }
+				// Pre-reservation validation — certainly not submitted.
+				if (string.IsNullOrEmpty(clientOrderId)) { SendErrorResponse(id, "place_order missing clientOrderId", "invalid-params"); return; }
+				if (string.IsNullOrEmpty(accountName))   { SendErrorResponse(id, "place_order missing account",       "invalid-params"); return; }
+				if (string.IsNullOrEmpty(symbol))        { SendErrorResponse(id, "place_order missing symbol",        "invalid-params"); return; }
+				if (!qtyN.HasValue || qtyN.Value <= 0)   { SendErrorResponse(id, "place_order quantity must be a positive integer", "invalid-params"); return; }
 				var quantity = qtyN.Value;
 
-				// Idempotency: a repeated clientOrderId never fires a second
-				// order — replay the original ack. Only submitted orders are
-				// remembered, so a previously-blocked id can still be retried.
+				// Check + reserve is atomic under one lock, so two concurrent
+				// messages with the same clientOrderId can't both Submit(): a
+				// completed entry replays the original ack, an in-flight entry is
+				// refused, and only an absent entry gets reserved and proceeds.
+				// submittedOrders is in-memory/per-session — a restart forgets it,
+				// which is fine since the TS side always generates fresh UUIDs.
 				lock (orderLock)
 				{
 					SubmittedOrder prior;
 					if (submittedOrders.TryGetValue(clientOrderId, out prior))
 					{
-						Log("place_order dedup: clientOrderId=" + clientOrderId + " already submitted; replaying ack");
-						SendOrderAck(id, clientOrderId, prior.Contract, prior.OrderId, prior.State, true);
+						if (prior.Completed)
+						{
+							Log("place_order dedup: clientOrderId=" + clientOrderId + " already submitted; replaying ack");
+							SendOrderAck(id, clientOrderId, prior.Contract, prior.OrderId, prior.State, true);
+							return;
+						}
+						Log("place_order dedup: clientOrderId=" + clientOrderId + " is in flight; refusing concurrent resubmit");
+						SendErrorResponse(id,
+							"order with clientOrderId '" + clientOrderId + "' is currently in flight — do not resubmit; check again shortly",
+							"in-flight");
 						return;
 					}
+					submittedOrders[clientOrderId] = new SubmittedOrder { Completed = false };
 				}
+				reserved = true;
 
 				// Gate — keystone, fail-closed, re-read fresh every submit.
 				var gate = LoadTradingGate();
 				if (gate == null || !gate.enabled)
 				{
-					SendErrorResponse(id, "AddOn trading gate disabled (trading.config.json missing or enabled=false)");
+					SendErrorResponse(id, "AddOn trading gate disabled (trading.config.json missing or enabled=false)", "gate-disabled");
 					Log("place_order BLOCKED (gate disabled) account=" + accountName + " " + actionStr + " " + quantity + " " + symbol);
 					return;
 				}
 				if (gate.allowAccounts == null || !gate.allowAccounts.Contains(accountName))
 				{
-					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list");
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
 					Log("place_order BLOCKED (account not allowed) account=" + accountName);
 					return;
 				}
 				if (quantity > gate.maxQty)
 				{
-					SendErrorResponse(id, "quantity " + quantity + " exceeds AddOn maxQty " + gate.maxQty);
+					SendErrorResponse(id, "quantity " + quantity + " exceeds AddOn maxQty " + gate.maxQty, "qty-exceeds-max");
 					Log("place_order BLOCKED (qty>max) qty=" + quantity + " max=" + gate.maxQty + " account=" + accountName);
 					return;
 				}
@@ -2800,22 +2839,22 @@ namespace NinjaTrader.NinjaScript.AddOns
 				OrderAction action;
 				OrderType   orderType;
 				TimeInForce tif;
-				if (!TryParseAction(actionStr, out action))     { SendErrorResponse(id, "invalid action: "    + actionStr); return; }
-				if (!TryParseOrderType(typeStr, out orderType)) { SendErrorResponse(id, "invalid orderType: " + typeStr);   return; }
-				if (!TryParseTif(tifStr, out tif))              { SendErrorResponse(id, "invalid tif: "       + tifStr);    return; }
+				if (!TryParseAction(actionStr, out action))     { SendErrorResponse(id, "invalid action: "    + actionStr, "invalid-params"); return; }
+				if (!TryParseOrderType(typeStr, out orderType)) { SendErrorResponse(id, "invalid orderType: " + typeStr,   "invalid-params"); return; }
+				if (!TryParseTif(tifStr, out tif))              { SendErrorResponse(id, "invalid tif: "       + tifStr,    "invalid-params"); return; }
 
 				var needLimit = orderType == OrderType.Limit || orderType == OrderType.StopLimit;
 				var needStop  = orderType == OrderType.StopMarket || orderType == OrderType.StopLimit;
 				var limitPrice = GetDouble(obj, "limitPrice");
 				var stopPrice  = GetDouble(obj, "stopPrice");
-				if (needLimit && !(limitPrice > 0)) { SendErrorResponse(id, typeStr + " requires a positive limitPrice"); return; }
-				if (needStop  && !(stopPrice  > 0)) { SendErrorResponse(id, typeStr + " requires a positive stopPrice");  return; }
+				if (needLimit && !(limitPrice > 0)) { SendErrorResponse(id, typeStr + " requires a positive limitPrice", "invalid-params"); return; }
+				if (needStop  && !(stopPrice  > 0)) { SendErrorResponse(id, typeStr + " requires a positive stopPrice",  "invalid-params"); return; }
 
 				var account = FindAccount(accountName);
-				if (account == null) { SendErrorResponse(id, "account not found: " + accountName); return; }
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
 
 				var instrument = ResolveInstrument(symbol);
-				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol); return; }
+				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
 
 				Order order;
 				try
@@ -2828,12 +2867,26 @@ namespace NinjaTrader.NinjaScript.AddOns
 						Globals.MaxDate, // gtd — non-GTD
 						null);           // customOrder
 				}
-				catch (Exception ex) { SendErrorResponse(id, "CreateOrder failed: " + ex.Message); return; }
+				catch (Exception ex) { SendErrorResponse(id, "CreateOrder failed: " + ex.Message, "create-order-failed"); return; }
 
 				try { account.Submit(new[] { order }); }
-				catch (Exception ex) { SendErrorResponse(id, "Submit failed: " + ex.Message); return; }
+				catch (Exception ex)
+				{
+					ambiguous = true;
+					SendErrorResponse(id, "Submit failed: " + ex.Message, "submit-failed");
+					return;
+				}
 
-				var contract = instrument.FullName ?? symbol;
+				// Never auto-remove the reservation past this line. Overwriting it
+				// below with Completed=true also enables idempotent ack replay for
+				// a timed-out-then-retried submit.
+				committed = true;
+
+				// Guarded: an unguarded throw here would skip the Completed=true
+				// overwrite below and strand this id as in-flight forever. Fall
+				// back rather than throw.
+				var contract = symbol;
+				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
 				string orderId = null;
 				var state = "Submitted";
 				try { orderId = order.OrderId; }          catch { /* not assigned yet */ }
@@ -2842,7 +2895,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				lock (orderLock)
 				{
 					submittedOrders[clientOrderId] =
-						new SubmittedOrder { Contract = contract, OrderId = orderId, State = state };
+						new SubmittedOrder { Contract = contract, OrderId = orderId, State = state, Completed = true };
 				}
 
 				Log("place_order SUBMITTED account=" + accountName + " " + actionStr + " " + quantity
@@ -2851,7 +2904,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 			catch (Exception ex)
 			{
+				// Unexpected, codeless failure — the TS side treats it as ambiguous.
 				SendErrorResponse(id, "place_order failed: " + ex.Message);
+			}
+			finally
+			{
+				if (reserved && !committed && !ambiguous)
+				{
+					lock (orderLock) { submittedOrders.Remove(clientOrderId); }
+				}
 			}
 		}
 

@@ -63,9 +63,7 @@ describe("list_open_charts handler", () => {
     const handler = createListOpenChartsHandler({
       isConnected: () => true,
       request: async () => {
-        throw new Error(
-          "Request request_open_charts (x) timed out after 5000ms — NT8 may still be downloading history; it will heal on the next query.",
-        );
+        throw new Error("Request request_open_charts (x) timed out after 5000ms");
       },
     });
     const text = (await handler()).content[0].text;

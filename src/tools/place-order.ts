@@ -5,11 +5,22 @@ import { getExecutionService, type ExecutionService } from "../execution/service
 import type { OrderIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
-// Tool params = the wire fields minus clientOrderId (the server owns the
-// idempotency key) plus an optional rationale for the audit trail.
-const { clientOrderId: _clientOrderId, ...wireFields } = placeOrderFields;
+// Tool params = the wire fields plus an optional rationale for the audit trail.
+// clientOrderId is normally server-generated; it is exposed ONLY so a caller
+// can reuse it to safely retry an ambiguous submit (see its description).
+const { clientOrderId: clientOrderIdField, ...wireFields } = placeOrderFields;
 const placeOrderParams = {
   ...wireFields,
+  clientOrderId: clientOrderIdField
+    .describe(
+      "Idempotency key — OMIT for new orders (the server generates one). Set it " +
+        "ONLY to retry a submit that returned an ambiguous result (an ack timeout " +
+        "or a disconnect, i.e. certainlyNotSubmitted was not true): pass the exact " +
+        "clientOrderId from that result so the AddOn dedupes the retry instead of " +
+        "double-firing. NEVER reuse an id on a genuinely new order — it is silently " +
+        "deduped (dropped).",
+    )
+    .optional(),
   reason: z.string().max(500).optional(),
 };
 
@@ -22,6 +33,7 @@ type PlaceOrderArgs = {
   limitPrice?: number;
   stopPrice?: number;
   tif: OrderIntent["tif"];
+  clientOrderId?: string;
   reason?: string;
 };
 
@@ -33,7 +45,8 @@ const DESCRIPTION =
   "(contracts), tif (Day/Gtc), and limitPrice/stopPrice as the type requires (Limit→limitPrice, Stop→stopPrice, " +
   "StopLimit→both). A success ack means NT8 ACCEPTED the submit — it is NOT a fill and NOT proof the exchange took it; the " +
   "order can still be rejected asynchronously. Confirm the real outcome via get_positions / the live position feed. Not a " +
-  "bracket: place protective stops/targets as their own orders after you see the entry fill.";
+  "bracket: place protective stops/targets as their own orders after you see the entry fill. Leave clientOrderId unset for " +
+  "new orders; set it only to retry an ambiguous submit (timeout/disconnect) with the id you got back, so the retry is deduped.";
 
 export function createPlaceOrderHandler(service: () => ExecutionService) {
   return async (args: PlaceOrderArgs): Promise<ToolResult> => {
@@ -46,6 +59,7 @@ export function createPlaceOrderHandler(service: () => ExecutionService) {
       ...(args.limitPrice !== undefined ? { limitPrice: args.limitPrice } : {}),
       ...(args.stopPrice !== undefined ? { stopPrice: args.stopPrice } : {}),
       tif: args.tif,
+      ...(args.clientOrderId !== undefined ? { clientOrderId: args.clientOrderId } : {}),
       source: "claude",
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };

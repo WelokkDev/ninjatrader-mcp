@@ -380,6 +380,10 @@ export type OrderAckMessage = z.infer<typeof orderAckMessageSchema>;
 
 export const errorMessageSchema = reqMsg("error", {
   message: z.string(),
+  // Optional machine-readable classifier for order rejections. The C# AddOn
+  // sets it on every place_order rejection (see HandlePlaceOrder); older AddOns
+  // and non-order rejections omit it, so consumers must tolerate its absence.
+  code: z.string().optional(),
 });
 export type ErrorMessage = z.infer<typeof errorMessageSchema>;
 

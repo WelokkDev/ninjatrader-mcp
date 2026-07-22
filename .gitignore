@@ -28,6 +28,9 @@ draw.md
 # Backtest output bundles (one folder per run; regenerable, can be large)
 backtest-results/
 
+# Generated code-review / audit reports (regenerable; never commit to public)
+audit-report.html
+
 # Python bytecode caches (example clients; the coming Python lab)
 __pycache__/
 *.pyc

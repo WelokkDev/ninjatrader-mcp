@@ -3,6 +3,8 @@ import { ConnectionManager, type ConnectionStatus } from "./connection.js";
 import { startServer, DEFAULT_PORT, type BridgeServer } from "./server.js";
 import type { InboundMessage, OutboundMessage } from "./protocol.js";
 
+export { BridgeRequestError, type BridgeErrorKind } from "./connection.js";
+
 let server: BridgeServer | null = null;
 const connections = new ConnectionManager();
 

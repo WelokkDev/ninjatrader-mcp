@@ -36,8 +36,14 @@ export type GateDenyReason =
   | "qty-exceeds-max"
   | "rate-limited";
 
-/** Why a submit failed before or at the wire, for machine-readable handling. */
-export type BlockReason = GateDenyReason | "validation" | "not-connected";
+/** Why a submit failed before or at the wire, for machine-readable handling.
+ *  `addon-blocked` = the C# keystone gate refused it pre-Submit (certainly not
+ *  submitted); the specific C# code is carried in the audit's denyReason. */
+export type BlockReason =
+  | GateDenyReason
+  | "validation"
+  | "not-connected"
+  | "addon-blocked";
 
 export type OrderResult =
   | {

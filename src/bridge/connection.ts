@@ -5,6 +5,40 @@ import { encode, parseMessage, type OutboundMessage, type InboundMessage } from 
 export const HEARTBEAT_TIMEOUT_MS = 30_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * Typed classifier for a rejected request() — callers never sniff the message
+ * string. `wasSent` false means the request provably never crossed the wire.
+ *
+ *  - `not-connected`  no active socket at call time            (wasSent=false)
+ *  - `send-failed`    socket.send() threw                       (wasSent=false)
+ *  - `timeout`        sent, but no response within the deadline (wasSent=true)
+ *  - `disconnected`   socket dropped while awaiting a response  (wasSent=true)
+ *  - `remote-error`   NT8 returned an {type:"error"} envelope   (wasSent=true);
+ *                     `code` carries the C# classifier when present.
+ */
+export type BridgeErrorKind =
+  | "not-connected"
+  | "send-failed"
+  | "timeout"
+  | "disconnected"
+  | "remote-error";
+
+export class BridgeRequestError extends Error {
+  readonly kind: BridgeErrorKind;
+  /** Whether the request provably reached the wire. */
+  readonly wasSent: boolean;
+  /** Machine-readable code from a remote `error` envelope (remote-error only). */
+  readonly code?: string;
+
+  constructor(message: string, kind: BridgeErrorKind, wasSent: boolean, code?: string) {
+    super(message);
+    this.name = "BridgeRequestError";
+    this.kind = kind;
+    this.wasSent = wasSent;
+    if (code !== undefined) this.code = code;
+  }
+}
+
 export interface ConnectionStatus {
   connected: boolean;
   connectedSince: number | null;
@@ -95,7 +129,7 @@ export class ConnectionManager {
     timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<InboundMessage> {
     if (!this.active) {
-      throw new Error("bridge not connected");
+      throw new BridgeRequestError("bridge not connected", "not-connected", false);
     }
 
     const id = randomUUID();
@@ -104,9 +138,13 @@ export class ConnectionManager {
     return new Promise<InboundMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
+          // Neutral message — candle callers append the "downloading history"
+          // hint themselves; an order caller must NOT (nonsense mid-submit).
           reject(
-            new Error(
-              `Request ${type} (${id}) timed out after ${timeoutMs}ms — NT8 may still be downloading history; it will heal on the next query.`,
+            new BridgeRequestError(
+              `Request ${type} (${id}) timed out after ${timeoutMs}ms`,
+              "timeout",
+              true,
             ),
           );
         }
@@ -122,7 +160,13 @@ export class ConnectionManager {
         const msg = err instanceof Error ? err.message : String(err);
         if (this.pending.delete(id)) {
           clearTimeout(timer);
-          reject(new Error(`failed to send request ${type} (${id}): ${msg}`));
+          reject(
+            new BridgeRequestError(
+              `failed to send request ${type} (${id}): ${msg}`,
+              "send-failed",
+              false,
+            ),
+          );
         }
       }
 
@@ -160,7 +204,9 @@ export class ConnectionManager {
 
   private rejectAllPending(reason: string): void {
     if (this.pending.size === 0) return;
-    const err = new Error(reason);
+    // Already on the wire when the socket dropped — outcome unknown, never
+    // "certainly not submitted".
+    const err = new BridgeRequestError(reason, "disconnected", true);
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(err);
@@ -202,7 +248,9 @@ export class ConnectionManager {
         clearTimeout(entry.timer);
         this.pending.delete(maybeId);
         if (msg.type === "error") {
-          entry.reject(new Error(msg.message));
+          // NT8 processed the request and refused it; the optional `code` lets
+          // the write path tell a pre-Submit block from an ambiguous one.
+          entry.reject(new BridgeRequestError(msg.message, "remote-error", true, msg.code));
         } else {
           entry.resolve(msg);
         }

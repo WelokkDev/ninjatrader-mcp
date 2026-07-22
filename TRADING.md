@@ -38,8 +38,14 @@ retry; check positions first.
    recompiled away by an agent. It also **dedupes** repeated `clientOrderId`s so
    a retry never double-fires.
 
-Every attempt — allowed, blocked, or failed — is written to the
-`order_submissions` table (audit) and to the NT8 Output window (tab 1).
+Every attempt that reaches `ExecutionService` is written to the
+`order_submissions` table (the audit trail) — `submitted`, `blocked`, or
+`failed` (the `decision` column). The
+NT8 Output window (tab 1) only shows attempts that reach the **C# keystone**
+(submitted, AddOn-gate blocked, or a submit failure). A **TS-side block**
+(runtime gate, validation, not-connected) never crosses the bridge, so it
+appears in the audit table but **not** in the NT8 Output window. (And with the
+registration gate off, the tool does not exist, so there is nothing to attempt.)
 
 ## Enabling it (sim/paper first)
 
@@ -78,3 +84,24 @@ NinjaScript is always the developer's own step.)
 Set `NT_TRADING_ENABLED=0` in `.env.local` (runtime gate blocks immediately) and
 `"enabled": false` in `trading.config.json` (AddOn gate blocks immediately). To
 fully remove the tool, restart the server with `NT_TRADING_ENABLED=0`.
+
+## Known limitations (phase 1)
+
+The write path is deliberately minimal. Today it can only **place** flat orders;
+be aware of what it cannot yet do:
+
+- **No cancel / modify / flatten.** A working order placed through the tool can
+  only be pulled in the NT8 UI — there is no programmatic cancel. A
+  `cancel_order` tool keyed on `clientOrderId` is the intended next step.
+- **No net-exposure or working-order cap.** `maxQty` is enforced **per order**,
+  not across orders. Rate × qty can still build a larger position inside a
+  minute (e.g. 6 orders/min × 2 = 12 contracts), all individually in-policy. An
+  aggregate exposure gate belongs in `evaluateGate` **before** any live account
+  is allow-listed.
+- **Naked window.** An entry and its protective stop are separate orders (no
+  brackets), so there is a gap between the entry fill and the moment the stop is
+  working. Place the stop as soon as you see the fill, and do not walk away in
+  between.
+
+These are safe-by-omission on Sim, but treat every one as a hard prerequisite
+before pointing the tool at a live account.

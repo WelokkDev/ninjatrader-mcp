@@ -1,32 +1,32 @@
 # ninjatrader-mcp
 
-MCP server bridging Claude Code to NinjaTrader 8: a session-day-aware futures candle cache, live bar and position streaming, chart drawing, executed-trade import from NinjaTrader's own database, a persisted trade/decision ledger, an asynchronous backtest experiment lab, and a deliberately gated order write path.
+> **Status — a personal trading-research project under active development.** I use it daily and it's stable enough to lean on, but expect the odd sharp edge. It grew up tangled together with my own private trading methodology, and I've only recently pulled that apart so the public tools stand on their own. So remnants of my methodology — and of my own NinjaTrader 8 configuration — may still linger in field names, defaults, and validation, and could cause bugs on a setup unlike mine. I'm still working to decouple further and make things more flexible for other configurations and methodologies. Building your own strategy logic on top is a younger path — see [For algo developers: build your own](#for-algo-developers-build-your-own-optional) at the end.
 
-The MCP server runs locally over stdio, exposes tools to an MCP client (e.g., Claude), and maintains a WebSocket bridge to an NT8 AddOn. The AddOn answers historical candle requests, streams live closed bars and position events, renders drawings onto charts, and — only when explicitly enabled at three independent layers — submits orders. The server owns caching, validation, session math, and persistence.
+**MCP tools for NinjaTrader 8.** This is a local MCP server that gives Claude hands-on access to your NinjaTrader 8 platform: pull session-day-aware futures candles, stream live bars and positions, draw levels and zones on your charts, and import your executed trades from NinjaTrader's own database. It runs locally over stdio and reaches NT8 through a loopback-only WebSocket bridge (a small NT8 AddOn) — nothing is exposed to the internet. It **works today with no code**: install it, compile the AddOn once, and start using the tools.
+
+## Trade by hand? Start here — no code required
+
+Install the server, compile the NT8 AddOn once (the only NinjaTrader-side step, and it's yours to do), then Claude can:
+
+| What you want to do | Tools |
+|---|---|
+| **See the market** — OHLCV for any symbol / timeframe / session-day range, auto-filled from NT8, fail-closed on gaps | `get_candles`, `resolve_session_days`, `prefetch_candles` |
+| **Watch it live** — closed bars and position / P&L / risk updates streamed as they happen | `subscribe_live_bars`, `live_feed_status`, `get_positions` |
+| **Mark up your charts** — rectangles, horizontal & vertical lines, and text drawn onto the live NT8 chart | `draw`, `clear_zones`, `list_open_charts` |
+| **Review your trading** — your real executed trades imported straight from NinjaTrader's database and paired into round trips | `get_trades`, `sync_trades`, `list_trades` |
+
+Everything above is **read-only or draw-only** — the bridge never touches your orders. **[SETUP.md](SETUP.md)** is the whole walkthrough: install → bridge → a live drawing on your chart, every step verifiable. That's all you need to start.
+
+> Placing orders *is* possible, but it ships **default-off** behind three independent safety gates and is deliberately not part of the zero-code path — see [TRADING.md](TRADING.md) only if you decide you want it.
+
+> **Trading something other than NQ?** Candle fetching is validated strictly and fails closed — it refuses rather than hand you partial or misaligned data. Those checks were tuned against NQ (one of the most liquid contracts), so a thinner symbol can trip them: pulling candles — especially `15s` — for CL, GC, or any less-liquid instrument may surface false `incomplete` / `empty` days, which show up as `get_candles` refusing or `prefetch_status` reporting failed days. The other liquid CME index futures (ES, YM, RTY, and the micros) behave just like NQ. If you hit this, the sparse-bar tolerances live in `src/core/cache/validator.ts`.
 
 **Docs map:**
 
-- [SETUP.md](SETUP.md) — install → bridge → live data. Agent-addressed; every step verifiable.
-- [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) — compose your own private module on the substrate.
-- [TRADING.md](TRADING.md) — the order write path and its three fail-closed gates.
+- [SETUP.md](SETUP.md) — **start here.** Install → bridge → live data; every step verifiable.
+- [TRADING.md](TRADING.md) — the optional, default-off order write path and its three fail-closed gates.
+- [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) — *for algo developers:* compose your own private strategy module on the substrate.
 - [CLAUDE.md](CLAUDE.md) — boundary rules for agents working in this repo.
-
----
-
-## Status — work in progress, sharp edges flagged below
-
-This is a personal trading-research project under active development, structured **open-core**: the substrate — bridge, cache, live feeds, session math, drawing, trade import, ledger, experiment lab, execution gateway, NT8 AddOn — is public in this repo. The trading methodology (zone detection, decision engines, strategy configs) is deliberately **not here**: it lives in each developer's own gitignored `src/private/` module, composed on top. That said, remnants of my own methodology still linger in pieces of the public code — field names, spec shapes, the odd default — so expect to find traces of it; the split is architectural, not yet surgical.
-
-The boundary itself holds: a **fresh clone builds and tests clean with no `src/private/`** (`tsc` excludes it; no public code imports it), and the composition seam — `registerGenericTools` / `registerExperimentTools` / `startRuntime` in `src/server.ts` — is real and exercised daily.
-
-**What's still poorly defined is the build-your-own backend.** [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) gets you reliably from scaffold to your first custom tool, but past that point there are gaps, and you should expect to read source and makeshift:
-
-- **Binding your own backtest engine to the lab is improvised, not paved.** The runner port (`src/lab/runner/types.ts`) is documented in-code, but the result contract (`ExperimentResult`, the decision funnel) lives only in `src/lab/types.ts`, and the bundle layout the stock `NinjaTraderRunner` adapter expects (`summary.json` / `funnel.json` / `run-meta.json`) is implicit in `src/adapters/ninjatrader/map-bundle.ts`. You'll be lining shapes up by hand.
-- `ExperimentSpec` still carries fields from my own methodology (`strategy`, `smaPreset`); treat `extra` as the generic escape hatch for your engine's knobs.
-- **No worked recipe for the live feed in BUILD-YOUR-OWN.md** — `subscribe_live_bars` and the `/feed` channel are documented in [SETUP.md](SETUP.md) §8, but the only consumer example is `examples/python/live_feed_client.py`. Anything like "alert me when my signal triggers" is yours to assemble on top of it.
-- **No CI yet** enforces the public-only build or the import boundary; discipline does.
-
-If you hit a wall composing a private module, that's expected at this stage — the seams are young. Issues describing where you had to improvise are the most useful kind.
 
 ---
 
@@ -304,6 +304,28 @@ data/
 backtest-results/      (gitignored) per-experiment run bundles
 docs/                  (gitignored) local design docs and specs
 ```
+
+---
+
+## For algo developers: build your own (optional)
+
+Everything above works with zero code. This section is the **other half** of the project, and you can skip it entirely if you only want to trade by hand.
+
+The repo is structured **open-core**. The substrate — bridge, cache, live feeds, session math, drawing, trade import, ledger, experiment lab, execution gateway, NT8 AddOn — is public, here in this repo. The trading *methodology* (zone detection, decision engines, strategy configs) is meant to live **not here**: in each developer's own gitignored `src/private/` module, composed on top. The aim is that public code never imports private and a **fresh clone builds and tests clean with no `src/private/`** (`tsc` excludes it), with the composition seam — `registerGenericTools` / `registerExperimentTools` / `startRuntime` in `src/server.ts` — exercised daily. But this split is recent: remnants of my own methodology, and of my own NT8 setup, probably still linger in pieces of the public code — field names, spec shapes, the odd default — so expect to find traces. The split is architectural, not yet surgical, and I'm still working on it.
+
+Building a private module unlocks two more tool surfaces:
+
+- **`place_order`** — the gated write path — appears only when trading is enabled at startup. See [TRADING.md](TRADING.md).
+- **Five experiment-lab tools** (`start_experiment`, `experiment_status`, `experiment_result`, `list_experiments`, `diff_experiments`) appear only in a private bin that binds a `Lab` to your own backtest engine. The public server doesn't create `data/lab.db` at all.
+
+**What's still poorly defined is the build-your-own backend.** [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) gets you reliably from scaffold to your first custom tool, but past that point there are gaps, and you should expect to read source and makeshift:
+
+- **Binding your own backtest engine to the lab is improvised, not paved.** The runner port (`src/lab/runner/types.ts`) is documented in-code, but the result contract (`ExperimentResult`, the decision funnel) lives only in `src/lab/types.ts`, and the bundle layout the stock `NinjaTraderRunner` adapter expects (`summary.json` / `funnel.json` / `run-meta.json`) is implicit in `src/adapters/ninjatrader/map-bundle.ts`. You'll be lining shapes up by hand.
+- `ExperimentSpec` still carries fields from my own methodology (`strategy`, `smaPreset`); treat `extra` as the generic escape hatch for your engine's knobs.
+- **No worked recipe for the live feed in BUILD-YOUR-OWN.md** — `subscribe_live_bars` and the `/feed` channel are documented in [SETUP.md](SETUP.md) §8, but the only consumer example is `examples/python/live_feed_client.py`. Anything like "alert me when my signal triggers" is yours to assemble on top of it.
+- **No CI yet** enforces the public-only build or the import boundary; discipline does.
+
+If you hit a wall composing a private module, that's expected at this stage — the seams are young. Issues describing where you had to improvise are the most useful kind. To start: **[BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)**.
 
 ---
 
