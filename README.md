@@ -13,6 +13,7 @@ Install the server, compile the NT8 AddOn once (the only NinjaTrader-side step, 
 | **See the market** — OHLCV for any symbol / timeframe / session-day range, auto-filled from NT8, fail-closed on gaps | `get_candles`, `resolve_session_days`, `prefetch_candles` |
 | **Watch it live** — closed bars and position / P&L / risk updates streamed as they happen | `subscribe_live_bars`, `live_feed_status`, `get_positions` |
 | **Mark up your charts** — rectangles, horizontal & vertical lines, and text drawn onto the live NT8 chart | `draw`, `clear_zones`, `list_open_charts` |
+| **Drive the chart** — "show me June 12th 9am": scroll any open chart to a date/time and zoom, no mouse required | `navigate_chart` |
 | **Review your trading** — your real executed trades imported straight from NinjaTrader's database and paired into round trips | `get_trades`, `sync_trades`, `list_trades` |
 
 Everything above is **read-only or draw-only** — the bridge never touches your orders. **[SETUP.md](SETUP.md)** is the whole walkthrough: install → bridge → a live drawing on your chart, every step verifiable. That's all you need to start.
@@ -128,6 +129,7 @@ The public server (`build/index.js`) registers 19 tools. `place_order` appears o
 | `draw_zone` | **Deprecated** — legacy rectangle-only path; prefer `draw`. |
 | `clear_zones` | Remove drawn primitives by id, or all of them; optionally scoped to one symbol. |
 | `list_open_charts` | Enumerate open NT8 charts/tabs and their symbols. |
+| `navigate_chart` | Programmatic Go To: scroll a chart to a date/time (centered or right-aligned) and/or zoom to a bar count; selects the tab, focuses the window, and reports the resulting visible range. Only reaches what the chart has loaded — `clamped: true` in the response means increase the chart's Days To Load. |
 
 Drawings survive chart reloads: the AddOn retains every draw command per symbol and the renderer replays them when a chart's data series reloads. All drawing tools fail closed with a clear message when NT8 is not connected.
 

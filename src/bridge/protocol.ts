@@ -219,6 +219,43 @@ export const openChartsResponseMessageSchema = reqMsg("open_charts_response", {
 });
 export type OpenChartsResponseMessage = z.infer<typeof openChartsResponseMessageSchema>;
 
+/** Programmatic Go To: scroll charts of `symbol` to `ts` (unix seconds, draw
+ *  ET convention) and/or zoom to `barsOnScreen`; at least one is required. */
+export const navigateChartMessageSchema = reqMsg("navigate_chart", {
+  symbol: z.string().min(1),
+  ts: z.number().int().optional(),
+  timeframe: z.string().optional(), // tab filter, compact form ("5m")
+  barsOnScreen: z.number().int().optional(),
+  align: z.enum(["center", "right"]).optional(), // default center
+  activate: z.boolean().optional(), // default true: select tab + focus window
+});
+export type NavigateChartMessage = z.infer<typeof navigateChartMessageSchema>;
+
+/** Per-matched-tab outcome; times are unix seconds. `clamped` = the target
+ *  fell outside the loaded bars (the fix is more Days To Load in NT8). */
+export const navigateChartResultSchema = z.object({
+  window: z.string(),
+  symbol: z.string(),
+  timeframe: z.string(),
+  ok: z.boolean(),
+  error: z.string().optional(),
+  method: z.string().optional(), // "slot" | "scrollToTime" (TimeBased fallback)
+  clamped: z.boolean().optional(),
+  firstLoadedTs: z.number().optional(),
+  lastLoadedTs: z.number().optional(),
+  visibleFromTs: z.number().optional(),
+  visibleToTs: z.number().optional(),
+  activated: z.boolean().optional(),
+});
+export type NavigateChartResult = z.infer<typeof navigateChartResultSchema>;
+
+export const navigateChartAckMessageSchema = reqMsg("navigate_chart_ack", {
+  results: z.array(navigateChartResultSchema),
+  matched: z.number(),
+  skippedWindows: z.number().default(0),
+});
+export type NavigateChartAckMessage = z.infer<typeof navigateChartAckMessageSchema>;
+
 // ---------- live position tracking (read-only) ----------
 // Enum-ish fields carry NT8's own ToString() values so new values pass through.
 
@@ -396,6 +433,7 @@ const INBOUND_SCHEMAS = {
   bar_close: barCloseMessageSchema,
   session_calendar_response: sessionCalendarResponseMessageSchema,
   open_charts_response: openChartsResponseMessageSchema,
+  navigate_chart_ack: navigateChartAckMessageSchema,
   subscribe_ack: subscribeAckMessageSchema,
   unsubscribe_ack: unsubscribeAckMessageSchema,
   positions_response: positionsResponseMessageSchema,
@@ -416,6 +454,7 @@ export type OutboundMessage =
   | RequestCandlesMessage
   | RequestSessionCalendarMessage
   | RequestOpenChartsMessage
+  | NavigateChartMessage
   | SubscribeBarsMessage
   | UnsubscribeBarsMessage
   | RequestPositionsMessage

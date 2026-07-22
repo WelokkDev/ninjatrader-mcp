@@ -596,6 +596,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 			try { return Convert.ToInt64(v); } catch { return null; }
 		}
 
+		private static bool? GetBool(IDictionary<string, object> obj, string key)
+		{
+			object v;
+			if (obj == null || !obj.TryGetValue(key, out v) || v == null) return null;
+			if (v is bool) return (bool) v;
+			try { return Convert.ToBoolean(v); } catch { return null; }
+		}
+
 		private static double GetDouble(IDictionary<string, object> obj, string key)
 		{
 			object v;
@@ -775,6 +783,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				case "request_open_charts":
 					HandleRequestOpenCharts(obj);
+					break;
+
+				case "navigate_chart":
+					HandleNavigateChart(obj);
 					break;
 
 				// Off the read thread: snapshots enumerate NT collections and
@@ -2074,6 +2086,325 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case BarsPeriodType.Month:  return bp.Value + "mo";
 				default:                    return bp.ToString();
 			}
+		}
+
+		// ---------- navigate_chart ----------
+		//
+		// Programmatic Go To. Scrolling assigns ChartControl.LastSlotPainted —
+		// a public setter that ships in NinjaTrader.Gui.dll but is absent from
+		// the help guide (same undocumented-but-shipped tier as the window
+		// walk above).
+
+		private const int NavigateChartBudgetMs = 3_000;
+
+		private void HandleNavigateChart(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("navigate_chart missing id; dropping");
+				return;
+			}
+			Task.Run(async () =>
+			{
+				try { await NavigateChartsAndSendAsync(id, obj); }
+				catch (Exception ex)
+				{
+					SendErrorResponse(id, "navigate_chart failed: " + ex.Message);
+				}
+			});
+		}
+
+		private async Task NavigateChartsAndSendAsync(string id, IDictionary<string, object> obj)
+		{
+			var symbol = GetString(obj, "symbol");
+			if (string.IsNullOrEmpty(symbol))
+			{
+				SendErrorResponse(id, "navigate_chart requires symbol");
+				return;
+			}
+			var  timeframe    = GetString(obj, "timeframe");
+			var  ts           = GetLong(obj, "ts");
+			var  barsOnScreen = GetInt(obj, "barsOnScreen");
+			bool alignRight   = string.Equals(GetString(obj, "align"), "right", StringComparison.OrdinalIgnoreCase);
+			bool activate     = GetBool(obj, "activate") ?? true;
+
+			if (!ts.HasValue && !barsOnScreen.HasValue)
+			{
+				SendErrorResponse(id, "navigate_chart requires ts and/or barsOnScreen");
+				return;
+			}
+
+			DateTime? target = null;
+			if (ts.HasValue)
+			{
+				try { target = UnixSecondsToExchangeTime(ts.Value); }
+				catch (Exception ex)
+				{
+					SendErrorResponse(id, "navigate_chart bad ts: " + ex.Message);
+					return;
+				}
+			}
+
+			// Snapshot first (open_charts pattern): only the type test runs here.
+			var chartWindows = new List<NinjaTrader.Gui.Chart.Chart>();
+			try
+			{
+				foreach (var w in Globals.AllWindows)
+				{
+					var chart = w as NinjaTrader.Gui.Chart.Chart;
+					if (chart != null) chartWindows.Add(chart);
+				}
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "window enumeration failed: " + ex.Message);
+				return;
+			}
+
+			var perWindow = new List<Task<List<Dictionary<string, object>>>>();
+			foreach (var chart in chartWindows)
+				perWindow.Add(NavigateChartWindowAsync(chart, symbol, timeframe, target, barsOnScreen, alignRight, activate));
+
+			await Task.WhenAny(Task.WhenAll(perWindow), Task.Delay(NavigateChartBudgetMs));
+
+			var results = new List<object>();
+			var skipped = 0;
+			foreach (var t in perWindow)
+			{
+				if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+					foreach (var r in t.Result) results.Add(r);
+				else
+					skipped++;
+			}
+
+			if (results.Count == 0)
+			{
+				SendErrorResponse(id, skipped > 0
+					? "navigate_chart timed out on " + skipped + " chart window(s) — NT8's UI may be busy; retry"
+					: "no open chart matches symbol=" + symbol
+						+ (string.IsNullOrEmpty(timeframe) ? "" : " timeframe=" + timeframe)
+						+ " — call list_open_charts to see what's open");
+				return;
+			}
+
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",              1 },
+				{ "id",             id },
+				{ "type",           "navigate_chart_ack" },
+				{ "results",        results },
+				{ "matched",        results.Count },
+				{ "skippedWindows", skipped },
+			};
+			SendFireAndForget(Json.Serialize(payload),
+				"navigate_chart_ack id=" + id + " matched=" + results.Count
+				+ (skipped > 0 ? " skippedWindows=" + skipped : ""));
+		}
+
+		// Dispatcher discipline of ReadChartWindowAsync: InvokeAsync only;
+		// failures resolve to an empty list, never a throw.
+		private static Task<List<Dictionary<string, object>>> NavigateChartWindowAsync(
+			NinjaTrader.Gui.Chart.Chart chart,
+			string wantSymbol,
+			string wantTimeframe,
+			DateTime? target,
+			int? barsOnScreen,
+			bool alignRight,
+			bool activate)
+		{
+			var tcs = new TaskCompletionSource<List<Dictionary<string, object>>>();
+			try
+			{
+				chart.Dispatcher.InvokeAsync(() =>
+				{
+					var results = new List<Dictionary<string, object>>();
+					try
+					{
+						string title = null;
+						try { title = chart.Title; } catch { /* label only */ }
+
+						var tabControl = chart.MainTabControl;
+						if (tabControl != null)
+						{
+							var selected = tabControl.SelectedItem;
+							foreach (var item in tabControl.Items)
+							{
+								try
+								{
+									var tabItem  = item as System.Windows.Controls.TabItem;
+									var chartTab = tabItem != null
+										? tabItem.Content as NinjaTrader.Gui.Chart.ChartTab
+										: null;
+									if (chartTab == null) continue;
+
+									var desc = DescribeChartTab(title, chartTab,
+										object.ReferenceEquals(item, selected));
+									var tabSymbol    = (desc["symbol"] as string) ?? "";
+									var tabTimeframe = (desc["timeframe"] as string) ?? "";
+									if (!string.Equals(tabSymbol, wantSymbol, StringComparison.OrdinalIgnoreCase))
+										continue;
+									if (!string.IsNullOrEmpty(wantTimeframe)
+										&& !string.Equals(tabTimeframe, wantTimeframe, StringComparison.OrdinalIgnoreCase))
+										continue;
+
+									var result = NavigateChartTab(chartTab, desc, target, barsOnScreen, alignRight);
+									if (activate)
+									{
+										try
+										{
+											tabControl.SelectedItem = item;
+											if (chart.WindowState == System.Windows.WindowState.Minimized)
+												chart.WindowState = System.Windows.WindowState.Normal;
+											chart.Activate();
+											result["activated"] = true;
+										}
+										catch (Exception ex) { Log("navigate_chart activate failed: " + ex.Message); }
+									}
+									results.Add(result);
+								}
+								catch (Exception ex) { Log("navigate_chart tab failed: " + ex.Message); }
+							}
+						}
+					}
+					catch (Exception ex) { Log("navigate_chart window failed: " + ex.Message); }
+					tcs.TrySetResult(results);
+				});
+			}
+			catch (Exception ex)
+			{
+				// Window mid-close: its dispatcher is already shutting down.
+				Log("navigate_chart dispatch failed: " + ex.Message);
+				tcs.TrySetResult(new List<Dictionary<string, object>>());
+			}
+			return tcs.Task;
+		}
+
+		// Dispatcher-thread only; the result mirrors navigateChartResultSchema.
+		private static Dictionary<string, object> NavigateChartTab(
+			NinjaTrader.Gui.Chart.ChartTab chartTab,
+			Dictionary<string, object> desc,
+			DateTime? target,
+			int? barsOnScreen,
+			bool alignRight)
+		{
+			var result = new Dictionary<string, object>
+			{
+				{ "window",    desc["window"] },
+				{ "symbol",    desc["symbol"] },
+				{ "timeframe", desc["timeframe"] },
+				{ "ok",        false },
+			};
+
+			try
+			{
+				var cc = chartTab.ChartControl;
+				if (cc == null)
+				{
+					result["error"] = "chart is still loading (no ChartControl)";
+					return result;
+				}
+
+				Bars bars = null;
+				var chartBars = cc.PrimaryBars;
+				if (chartBars == null && cc.BarsArray != null && cc.BarsArray.Count > 0)
+					chartBars = cc.BarsArray[0];
+				if (chartBars != null) bars = chartBars.Bars;
+				if (bars == null || bars.Count == 0)
+				{
+					result["error"] = "chart has no loaded bars";
+					return result;
+				}
+
+				// ---- zoom ----
+				double canvasWidth = cc.CanvasRight - cc.CanvasLeft;
+				if (canvasWidth <= 0) canvasWidth = cc.ActualWidth;
+				if (barsOnScreen.HasValue && barsOnScreen.Value > 0 && canvasWidth > 0)
+				{
+					float oldDistance = cc.Properties.BarDistance;
+					// Below ~0.4 px/bar nothing renders; above 200 is a handful of bars.
+					float newDistance = (float) Math.Max(0.4, Math.Min(200.0, canvasWidth / barsOnScreen.Value));
+					cc.Properties.BarDistance = newDistance;
+					if (oldDistance > 0 && cc.BarWidth > 0)
+						cc.BarWidth = Math.Max(0.5, cc.BarWidth * (newDistance / (double) oldDistance));
+				}
+
+				double barDistance  = cc.Properties.BarDistance;
+				double slotsVisible = barDistance > 0 && canvasWidth > 0
+					? canvasWidth / barDistance
+					: cc.SlotsPainted;
+
+				// ---- scroll ----
+				bool clamped = false;
+				if (target.HasValue)
+				{
+					DateTime firstLoaded = bars.GetTime(0);
+					DateTime lastLoaded  = bars.GetTime(bars.Count - 1);
+					DateTime effective   = target.Value;
+					if (effective < firstLoaded) { effective = firstLoaded; clamped = true; }
+					if (effective > lastLoaded)  { effective = lastLoaded;  clamped = true; }
+					if (clamped)
+					{
+						result["firstLoadedTs"] = ExchangeTimeToUnixSeconds(firstLoaded);
+						result["lastLoadedTs"]  = ExchangeTimeToUnixSeconds(lastLoaded);
+					}
+
+					if (cc.BarSpacingType == NinjaTrader.Gui.Chart.BarSpacingType.TimeBased)
+					{
+						// GetSlotIndexByTime throws on TimeBased spacing; fall back
+						// to the private ScrollToTime the Go To dialog drives.
+						var mi = typeof(NinjaTrader.Gui.Chart.ChartControl).GetMethod(
+							"ScrollToTime",
+							System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+							null,
+							new Type[] { typeof(DateTime), typeof(bool) },
+							null);
+						if (mi == null)
+						{
+							result["error"] = "TimeBased bar spacing: ScrollToTime not found in this NT8 build";
+							return result;
+						}
+						mi.Invoke(cc, new object[] { effective, alignRight });
+						result["method"] = "scrollToTime";
+					}
+					else
+					{
+						double targetSlot = cc.GetSlotIndexByTime(effective);
+						double lastSlot   = alignRight ? targetSlot : targetSlot + slotsVisible / 2.0;
+						// NT's own limits: last bar + right margin on the right,
+						// a full canvas of data on the left.
+						double marginSlots = barDistance > 0 ? cc.Properties.BarMarginRight / barDistance : 0;
+						double maxLastSlot = cc.GetSlotIndexByTime(lastLoaded) + marginSlots;
+						double minLastSlot = Math.Min(slotsVisible, maxLastSlot);
+						if (lastSlot > maxLastSlot) lastSlot = maxLastSlot;
+						if (lastSlot < minLastSlot) lastSlot = minLastSlot;
+						cc.LastSlotPainted = (int) Math.Round(lastSlot);
+						result["method"] = "slot";
+					}
+				}
+
+				cc.InvalidateVisual();
+
+				// Achieved range from slot math — the *Painted properties only
+				// refresh on the next render pass.
+				try
+				{
+					int lastSlotNow = cc.LastSlotPainted;
+					result["visibleFromTs"] = ExchangeTimeToUnixSeconds(
+						cc.GetTimeBySlotIndex(Math.Max(0, lastSlotNow - slotsVisible)));
+					result["visibleToTs"]   = ExchangeTimeToUnixSeconds(
+						cc.GetTimeBySlotIndex(lastSlotNow));
+				}
+				catch { /* range is informational */ }
+
+				if (clamped) result["clamped"] = true;
+				result["ok"] = true;
+			}
+			catch (Exception ex)
+			{
+				result["error"] = ex.Message;
+			}
+			return result;
 		}
 
 		// ---------- account / position tracking ----------
