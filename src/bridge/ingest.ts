@@ -15,6 +15,7 @@ import {
 import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
+import { isSimulatedFeed } from "./data-source.js";
 import type { CandlesResponseMessage } from "./protocol.js";
 
 // Exported: the live runtime applies the same gate before /feed publish.
@@ -188,6 +189,13 @@ export function ingestCandles(
  */
 export function createCandlesResponseHandler(database: Database = db) {
   return (msg: CandlesResponseMessage): void => {
+    // Real-data-only cache: reject sim-feed bars before they reach SQLite.
+    if (isSimulatedFeed(msg.dataSource)) {
+      console.error(
+        `[ingest] REJECTED ${msg.candles.length} candle(s) for ${msg.symbol} ${msg.timeframe} — served by the Simulated Data Feed (synthetic; never cached)`,
+      );
+      return;
+    }
     try {
       const result = ingestCandles(
         msg.symbol,
@@ -214,6 +222,13 @@ export function registerCandlesResponseHandler(): void {
 
 export function registerLiveIngestHandler(): void {
   onMessage("bar_close", (msg) => {
+    // Same quarantine as the historical path.
+    if (isSimulatedFeed(msg.dataSource)) {
+      console.error(
+        `[ingest] REJECTED live bar for ${msg.symbol} ${msg.timeframe} — served by the Simulated Data Feed (synthetic; never cached)`,
+      );
+      return;
+    }
     try {
       const result = ingestCandles(
         msg.symbol,

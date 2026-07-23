@@ -12,6 +12,7 @@ import { getInstrumentConfig } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
 import { recomputeDerivedForSessionDay } from "./derived.js";
+import { isSimulatedFeed } from "../../bridge/data-source.js";
 
 // Classification of a single session-day's cache state at a given raw TF.
 //   complete    — bars match expected geometry, nothing to do
@@ -114,6 +115,9 @@ export interface EnsureCachedResult {
   // True iff a new early-close time was recorded in session_calendar this
   // call — callers must reload the calendar before validating geometry.
   calendarUpdated: boolean;
+  // True iff a fetch this call was served by (and rejected for) the Simulated
+  // Data Feed, so nothing was cached. get_candles surfaces it as a warning.
+  simFeedRejected: boolean;
 }
 
 /**
@@ -161,6 +165,7 @@ export async function ensureCached(
     errors: [],
     bridgeDisconnected: false,
     calendarUpdated: false,
+    simFeedRejected: false,
   };
 
   if (windows.length === 0) return result;
@@ -194,7 +199,7 @@ export async function ensureCached(
       // Pure success/fail signal — ingest is owned by the candles_response
       // handler (bridge/ingest.ts), which runs before this await resumes.
       // A timed-out request still heals late through that same handler.
-      await deps.request(
+      const resp = await deps.request(
         "request_candles",
         {
           symbol,
@@ -205,6 +210,13 @@ export async function ensureCached(
         },
         CANDLE_FETCH_TIMEOUT_MS,
       );
+      // Sim feed → ingest already rejected the bars, so the day didn't fill.
+      // Flag it and skip, counting the window neither fetched nor failed.
+      const ds = (resp as { dataSource?: unknown } | undefined)?.dataSource;
+      if (isSimulatedFeed(typeof ds === "string" ? ds : undefined)) {
+        result.simFeedRejected = true;
+        continue;
+      }
       result.windowsFetched++;
       result.fetchedDays.push(...window.labels);
       fetchedWindows.push(window);

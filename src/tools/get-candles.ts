@@ -389,7 +389,12 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     // "NinjaTrader is not connected" guidance verbatim — existing
     // callers/tests pattern-match on it.
     let warning: string | undefined;
-    if (fillResult.bridgeDisconnected && rows.length === 0) {
+    if (fillResult.simFeedRejected) {
+      warning =
+        rows.length === 0
+          ? `You're connected to NinjaTrader's Simulated Data Feed — its bars are synthetic (random-walk), not real ${symbol} prices — so they were rejected, not cached. No real data is cached for this range yet. Connect a real data feed and re-run.`
+          : `You're connected to NinjaTrader's Simulated Data Feed. The ${rows.length} bar(s) returned here are REAL data cached from an earlier real-feed fetch — they will NOT match your Sim chart, and in-progress days aren't refreshed while on Sim. Reconnect a real feed for live-consistent data.`;
+    } else if (fillResult.bridgeDisconnected && rows.length === 0) {
       warning = `No cached data for ${symbol} ${timeframe} in this range. NinjaTrader is not connected — start NT8 with the McpBridge addon to fetch live data.`;
     } else if (fillResult.windowsFailed > 0) {
       const summary = fillResult.errors
@@ -422,6 +427,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       raw15m === undefined &&
       fillResult.windowsFailed === 0 &&
       !fillResult.bridgeDisconnected &&
+      !fillResult.simFeedRejected &&
       !truncated;
 
     const validationOut: ValidationSummary & { raw_15m?: ValidationSummary } = raw15m

@@ -987,6 +987,41 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
+		// Best-effort name of the feed currently serving bars, biased so the
+		// Simulated Data Feed wins when connected: the server rejects sim bars,
+		// so over-reporting "sim" only forces a harmless refetch while
+		// under-reporting would poison the cache. Phase 1 needs just the
+		// sim/real split; Phase 2 refines the real-provider name.
+		private static string ClassifyDataSource()
+		{
+			try
+			{
+				var conns = Connection.Connections;
+				var firstReal = "";
+				if (conns != null)
+				{
+					foreach (var c in conns)
+					{
+						if (c == null) continue;
+						if (c.Status != ConnectionStatus.Connected) continue;
+						string name;
+						try { name = c.Options != null ? c.Options.Name : ""; }
+						catch { name = ""; }
+						if (string.Equals(name, "Simulated Data Feed",
+							StringComparison.OrdinalIgnoreCase))
+							return "Simulated Data Feed";
+						if (firstReal.Length == 0 && name.Length > 0) firstReal = name;
+					}
+				}
+				return firstReal;
+			}
+			catch (Exception ex)
+			{
+				Log("ClassifyDataSource failed: " + ex.Message);
+				return "";
+			}
+		}
+
 		// Serialize a template's NT8-declared holidays (fully closed) and
 		// partial holidays (early close / late begin). NT8 exposes dates
 		// only, never times — the server observes those from real fetches.
@@ -1316,6 +1351,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "symbol",    symbol },
 				{ "timeframe", timeframe },
 				{ "candles",   candles },
+				// Feed that served this fetch; the server rejects sim-feed bars.
+				{ "dataSource", ClassifyDataSource() },
 			};
 			SendFireAndForget(Json.Serialize(payload),
 				"candles_response id=" + id + " count=" + candles.Count);
@@ -1701,6 +1738,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					var series = e.BarsSeries;
 					if (series == null) return;
 					var nowUnix = (long) (DateTime.UtcNow - UnixEpoch).TotalSeconds;
+					// Classify once per batch, not per bar.
+					var barSource = ClassifyDataSource();
 
 					payloads = new List<string>();
 					for (int i = Math.Max(sub.LastMaxIndex, 0); i < newMax; i++)
@@ -1715,6 +1754,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 							{ "timeframe", sub.Timeframe },
 							{ "seq",       sub.Seq },
 							{ "contract",  sub.Instrument.FullName },
+							{ "dataSource", barSource },
 							{ "candle",    new Dictionary<string, object>
 								{
 									{ "timestamp", ts },

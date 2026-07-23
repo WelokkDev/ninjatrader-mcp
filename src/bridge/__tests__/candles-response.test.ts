@@ -123,6 +123,74 @@ describe("candles_response heal handler", () => {
   });
 });
 
+describe("Simulated Data Feed quarantine", () => {
+  it("rejects candles served by the Simulated Data Feed — nothing is cached", () => {
+    const db = memDb();
+    const handler = createCandlesResponseHandler(db);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    handler({
+      v: 1,
+      id: "sim-1",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "5m",
+      candles: candlesAt([DAY_START + 300, DAY_START + 600]),
+      dataSource: "Simulated Data Feed",
+    });
+    expect(countRows(db, "5m")).toBe(0);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/REJECTED.*Simulated Data Feed/),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("matches the sim feed case-insensitively and trims surrounding whitespace", () => {
+    const db = memDb();
+    const handler = createCandlesResponseHandler(db);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    handler({
+      v: 1,
+      id: "sim-2",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "5m",
+      candles: candlesAt([DAY_START + 300]),
+      dataSource: "  simulated DATA feed  ",
+    });
+    expect(countRows(db, "5m")).toBe(0);
+    errSpy.mockRestore();
+  });
+
+  it("ingests bars from a real feed (Rithmic)", () => {
+    const db = memDb();
+    const handler = createCandlesResponseHandler(db);
+    handler({
+      v: 1,
+      id: "real-1",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "5m",
+      candles: candlesAt([DAY_START + 300, DAY_START + 600]),
+      dataSource: "Rithmic",
+    });
+    expect(countRows(db, "5m")).toBe(2);
+  });
+
+  it("ingests when dataSource is absent — older AddOn provenance is treated as real", () => {
+    const db = memDb();
+    const handler = createCandlesResponseHandler(db);
+    handler({
+      v: 1,
+      id: "legacy-1",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "5m",
+      candles: candlesAt([DAY_START + 300]),
+    });
+    expect(countRows(db, "5m")).toBe(1);
+  });
+});
+
 describe("late candles_response through the connection layer", () => {
   function fakeSocket() {
     const listeners = new Map<string, (...args: never[]) => void>();

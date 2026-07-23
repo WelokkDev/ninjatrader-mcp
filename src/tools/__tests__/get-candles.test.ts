@@ -99,6 +99,49 @@ describe("get_candles fail-closed truncation gate", () => {
   });
 });
 
+describe("get_candles Simulated Data Feed guard", () => {
+  it("warns loudly and marks incomplete when a fill is served by the sim feed", async () => {
+    const { handler, request } = harness({ connected: true });
+    // The fetch replies but reports the Sim feed, so ingest rejects the bars.
+    request.mockResolvedValue({
+      v: 1,
+      id: "x",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "5m",
+      candles: [],
+      dataSource: "Simulated Data Feed",
+    });
+    const out = JSON.parse(await call(handler, { limit: 600 }));
+    expect(request).toHaveBeenCalled();
+    expect(out.count).toBe(0);
+    expect(out.data_complete).toBe(false);
+    expect(out.warning).toMatch(/Simulated Data Feed/);
+  });
+
+  it("caches normally when the fill is served by a real feed", async () => {
+    const { db, handler, request } = harness({ connected: true });
+    // The harness doesn't wire the ingest handler, so mimic a real-feed fill:
+    // seed the day's bars, then resolve with a real dataSource.
+    request.mockImplementation(async () => {
+      seedSessionDay(db, "NQ", DAY_START);
+      return {
+        v: 1,
+        id: "x",
+        type: "candles_response",
+        symbol: "NQ",
+        timeframe: "5m",
+        candles: [],
+        dataSource: "Rithmic",
+      };
+    });
+    const out = JSON.parse(await call(handler, { limit: 600 }));
+    expect(out.count).toBe(276);
+    expect(out.data_complete).toBe(true);
+    expect(out.warning).toBeUndefined();
+  });
+});
+
 describe("get_candles inline cold-work guard", () => {
   // Mon 2026-05-04 .. Fri 2026-05-22 = 15 session-days (3 Mon–Fri weeks).
   const WEEK3 = { start: "2026-05-04", end: "2026-05-22", limit: 5000 };

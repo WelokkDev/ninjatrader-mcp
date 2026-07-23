@@ -126,6 +126,9 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   symbol: z.string(),
   timeframe: z.string(),
   candles: z.array(candlePayloadSchema),
+  // NT8 feed that served this fetch (e.g. "Rithmic", "Simulated Data Feed");
+  // older AddOns omit it. Ingest rejects sim-feed bars — see data-source.ts.
+  dataSource: z.string().optional(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
@@ -137,6 +140,8 @@ export const barCloseMessageSchema = msg("bar_close", {
   seq: z.number().optional(),
   // Resolved NT8 contract (e.g. "MNQ 09-26") — makes rolls visible.
   contract: z.string().optional(),
+  // Feed that served this live bar; sim-feed bars are rejected on ingest.
+  dataSource: z.string().optional(),
   // Closed well before emission; act-on-close consumers skip these.
   backfill: z.boolean().optional(),
 });
