@@ -108,7 +108,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			= new Dictionary<string, List<StoredDraw>>(StringComparer.Ordinal);
 		private readonly object drawStoreLock = new object();
 
-		// ---------- live bar subscription state ----------
+		// live bar subscription state
 
 		private const int LiveSeedBarsBack      = 30;   // enough to establish the index baseline
 		private const int LiveSendQueueCapacity = 2048; // beyond this, bars drop (TS-side heal recovers)
@@ -144,10 +144,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private BlockingCollection<string> liveSendQueue;
 		private Task liveSendWorker;
 
-		// ---------- position tracking state ----------
-		//
-		// Read-only account observation — never creates, changes, or cancels
-		// orders. posLock guards the wired set, streaming flag, and the seq
+		// position tracking state — read-only observation, never creates/changes/
+		// cancels orders. posLock guards the wired set, streaming flag, and the seq
 		// shared by position_event/position_sync (drop detection + ordering).
 
 		private class AccountHandlers
@@ -179,9 +177,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 			Log("indicator unregistered symbol: " + symbol);
 		}
 
-		// ---------- draw persistence store ----------
-		// Retain active drawings on the AddOn (which outlives chart reloads) so the
-		// renderer can replay them after a data-series/timeframe change re-creates it.
+		// draw persistence store — retained on the AddOn (which outlives chart
+		// reloads) so the renderer can replay after a series/timeframe re-create.
 
 		private void StoreUpsert(string symbol, StoredDraw entry)
 		{
@@ -313,7 +310,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- config ----------
+		// config
 
 		private class BridgeConfig
 		{
@@ -347,13 +344,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- TradingHours startup verification ----------
+		// TradingHours startup verification.
 
-		// Log every NT8 TradingHours template available on this install,
-		// then verify each value in TRADING_HOURS_MAP exists. Run once at
-		// AddOn startup (from RunAsync). The user cross-references the log
-		// to confirm the mapping is correct for their NT8 version, and
-		// updates TRADING_HOURS_MAP if any guesses are wrong.
+		// Log every available NT8 template, then verify each TRADING_HOURS_MAP
+		// value exists. The user cross-references the log and fixes it if wrong.
 		private void LogAvailableTradingHours()
 		{
 			try
@@ -401,7 +395,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- main loop ----------
+		// main loop
 
 		private async Task RunAsync(CancellationToken ct)
 		{
@@ -464,7 +458,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 			catch (OperationCanceledException) { /* expected */ }
 		}
 
-		// ---------- send ----------
+		// send
+
+		// Write ops advertised in hello `caps` so the server fails fast on deploy
+		// skew (new server, old AddOn) instead of timing out.
+		private static readonly string[] WriteCaps = new[]
+		{
+			"place_order", "place_oco", "cancel_order", "cancel_all", "flatten", "change_order",
+		};
 
 		private async Task SendHelloAsync(ClientWebSocket ws, CancellationToken ct)
 		{
@@ -476,9 +477,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "ntVersion",   "NT8" },
 				{ "instruments", instruments.ToArray() },
 				{ "timeZone",    GetConfiguredTimeZoneId() },
+				{ "caps",        WriteCaps },
 			};
 			await SendJsonAsync(ws, Json.Serialize(hello), ct);
-			Log("sent hello (" + instruments.Count + " instruments)");
+			Log("sent hello (" + instruments.Count + " instruments, " + WriteCaps.Length + " caps)");
 		}
 
 		// Bars are stamped in NT8's configured timezone; the server warns if it
@@ -545,7 +547,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			finally { sendLock.Release(); }
 		}
 
-		// ---------- receive ----------
+		// receive
 
 		private async Task ReadLoopAsync(ClientWebSocket ws, CancellationToken ct)
 		{
@@ -821,13 +823,50 @@ namespace NinjaTrader.NinjaScript.AddOns
 					break;
 				}
 
+				// Off the read thread: NT8 account calls can block and must
+				// never stall heartbeats.
+				case "place_oco":
+				{
+					var o = obj;
+					Task.Run(() => HandlePlaceOco(o));
+					break;
+				}
+
+				case "cancel_order":
+				{
+					var o = obj;
+					Task.Run(() => HandleCancelOrder(o));
+					break;
+				}
+
+				case "cancel_all":
+				{
+					var o = obj;
+					Task.Run(() => HandleCancelAll(o));
+					break;
+				}
+
+				case "flatten":
+				{
+					var o = obj;
+					Task.Run(() => HandleFlatten(o));
+					break;
+				}
+
+				case "change_order":
+				{
+					var o = obj;
+					Task.Run(() => HandleChangeOrder(o));
+					break;
+				}
+
 				default:
 					Log("unknown message type: " + type);
 					break;
 			}
 		}
 
-		// ---------- request_candles ----------
+		// request_candles
 
 		private static readonly DateTime UnixEpoch =
 			new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -1107,9 +1146,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				+ " holidays=" + holidays.Count + " partial=" + partialHolidays.Count);
 		}
 
-		// ---------- shared TF / trading-hours resolution ----------
-		// One implementation for request_candles and subscribe_bars — the two
-		// paths cannot drift.
+		// Shared TF / trading-hours resolution — one impl for request_candles and
+		// subscribe_bars so the two paths cannot drift.
 
 		private static bool TryResolveBarsPeriod(string timeframe,
 			out BarsPeriodType periodType, out int periodValue,
@@ -1363,7 +1401,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			SendErrorResponse(id, message, null);
 		}
 
-		// `code` is an optional machine-readable classifier (place_order only).
+		// `code` is an optional machine-readable classifier (write-path ops only).
 		// Non-order rejections pass null, so the key is omitted on the wire.
 		private void SendErrorResponse(string id, string message, string code)
 		{
@@ -1401,12 +1439,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			});
 		}
 
-		// ---------- live bar subscriptions ----------
-		//
-		// One live BarsRequest per (symbol, timeframe). Close detection is
-		// index-advance: when Update's MaxIndex passes the high-water mark,
-		// every index in between just closed (never assume MaxIndex-1 is
-		// closed). Payloads build under liveLock, send via the ordered queue.
+		// live bar subscriptions — one BarsRequest per (symbol, timeframe). Close
+		// detection is index-advance: when Update's MaxIndex passes the high-water
+		// mark, every index in between just closed (never assume MaxIndex-1).
+		// Payloads build under liveLock, send via the ordered queue.
 
 		private async Task LiveSendLoopAsync(CancellationToken ct)
 		{
@@ -1904,12 +1940,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			try { req.Dispose(); } catch { /* already disposed */ }
 		}
 
-		// ---------- request_open_charts ----------
-		//
-		// Enumerates every open chart window/tab. Uses undocumented-but-staff-
-		// endorsed API (Globals.AllWindows, Chart, MainTabControl, ChartTab —
-		// forum 1055530/100732); may change between NT8 builds, so every hop
-		// is null-guarded and failures degrade to skippedWindows, never throw.
+		// request_open_charts — enumerates every open chart window/tab via
+		// undocumented-but-staff-endorsed API (Globals.AllWindows, Chart,
+		// MainTabControl, ChartTab — forum 1055530/100732); may change between NT8
+		// builds, so every hop is null-guarded and failures degrade, never throw.
 
 		// Per-request dispatcher budget. A window mid-close or with a hung UI
 		// thread is counted in skippedWindows rather than stalling the response.
@@ -2128,14 +2162,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- navigate_chart ----------
-		//
-		// Programmatic Go To. Scrolling assigns ChartControl.LastSlotPainted —
-		// a public setter that ships in NinjaTrader.Gui.dll but is absent from
-		// the help guide (same undocumented-but-shipped tier as the window
-		// walk above).
+		// navigate_chart — programmatic Go To. Must scroll via the private
+		// ChartControl.ScrollToTime (moves the DURABLE anchor so the view survives
+		// the next live-bar re-render); the old LastSlotPainted path was a
+		// paint-time output NT re-derived, causing intermittent snap-back.
 
 		private const int NavigateChartBudgetMs = 3_000;
+
+		// Resolved once. (DateTime, bool) instance overload ships in
+		// NinjaTrader.Gui.dll but is undocumented; null if this build lacks it
+		// (handled per-call). Second arg = align the given time to the right edge.
+		private static readonly System.Reflection.MethodInfo ScrollToTimeMethod =
+			typeof(NinjaTrader.Gui.Chart.ChartControl).GetMethod(
+				"ScrollToTime",
+				System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+				null,
+				new Type[] { typeof(DateTime), typeof(bool) },
+				null);
 
 		private void HandleNavigateChart(IDictionary<string, object> obj)
 		{
@@ -2389,38 +2432,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 						result["lastLoadedTs"]  = ExchangeTimeToUnixSeconds(lastLoaded);
 					}
 
-					if (cc.BarSpacingType == NinjaTrader.Gui.Chart.BarSpacingType.TimeBased)
+					// Scroll via private ScrollToTime for BOTH spacing types: it
+					// moves the durable anchor so the view holds across the next live
+					// bar (LastSlotPainted was a paint-time output that snapped back).
+					if (ScrollToTimeMethod == null)
 					{
-						// GetSlotIndexByTime throws on TimeBased spacing; fall back
-						// to the private ScrollToTime the Go To dialog drives.
-						var mi = typeof(NinjaTrader.Gui.Chart.ChartControl).GetMethod(
-							"ScrollToTime",
-							System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
-							null,
-							new Type[] { typeof(DateTime), typeof(bool) },
-							null);
-						if (mi == null)
-						{
-							result["error"] = "TimeBased bar spacing: ScrollToTime not found in this NT8 build";
-							return result;
-						}
-						mi.Invoke(cc, new object[] { effective, alignRight });
-						result["method"] = "scrollToTime";
+						result["error"] = "ScrollToTime not found in this NT8 build";
+						return result;
 					}
-					else
-					{
-						double targetSlot = cc.GetSlotIndexByTime(effective);
-						double lastSlot   = alignRight ? targetSlot : targetSlot + slotsVisible / 2.0;
-						// NT's own limits: last bar + right margin on the right,
-						// a full canvas of data on the left.
-						double marginSlots = barDistance > 0 ? cc.Properties.BarMarginRight / barDistance : 0;
-						double maxLastSlot = cc.GetSlotIndexByTime(lastLoaded) + marginSlots;
-						double minLastSlot = Math.Min(slotsVisible, maxLastSlot);
-						if (lastSlot > maxLastSlot) lastSlot = maxLastSlot;
-						if (lastSlot < minLastSlot) lastSlot = minLastSlot;
-						cc.LastSlotPainted = (int) Math.Round(lastSlot);
-						result["method"] = "slot";
-					}
+					ScrollToTimeMethod.Invoke(cc, new object[] { effective, alignRight });
+					result["method"] = "scrollToTime";
 				}
 
 				cc.InvalidateVisual();
@@ -2447,13 +2468,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return result;
 		}
 
-		// ---------- account / position tracking ----------
-		//
-		// Read-only observation of Account.All — the no-order-APIs boundary is
-		// a design decision. WireAccounts() reconciles per-account handlers
-		// against Account.All (re-run on AccountStatusUpdate and provider
-		// reconnect); position_sync re-anchors the server with a full snapshot
-		// after subscribe / reconnect / roster change.
+		// account / position tracking — read-only observation of Account.All.
+		// WireAccounts() reconciles per-account handlers against Account.All (re-run
+		// on AccountStatusUpdate and provider reconnect); position_sync re-anchors
+		// the server after subscribe / reconnect / roster change.
 		//
 		// posLock is a LEAF lock: payloads build outside it, then seq + enqueue
 		// happen atomically under it so wire order always matches seq order.
@@ -2572,7 +2590,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			try { if (h.OnExecution != null) a.ExecutionUpdate -= h.OnExecution; } catch { /* already gone */ }
 		}
 
-		// ---------- position event handlers (NT threads; must never throw) ----------
+		// position event handlers (NT threads; must never throw)
 
 		private void OnAccountPositionUpdate(Account account, PositionEventArgs e)
 		{
@@ -2665,7 +2683,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- payload builders (all reads best-effort) ----------
+		// payload builders (all reads best-effort)
 
 		private static void PutFinite(Dictionary<string, object> d, string key, double v)
 		{
@@ -2881,7 +2899,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return list;
 		}
 
-		// ---------- position request handlers (Task.Run context) ----------
+		// position request handlers (Task.Run context)
 
 		private void HandleRequestPositions(IDictionary<string, object> obj)
 		{
@@ -3024,15 +3042,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		// ---------- order placement (write path) ----------
-		//
-		// Crosses the historically read-only boundary. This is the KEYSTONE
-		// safety gate: it is independent of the TS-side gate and, because there
-		// is no C# compiler on the trading machine, it cannot be recompiled away
-		// by an agent. It fails closed — a missing/garbled trading.config.json,
-		// a disabled flag, an off-allow-list account, or an over-cap quantity all
-		// reject before Submit(). Idempotency: a repeated clientOrderId replays
-		// the prior ack instead of firing a second order.
+		// order placement (write path) — the KEYSTONE safety gate, independent of
+		// the TS-side gate and (no C# compiler on the trading machine) not
+		// recompilable away by an agent. Fails closed: missing/garbled
+		// trading.config.json, disabled flag, off-allow-list account, or over-cap
+		// quantity all reject before Submit(). Idempotency: a repeated
+		// clientOrderId replays the prior ack instead of firing a second order.
 
 		private const string TradingConfigFileName = "trading.config.json";
 
@@ -3045,9 +3060,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 			public string Contract;
 			public string OrderId;
 			public string State;
-			// false = an in-flight reservation (a submit holds this clientOrderId
-			// but Submit() has not yet succeeded); true = a real, submitted order
-			// whose ack can be replayed. See HandlePlaceOrder's dedup section.
+			// Tick-rounded prices; 0 = n/a. Kept so a dedup replay echoes them.
+			public double LimitPrice;
+			public double StopPrice;
+			// false = in-flight reservation (Submit() not yet succeeded);
+			// true = real submitted order whose ack can be replayed.
 			public bool   Completed;
 		}
 
@@ -3121,7 +3138,53 @@ namespace NinjaTrader.NinjaScript.AddOns
 			t = TimeInForce.Day;
 			if (string.Equals(s, "Day", StringComparison.OrdinalIgnoreCase)) { t = TimeInForce.Day; return true; }
 			if (string.Equals(s, "Gtc", StringComparison.OrdinalIgnoreCase)) { t = TimeInForce.Gtc; return true; }
+			// NT8 has no FOK; Ioc is the closest primitive.
+			if (string.Equals(s, "Ioc", StringComparison.OrdinalIgnoreCase)) { t = TimeInForce.Ioc; return true; }
 			return false;
+		}
+
+		// Risk-reducing ops (cancel_order / cancel_all / flatten): allow-list
+		// membership ONLY — deliberately ignores `enabled`/maxQty so these
+		// exposure-reducing ops keep working through a kill-switch. Fails
+		// closed: null gate (missing/garbled config) => no allow-list => block.
+		private static bool RiskReducingAllowed(TradingGateConfig gate, string accountName)
+		{
+			return gate != null && gate.allowAccounts != null && gate.allowAccounts.Contains(accountName);
+		}
+
+		// Prefer a live (non-terminal) match; else return the newest terminal one
+		// so the caller can report already-terminal + which state it ended in.
+		private static Order FindWorkingOrderByName(Account a, string name)
+		{
+			var matches = new List<Order>();
+			lock (a.Orders)
+			{
+				foreach (var o in a.Orders)
+				{
+					if (o == null) continue;
+					try { if (string.Equals(o.Name, name, StringComparison.Ordinal)) matches.Add(o); }
+					catch { /* order mid-teardown */ }
+				}
+			}
+			Order newestTerminal = null;
+			foreach (var o in matches)
+			{
+				try
+				{
+					if (!Order.IsTerminalState(o.OrderState)) return o;
+					if (newestTerminal == null || o.Time > newestTerminal.Time) newestTerminal = o;
+				}
+				catch { /* transient — skip this candidate */ }
+			}
+			return newestTerminal;
+		}
+
+		// Brokers reject off-tick prices; round before use, echo effective in ack.
+		private static double RoundToTick(Instrument inst, double price)
+		{
+			if (!(price > 0)) return price;
+			try { return inst.MasterInstrument.RoundToTickSize(price); }
+			catch { return price; }
 		}
 
 		private void HandlePlaceOrder(IDictionary<string, object> obj)
@@ -3173,7 +3236,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 						if (prior.Completed)
 						{
 							Log("place_order dedup: clientOrderId=" + clientOrderId + " already submitted; replaying ack");
-							SendOrderAck(id, clientOrderId, prior.Contract, prior.OrderId, prior.State, true);
+							SendOrderAck(id, clientOrderId, prior.Contract, prior.OrderId, prior.State,
+								prior.LimitPrice, prior.StopPrice, true);
 							return;
 						}
 						Log("place_order dedup: clientOrderId=" + clientOrderId + " is in flight; refusing concurrent resubmit");
@@ -3227,13 +3291,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var instrument = ResolveInstrument(symbol);
 				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
 
+				// Round to tick before use; the ack echoes the effective values.
+				limitPrice = RoundToTick(instrument, limitPrice);
+				stopPrice  = RoundToTick(instrument, stopPrice);
+
 				Order order;
 				try
 				{
 					order = account.CreateOrder(
 						instrument, action, orderType, OrderEntry.Automated, tif,
 						quantity, limitPrice, stopPrice,
-						"",              // oco — no bracket in phase 1
+						"",              // oco — single order, no OCO link (see HandlePlaceOco)
 						clientOrderId,   // name — correlation + dedupe key (<= 50 chars)
 						Globals.MaxDate, // gtd — non-GTD
 						null);           // customOrder
@@ -3265,13 +3333,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				lock (orderLock)
 				{
-					submittedOrders[clientOrderId] =
-						new SubmittedOrder { Contract = contract, OrderId = orderId, State = state, Completed = true };
+					submittedOrders[clientOrderId] = new SubmittedOrder
+					{
+						Contract = contract, OrderId = orderId, State = state,
+						LimitPrice = limitPrice, StopPrice = stopPrice, Completed = true,
+					};
 				}
 
 				Log("place_order SUBMITTED account=" + accountName + " " + actionStr + " " + quantity
 					+ " " + contract + " type=" + typeStr + " coid=" + clientOrderId + " state=" + state);
-				SendOrderAck(id, clientOrderId, contract, orderId, state, false);
+				SendOrderAck(id, clientOrderId, contract, orderId, state, limitPrice, stopPrice, false);
 			}
 			catch (Exception ex)
 			{
@@ -3288,7 +3359,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		private void SendOrderAck(string id, string clientOrderId, string contract,
-			string orderId, string state, bool deduped)
+			string orderId, string state, double limitPrice, double stopPrice, bool deduped)
 		{
 			var payload = new Dictionary<string, object>
 			{
@@ -3301,10 +3372,552 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "deduped",       deduped },
 			};
 			if (!string.IsNullOrEmpty(orderId)) payload["orderId"] = orderId;
+			// Effective (tick-rounded) prices; 0 = not applicable, key omitted.
+			if (limitPrice > 0) payload["limitPrice"] = limitPrice;
+			if (stopPrice  > 0) payload["stopPrice"]  = stopPrice;
 			SendFireAndForget(Json.Serialize(payload), "order_ack coid=" + clientOrderId + " id=" + id);
 		}
 
-		// ---------- logging ----------
+		// order management — same keystone rules as HandlePlaceOrder: gate re-read
+		// fresh per request; risk-ADDING ops (place_oco, change_order) take the
+		// full check (enabled + allow-list + maxQty), risk-REDUCING ops take
+		// RiskReducingAllowed only; every price tick-rounded before use and echoed.
+
+		private void HandlePlaceOco(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("place_oco missing id; dropping"); return; }
+
+			// BOTH leg names reserved/released as one unit. reserved: placeholders
+			// inserted for both. committed: Submit() succeeded, reservations become
+			// replayable. ambiguous: Submit() threw, keep reservations so a same-id
+			// retry is refused. finally releases both only when none of these hold.
+			string stopClientOrderId   = null;
+			string targetClientOrderId = null;
+			bool   reserved  = false;
+			bool   committed = false;
+			bool   ambiguous = false;
+
+			try
+			{
+				var accountName = GetString(obj, "account");
+				var symbol      = GetString(obj, "symbol");
+				var actionStr   = GetString(obj, "action");
+				var tifStr      = GetString(obj, "tif");
+				var ocoId       = GetString(obj, "ocoId");
+				stopClientOrderId   = GetString(obj, "stopClientOrderId");
+				targetClientOrderId = GetString(obj, "targetClientOrderId");
+				var qtyN        = GetInt(obj, "quantity");
+				var stopPrice   = GetDouble(obj, "stopPrice");
+				var limitPrice  = GetDouble(obj, "limitPrice");
+
+				// Pre-reservation validation — certainly not submitted.
+				if (string.IsNullOrEmpty(accountName))         { SendErrorResponse(id, "place_oco missing account",             "invalid-params"); return; }
+				if (string.IsNullOrEmpty(symbol))              { SendErrorResponse(id, "place_oco missing symbol",              "invalid-params"); return; }
+				if (string.IsNullOrEmpty(ocoId))               { SendErrorResponse(id, "place_oco missing ocoId",               "invalid-params"); return; }
+				if (string.IsNullOrEmpty(stopClientOrderId))   { SendErrorResponse(id, "place_oco missing stopClientOrderId",   "invalid-params"); return; }
+				if (string.IsNullOrEmpty(targetClientOrderId)) { SendErrorResponse(id, "place_oco missing targetClientOrderId", "invalid-params"); return; }
+				if (!qtyN.HasValue || qtyN.Value <= 0)         { SendErrorResponse(id, "place_oco quantity must be a positive integer", "invalid-params"); return; }
+				if (!(stopPrice > 0))                          { SendErrorResponse(id, "place_oco requires a positive stopPrice",  "invalid-params"); return; }
+				if (!(limitPrice > 0))                         { SendErrorResponse(id, "place_oco requires a positive limitPrice", "invalid-params"); return; }
+				// Stop-vs-limit side correctness is NOT checked — NT8/broker owns that.
+				var quantity = qtyN.Value;
+
+				// Check + reserve BOTH leg names atomically under one lock.
+				lock (orderLock)
+				{
+					SubmittedOrder priorStop, priorTarget;
+					var hasStop   = submittedOrders.TryGetValue(stopClientOrderId, out priorStop);
+					var hasTarget = submittedOrders.TryGetValue(targetClientOrderId, out priorTarget);
+					if (hasStop && hasTarget && priorStop.Completed && priorTarget.Completed)
+					{
+						Log("place_oco dedup: pair " + stopClientOrderId + "/" + targetClientOrderId + " already submitted; replaying ack");
+						SendOcoAck(id, ocoId, priorStop.Contract,
+							stopClientOrderId, priorStop.OrderId, priorStop.State,
+							targetClientOrderId, priorTarget.OrderId, priorTarget.State,
+							priorStop.StopPrice, priorTarget.LimitPrice, true);
+						return;
+					}
+					if (hasStop && hasTarget)
+					{
+						// Both leg names reserved but not both Completed: this pair is
+						// still in flight. Refuse — never fire a second pair.
+						Log("place_oco dedup: pair " + stopClientOrderId + "/" + targetClientOrderId + " is in flight; refusing concurrent resubmit");
+						SendErrorResponse(id,
+							"OCO pair '" + ocoId + "' is currently in flight — do not resubmit; check again shortly",
+							"in-flight");
+						return;
+					}
+					if (hasStop || hasTarget)
+					{
+						// Exactly ONE leg name exists — a genuine orphan (a live pair is
+						// always submitted atomically). Server's oco-partial recovers.
+						Log("place_oco dedup: leg name collision for " + (hasStop ? stopClientOrderId : targetClientOrderId) + "; refusing");
+						SendErrorResponse(id,
+							"an order named '" + (hasStop ? stopClientOrderId : targetClientOrderId)
+							+ "' already exists without its OCO sibling — do not resubmit; check get_positions",
+							"oco-partial");
+						return;
+					}
+					submittedOrders[stopClientOrderId]   = new SubmittedOrder { Completed = false };
+					submittedOrders[targetClientOrderId] = new SubmittedOrder { Completed = false };
+				}
+				reserved = true;
+
+				// Gate — keystone, fail-closed, FULL check (a triggered exit on a flat account opens a position).
+				var gate = LoadTradingGate();
+				if (gate == null || !gate.enabled)
+				{
+					SendErrorResponse(id, "AddOn trading gate disabled (trading.config.json missing or enabled=false)", "gate-disabled");
+					Log("place_oco BLOCKED (gate disabled) account=" + accountName + " " + actionStr + " " + quantity + " " + symbol);
+					return;
+				}
+				if (gate.allowAccounts == null || !gate.allowAccounts.Contains(accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
+					Log("place_oco BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+				if (quantity > gate.maxQty)
+				{
+					SendErrorResponse(id, "quantity " + quantity + " exceeds AddOn maxQty " + gate.maxQty, "qty-exceeds-max");
+					Log("place_oco BLOCKED (qty>max) qty=" + quantity + " max=" + gate.maxQty + " account=" + accountName);
+					return;
+				}
+
+				OrderAction action;
+				TimeInForce tif;
+				if (!TryParseAction(actionStr, out action)) { SendErrorResponse(id, "invalid action: " + actionStr, "invalid-params"); return; }
+				if (!TryParseTif(tifStr, out tif))          { SendErrorResponse(id, "invalid tif: "    + tifStr,    "invalid-params"); return; }
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
+
+				var instrument = ResolveInstrument(symbol);
+				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
+
+				stopPrice  = RoundToTick(instrument, stopPrice);
+				limitPrice = RoundToTick(instrument, limitPrice);
+
+				// Create BOTH legs before any Submit; a throw leaves nothing
+				// submitted (unsubmitted orders carry no NT8 state), finally releases.
+				Order stopOrder, targetOrder;
+				try
+				{
+					stopOrder = account.CreateOrder(
+						instrument, action, OrderType.StopMarket, OrderEntry.Automated, tif,
+						quantity, 0, stopPrice,
+						ocoId,               // oco — NT8 links the pair on this id
+						stopClientOrderId,   // name — correlation + dedupe key
+						Globals.MaxDate, null);
+					targetOrder = account.CreateOrder(
+						instrument, action, OrderType.Limit, OrderEntry.Automated, tif,
+						quantity, limitPrice, 0,
+						ocoId,
+						targetClientOrderId,
+						Globals.MaxDate, null);
+				}
+				catch (Exception ex) { SendErrorResponse(id, "CreateOrder failed: " + ex.Message, "create-order-failed"); return; }
+
+				// ONE atomic Submit of both legs — never per-leg.
+				try { account.Submit(new[] { stopOrder, targetOrder }); }
+				catch (Exception ex)
+				{
+					ambiguous = true;
+					SendErrorResponse(id, "Submit failed: " + ex.Message, "submit-failed");
+					return;
+				}
+
+				// Never auto-remove the reservations past this line.
+				committed = true;
+
+				// Guarded field reads, same rationale as HandlePlaceOrder.
+				var contract = symbol;
+				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
+				string stopOrderId = null, targetOrderId = null;
+				var stopState = "Submitted";
+				var targetState = "Submitted";
+				try { stopOrderId = stopOrder.OrderId; }              catch { /* not assigned yet */ }
+				try { stopState = stopOrder.OrderState.ToString(); }  catch { /* transient */ }
+				try { targetOrderId = targetOrder.OrderId; }             catch { /* not assigned yet */ }
+				try { targetState = targetOrder.OrderState.ToString(); } catch { /* transient */ }
+
+				lock (orderLock)
+				{
+					submittedOrders[stopClientOrderId] = new SubmittedOrder
+					{
+						Contract = contract, OrderId = stopOrderId, State = stopState,
+						StopPrice = stopPrice, Completed = true,
+					};
+					submittedOrders[targetClientOrderId] = new SubmittedOrder
+					{
+						Contract = contract, OrderId = targetOrderId, State = targetState,
+						LimitPrice = limitPrice, Completed = true,
+					};
+				}
+
+				Log("place_oco SUBMITTED account=" + accountName + " " + actionStr + " " + quantity
+					+ " " + contract + " oco=" + ocoId + " stop@" + stopPrice + " target@" + limitPrice);
+				SendOcoAck(id, ocoId, contract,
+					stopClientOrderId, stopOrderId, stopState,
+					targetClientOrderId, targetOrderId, targetState,
+					stopPrice, limitPrice, false);
+			}
+			catch (Exception ex)
+			{
+				// Unexpected, codeless failure — the TS side treats it as ambiguous.
+				SendErrorResponse(id, "place_oco failed: " + ex.Message);
+			}
+			finally
+			{
+				if (reserved && !committed && !ambiguous)
+				{
+					lock (orderLock)
+					{
+						submittedOrders.Remove(stopClientOrderId);
+						submittedOrders.Remove(targetClientOrderId);
+					}
+				}
+			}
+		}
+
+		private void SendOcoAck(string id, string ocoId, string contract,
+			string stopCoid, string stopOrderId, string stopState,
+			string targetCoid, string targetOrderId, string targetState,
+			double stopPrice, double limitPrice, bool deduped)
+		{
+			var stop = new Dictionary<string, object>
+			{
+				{ "clientOrderId", stopCoid ?? "" },
+				{ "state",         stopState ?? "" },
+			};
+			if (!string.IsNullOrEmpty(stopOrderId)) stop["orderId"] = stopOrderId;
+			var target = new Dictionary<string, object>
+			{
+				{ "clientOrderId", targetCoid ?? "" },
+				{ "state",         targetState ?? "" },
+			};
+			if (!string.IsNullOrEmpty(targetOrderId)) target["orderId"] = targetOrderId;
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",        1 },
+				{ "id",       id },
+				{ "type",     "oco_ack" },
+				{ "ocoId",    ocoId ?? "" },
+				{ "contract", contract ?? "" },
+				{ "stop",     stop },
+				{ "target",   target },
+				{ "deduped",  deduped },
+			};
+			// Effective (tick-rounded) prices; 0 = unknown (old entry), omitted.
+			if (stopPrice > 0)  payload["stopPrice"]  = stopPrice;
+			if (limitPrice > 0) payload["limitPrice"] = limitPrice;
+			SendFireAndForget(Json.Serialize(payload), "oco_ack oco=" + ocoId + " id=" + id);
+		}
+
+		private void HandleCancelOrder(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("cancel_order missing id; dropping"); return; }
+			try
+			{
+				var accountName   = GetString(obj, "account");
+				var clientOrderId = GetString(obj, "clientOrderId");
+				if (string.IsNullOrEmpty(accountName))   { SendErrorResponse(id, "cancel_order missing account",       "invalid-params"); return; }
+				if (string.IsNullOrEmpty(clientOrderId)) { SendErrorResponse(id, "cancel_order missing clientOrderId", "invalid-params"); return; }
+
+				var gate = LoadTradingGate();
+				if (!RiskReducingAllowed(gate, accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
+					Log("cancel_order BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
+
+				var order = FindWorkingOrderByName(account, clientOrderId);
+				if (order == null)
+				{
+					SendErrorResponse(id, "no order named '" + clientOrderId + "' on account " + accountName, "order-not-found");
+					return;
+				}
+				var terminalState = TerminalStateOf(order);
+				if (terminalState != null)
+				{
+					// Carries the state so the caller learns Filled vs Cancelled.
+					SendErrorResponse(id, "order '" + clientOrderId + "' is already in terminal state " + terminalState, "already-terminal");
+					return;
+				}
+
+				try { account.Cancel(new[] { order }); }
+				catch (Exception ex) { SendErrorResponse(id, "Cancel failed: " + ex.Message, "cancel-failed"); return; }
+
+				var postState = "CancelSubmitted";
+				try { postState = order.OrderState.ToString(); } catch { /* transient */ }
+				string orderId = null;
+				try { orderId = order.OrderId; } catch { /* not assigned */ }
+
+				Log("cancel_order DISPATCHED account=" + accountName + " coid=" + clientOrderId + " state=" + postState);
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",             1 },
+					{ "id",            id },
+					{ "type",          "cancel_ack" },
+					{ "clientOrderId", clientOrderId },
+					{ "state",         postState },
+				};
+				if (!string.IsNullOrEmpty(orderId)) payload["orderId"] = orderId;
+				SendFireAndForget(Json.Serialize(payload), "cancel_ack coid=" + clientOrderId + " id=" + id);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "cancel_order failed: " + ex.Message);
+			}
+		}
+
+		// Terminal-state name, or null when still working (or unreadable).
+		private static string TerminalStateOf(Order order)
+		{
+			try
+			{
+				var st = order.OrderState;
+				return Order.IsTerminalState(st) ? st.ToString() : null;
+			}
+			catch { return null; }
+		}
+
+		private void HandleCancelAll(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("cancel_all missing id; dropping"); return; }
+			try
+			{
+				var accountName = GetString(obj, "account");
+				var symbol      = GetString(obj, "symbol");
+				if (string.IsNullOrEmpty(accountName)) { SendErrorResponse(id, "cancel_all missing account", "invalid-params"); return; }
+				if (string.IsNullOrEmpty(symbol))      { SendErrorResponse(id, "cancel_all missing symbol",  "invalid-params"); return; }
+
+				var gate = LoadTradingGate();
+				if (!RiskReducingAllowed(gate, accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
+					Log("cancel_all BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
+
+				var instrument = ResolveInstrument(symbol);
+				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
+
+				var contract = symbol;
+				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
+
+				// Best-effort count only; the ack is not a confirmation.
+				var working = 0;
+				try
+				{
+					lock (account.Orders)
+					{
+						foreach (var o in account.Orders)
+						{
+							if (o == null) continue;
+							try
+							{
+								if (Order.IsTerminalState(o.OrderState)) continue;
+								if (o.Instrument != null && string.Equals(o.Instrument.FullName, contract, StringComparison.Ordinal)) working++;
+							}
+							catch { /* order mid-teardown */ }
+						}
+					}
+				}
+				catch { /* count stays 0; still dispatch */ }
+
+				try { account.CancelAllOrders(instrument); }
+				catch (Exception ex) { SendErrorResponse(id, "CancelAllOrders failed: " + ex.Message, "cancel-all-failed"); return; }
+
+				Log("cancel_all DISPATCHED account=" + accountName + " contract=" + contract + " working=" + working);
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",              1 },
+					{ "id",             id },
+					{ "type",           "cancel_all_ack" },
+					{ "contract",       contract },
+					{ "cancelledCount", working },
+				};
+				SendFireAndForget(Json.Serialize(payload), "cancel_all_ack contract=" + contract + " id=" + id);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "cancel_all failed: " + ex.Message);
+			}
+		}
+
+		private void HandleFlatten(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("flatten missing id; dropping"); return; }
+			try
+			{
+				var accountName = GetString(obj, "account");
+				var symbol      = GetString(obj, "symbol");
+				if (string.IsNullOrEmpty(accountName)) { SendErrorResponse(id, "flatten missing account", "invalid-params"); return; }
+				if (string.IsNullOrEmpty(symbol))      { SendErrorResponse(id, "flatten missing symbol",  "invalid-params"); return; }
+
+				var gate = LoadTradingGate();
+				if (!RiskReducingAllowed(gate, accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
+					Log("flatten BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
+
+				var instrument = ResolveInstrument(symbol);
+				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
+
+				var contract = symbol;
+				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
+
+				// Cancels every working order AND closes the position at market —
+				// including manually placed orders.
+				try { account.Flatten(new[] { instrument }); }
+				catch (Exception ex) { SendErrorResponse(id, "Flatten failed: " + ex.Message, "flatten-failed"); return; }
+
+				Log("flatten DISPATCHED account=" + accountName + " contract=" + contract);
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",        1 },
+					{ "id",       id },
+					{ "type",     "flatten_ack" },
+					{ "contract", contract },
+				};
+				SendFireAndForget(Json.Serialize(payload), "flatten_ack contract=" + contract + " id=" + id);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "flatten failed: " + ex.Message);
+			}
+		}
+
+		private void HandleChangeOrder(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("change_order missing id; dropping"); return; }
+			try
+			{
+				var accountName   = GetString(obj, "account");
+				var clientOrderId = GetString(obj, "clientOrderId");
+				var qtyN          = GetInt(obj, "quantity");
+				var newLimit      = GetDouble(obj, "limitPrice");
+				var newStop       = GetDouble(obj, "stopPrice");
+				if (string.IsNullOrEmpty(accountName))   { SendErrorResponse(id, "change_order missing account",       "invalid-params"); return; }
+				if (string.IsNullOrEmpty(clientOrderId)) { SendErrorResponse(id, "change_order missing clientOrderId", "invalid-params"); return; }
+				if (!qtyN.HasValue && !(newLimit > 0) && !(newStop > 0))
+				{
+					SendErrorResponse(id, "change_order requires at least one of quantity, limitPrice, stopPrice", "invalid-params");
+					return;
+				}
+				if (qtyN.HasValue && qtyN.Value <= 0) { SendErrorResponse(id, "change_order quantity must be a positive integer", "invalid-params"); return; }
+
+				// Gate — FULL check: a raised qty or widened stop adds risk.
+				var gate = LoadTradingGate();
+				if (gate == null || !gate.enabled)
+				{
+					SendErrorResponse(id, "AddOn trading gate disabled (trading.config.json missing or enabled=false)", "gate-disabled");
+					Log("change_order BLOCKED (gate disabled) account=" + accountName + " coid=" + clientOrderId);
+					return;
+				}
+				if (gate.allowAccounts == null || !gate.allowAccounts.Contains(accountName))
+				{
+					SendErrorResponse(id, "account '" + accountName + "' is not in the AddOn allow-list", "account-not-allowed");
+					Log("change_order BLOCKED (account not allowed) account=" + accountName);
+					return;
+				}
+
+				var account = FindAccount(accountName);
+				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
+
+				var order = FindWorkingOrderByName(account, clientOrderId);
+				if (order == null)
+				{
+					SendErrorResponse(id, "no order named '" + clientOrderId + "' on account " + accountName, "order-not-found");
+					return;
+				}
+				var terminalState = TerminalStateOf(order);
+				if (terminalState != null)
+				{
+					SendErrorResponse(id, "order '" + clientOrderId + "' is already in terminal state " + terminalState, "already-terminal");
+					return;
+				}
+
+				// Read current values once, guarded — they seed unchanged fields.
+				int curQty; double curLimit, curStop; Instrument inst;
+				try
+				{
+					inst     = order.Instrument;
+					curQty   = order.Quantity;
+					curLimit = order.LimitPrice;
+					curStop  = order.StopPrice;
+				}
+				catch (Exception ex) { SendErrorResponse(id, "could not read working order state: " + ex.Message, "state-read-failed"); return; }
+
+				// Keystone qty check against the EFFECTIVE post-change quantity.
+				var effQty = qtyN.HasValue ? qtyN.Value : curQty;
+				if (effQty > gate.maxQty)
+				{
+					SendErrorResponse(id, "quantity " + effQty + " exceeds AddOn maxQty " + gate.maxQty, "qty-exceeds-max");
+					Log("change_order BLOCKED (qty>max) qty=" + effQty + " max=" + gate.maxQty + " account=" + accountName);
+					return;
+				}
+
+				// Stage ALL THREE, unchanged fields to current values (documented
+				// safe pattern for Account.Change), new prices tick-rounded.
+				var effLimit = newLimit > 0 ? RoundToTick(inst, newLimit) : curLimit;
+				var effStop  = newStop  > 0 ? RoundToTick(inst, newStop)  : curStop;
+				try
+				{
+					order.QuantityChanged   = effQty;
+					order.LimitPriceChanged = effLimit;
+					order.StopPriceChanged  = effStop;
+					account.Change(new[] { order });
+				}
+				catch (Exception ex) { SendErrorResponse(id, "Change failed: " + ex.Message, "change-failed"); return; }
+
+				var postState = "ChangeSubmitted";
+				try { postState = order.OrderState.ToString(); } catch { /* transient */ }
+				string orderId = null;
+				try { orderId = order.OrderId; } catch { /* not assigned */ }
+
+				Log("change_order DISPATCHED account=" + accountName + " coid=" + clientOrderId
+					+ " qty=" + effQty + " limit=" + effLimit + " stop=" + effStop + " state=" + postState);
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",             1 },
+					{ "id",            id },
+					{ "type",          "change_ack" },
+					{ "clientOrderId", clientOrderId },
+					{ "state",         postState },
+					{ "quantity",      effQty },
+				};
+				if (!string.IsNullOrEmpty(orderId)) payload["orderId"] = orderId;
+				// Effective values; 0 = not applicable to this order type.
+				if (effLimit > 0) payload["limitPrice"] = effLimit;
+				if (effStop  > 0) payload["stopPrice"]  = effStop;
+				SendFireAndForget(Json.Serialize(payload), "change_ack coid=" + clientOrderId + " id=" + id);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "change_order failed: " + ex.Message);
+			}
+		}
+
+		// logging
 
 		private static void Log(string msg)
 		{

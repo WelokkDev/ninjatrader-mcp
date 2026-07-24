@@ -193,6 +193,7 @@ function makeDeps(
       lastHeartbeatAt: connected ? NOW - 1 : null,
       ntVersion: connected ? "NT8" : null,
       instruments: [],
+      caps: null,
       pendingRequests: 0,
       listening: true,
       port: 9472,

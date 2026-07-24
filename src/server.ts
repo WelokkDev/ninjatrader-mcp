@@ -35,7 +35,15 @@ import { registerExperimentResult } from "./tools/experiment-result.js";
 import { registerListExperiments } from "./tools/list-experiments.js";
 import { registerDiffExperiments } from "./tools/diff-experiments.js";
 import { registerPlaceOrder } from "./tools/place-order.js";
-import { isTradingRegistrationEnabled } from "./execution/config.js";
+import { registerPlaceOco } from "./tools/place-oco.js";
+import { registerChangeOrder } from "./tools/change-order.js";
+import { registerCancelOrder } from "./tools/cancel-order.js";
+import { registerCancelAll } from "./tools/cancel-all.js";
+import { registerFlatten } from "./tools/flatten.js";
+import {
+  isTradingRegistrationEnabled,
+  isRiskReducingRegistrationEnabled,
+} from "./execution/config.js";
 
 // The composition seam. A private bin (src/private/) imports these to boot the
 // whole public surface with one call each, then registers its own tools on top.
@@ -79,15 +87,38 @@ export function registerGenericTools(
   unless(["list_decisions"], () => registerListDecisions(server));
   unless(["get_trades"], () => registerGetTrades(server));
   unless(["sync_trades"], () => registerSyncTrades(server));
-  // Write path — registered ONLY when trading is enabled at startup, so when off
-  // the tool is absent from the surface entirely (capability removal, not a
-  // prompt Claude could talk past). Re-enabling requires a restart.
-  unless(["place_order"], () => {
+  // Risk-ADDING write tools — registered ONLY when trading is enabled at
+  // startup; when off they are absent entirely (capability removal, not a
+  // prompt gate). Re-enabling requires a restart.
+  unless(["place_order", "place_oco", "change_order"], () => {
     if (isTradingRegistrationEnabled()) {
       registerPlaceOrder(server);
-      console.error("[server] trading ENABLED — place_order tool registered");
+      registerPlaceOco(server);
+      registerChangeOrder(server);
+      console.error(
+        "[server] trading enabled + account allow-listed — place_order/place_oco/change_order tools registered",
+      );
     } else {
-      console.error("[server] trading disabled — place_order tool NOT registered");
+      console.error(
+        "[server] place_order/place_oco/change_order NOT registered (needs NT_TRADING_ENABLED=1 AND an allow-listed account)",
+      );
+    }
+  });
+  // Risk-REDUCING write tools — registered whenever any account is allow-listed,
+  // independent of the enabled switch, so orders stay manageable across a
+  // kill-switch restart. Empty allow-list registers zero write tools.
+  unless(["cancel_order", "cancel_all", "flatten"], () => {
+    if (isRiskReducingRegistrationEnabled()) {
+      registerCancelOrder(server);
+      registerCancelAll(server);
+      registerFlatten(server);
+      console.error(
+        "[server] accounts allow-listed — cancel_order/cancel_all/flatten tools registered",
+      );
+    } else {
+      console.error(
+        "[server] no accounts allow-listed — cancel_order/cancel_all/flatten tools NOT registered",
+      );
     }
   });
 }

@@ -63,6 +63,11 @@ export function isConnected(): boolean {
   return connections.isConnected();
 }
 
+/** AddOn write caps; null (disconnected or pre-caps AddOn) means callers assume ["place_order"]. */
+export function getAddonCaps(): string[] | null {
+  return connections.getCaps();
+}
+
 export function onMessage<T extends InboundMessage["type"]>(
   type: T,
   handler: (message: Extract<InboundMessage, { type: T }>) => void,

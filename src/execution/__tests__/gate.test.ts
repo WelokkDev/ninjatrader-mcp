@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { evaluateGate } from "../gate.js";
+import { evaluateGate, evaluateRiskReducingGate } from "../gate.js";
 import type { TradingConfig } from "../config.js";
 
 const CONFIG: TradingConfig = {
@@ -68,6 +68,28 @@ describe("evaluateGate", () => {
       { ...CONFIG, maxOrdersPerMin: 0 },
       recent,
     );
+    expect(v.allowed).toBe(true);
+  });
+});
+
+describe("evaluateRiskReducingGate", () => {
+  it("passes an allow-listed account even with enabled=false (locked policy)", () => {
+    const v = evaluateRiskReducingGate("Sim101", { ...CONFIG, enabled: false });
+    expect(v.allowed).toBe(true);
+  });
+
+  it("blocks an account off the allow-list", () => {
+    const v = evaluateRiskReducingGate("Apex-99", CONFIG);
+    expect(v).toMatchObject({ allowed: false, reason: "account-not-allowed" });
+  });
+
+  it("empty allow-list blocks everything (fail-closed default)", () => {
+    const v = evaluateRiskReducingGate("Sim101", { ...CONFIG, allowAccounts: [] });
+    expect(v).toMatchObject({ allowed: false, reason: "account-not-allowed" });
+  });
+
+  it("ignores the qty cap entirely (maxQty=0 still passes)", () => {
+    const v = evaluateRiskReducingGate("Sim101", { ...CONFIG, maxQty: 0, enabled: false });
     expect(v.allowed).toBe(true);
   });
 });

@@ -5,10 +5,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Same file the bridge token lives in (src/bridge/auth.ts). We read it fresh on
-// every call rather than caching, so NT_TRADING_ENABLED=0 in .env.local
-// disables the write path live, without a server restart. process.env wins over
-// the file, so a launch-env master switch overrides an on-disk one.
+// Shared with the bridge token (src/bridge/auth.ts). Read fresh every call (no
+// cache) so NT_TRADING_ENABLED=0 disables the write path live. process.env wins
+// over the file, so a launch-env master switch overrides an on-disk one.
 const ENV_FILE = path.join(__dirname, "..", "..", ".env.local");
 
 const ENABLED_KEY = "NT_TRADING_ENABLED";
@@ -16,8 +15,7 @@ const ACCOUNTS_KEY = "NT_TRADING_ALLOW_ACCOUNTS";
 const MAX_QTY_KEY = "NT_TRADING_MAX_QTY";
 const MAX_RATE_KEY = "NT_TRADING_MAX_ORDERS_PER_MIN";
 
-// Conservative default when the rate limit is unset/invalid. An explicit 0
-// means "no rate limit" (operator opt-out); everything else fails closed low.
+// Fail-closed default for unset/invalid rate limit. Explicit 0 = no limit.
 const DEFAULT_MAX_ORDERS_PER_MIN = 6;
 
 export interface TradingConfig {
@@ -72,10 +70,9 @@ function parseNonNegInt(v: string | undefined, fallback: number): number {
 }
 
 /**
- * Read the trading gate fresh. Fail-closed: a missing/garbled source yields a
- * disabled config with an empty allow-list and a zero qty cap, so the default
- * posture is "no orders." This is the TS-side gate (layer 1); the C# AddOn
- * enforces an independent, un-recompilable gate of its own (the keystone).
+ * Fail-closed: missing/garbled source yields disabled config, empty allow-list,
+ * zero qty cap ("no orders"). TS-side gate (layer 1); the C# AddOn enforces an
+ * independent gate of its own.
  */
 export function loadTradingConfig(env: NodeJS.ProcessEnv = process.env): TradingConfig {
   const file = readEnvFile();
@@ -90,11 +87,20 @@ export function loadTradingConfig(env: NodeJS.ProcessEnv = process.env): Trading
 }
 
 /**
- * Whether to register the place_order tool at startup. When disabled, the tool
- * is never added to the MCP surface — Claude has nothing to call regardless of
- * mode. Re-enabling requires a restart (deliberate); disabling can be done live
- * via the runtime check. That asymmetry is intentional.
+ * Register risk-ADDING tools (place_order / place_oco / change_order) at
+ * startup: enabled AND at least one allow-listed account. Re-enabling requires
+ * a restart (deliberate); disabling can be done live via the runtime check.
  */
 export function isTradingRegistrationEnabled(): boolean {
-  return loadTradingConfig().enabled;
+  const cfg = loadTradingConfig();
+  return cfg.enabled && cfg.allowAccounts.length > 0;
+}
+
+/**
+ * Register risk-REDUCING tools (cancel_order / cancel_all / flatten) at startup:
+ * any allow-listed account, independent of `enabled` — a kill-switch restart
+ * still leaves working orders manageable.
+ */
+export function isRiskReducingRegistrationEnabled(): boolean {
+  return loadTradingConfig().allowAccounts.length > 0;
 }

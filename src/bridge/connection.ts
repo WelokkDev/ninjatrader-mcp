@@ -6,15 +6,9 @@ export const HEARTBEAT_TIMEOUT_MS = 30_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * Typed classifier for a rejected request() — callers never sniff the message
- * string. `wasSent` false means the request provably never crossed the wire.
- *
- *  - `not-connected`  no active socket at call time            (wasSent=false)
- *  - `send-failed`    socket.send() threw                       (wasSent=false)
- *  - `timeout`        sent, but no response within the deadline (wasSent=true)
- *  - `disconnected`   socket dropped while awaiting a response  (wasSent=true)
- *  - `remote-error`   NT8 returned an {type:"error"} envelope   (wasSent=true);
- *                     `code` carries the C# classifier when present.
+ * Rejected-request classifier; `wasSent` distinguishes provably-not-sent
+ * (not-connected, send-failed) from ambiguous (timeout, disconnected,
+ * remote-error). `code` carries the C# classifier on remote-error.
  */
 export type BridgeErrorKind =
   | "not-connected"
@@ -27,7 +21,6 @@ export class BridgeRequestError extends Error {
   readonly kind: BridgeErrorKind;
   /** Whether the request provably reached the wire. */
   readonly wasSent: boolean;
-  /** Machine-readable code from a remote `error` envelope (remote-error only). */
   readonly code?: string;
 
   constructor(message: string, kind: BridgeErrorKind, wasSent: boolean, code?: string) {
@@ -45,6 +38,9 @@ export interface ConnectionStatus {
   lastHeartbeatAt: number | null;
   ntVersion: string | null;
   instruments: string[];
+  /** Write ops the AddOn supports (hello `caps`). null = disconnected OR
+   *  an older AddOn that predates caps. */
+  caps: string[] | null;
   pendingRequests: number;
 }
 
@@ -63,6 +59,7 @@ interface ActiveConnection {
   lastHeartbeatAt: number;
   ntVersion: string | null;
   instruments: string[];
+  caps: string[] | null;
   watchdog: NodeJS.Timeout;
 }
 
@@ -87,6 +84,7 @@ export class ConnectionManager {
         lastHeartbeatAt: null,
         ntVersion: null,
         instruments: [],
+        caps: null,
         pendingRequests: this.pending.size,
       };
     }
@@ -96,8 +94,14 @@ export class ConnectionManager {
       lastHeartbeatAt: this.active.lastHeartbeatAt,
       ntVersion: this.active.ntVersion,
       instruments: [...this.active.instruments],
+      caps: this.active.caps ? [...this.active.caps] : null,
       pendingRequests: this.pending.size,
     };
+  }
+
+  /** null = disconnected OR AddOn predates caps (treat as place_order-only). */
+  getCaps(): string[] | null {
+    return this.active?.caps ? [...this.active.caps] : null;
   }
 
   onMessage<T extends InboundMessage["type"]>(
@@ -138,8 +142,7 @@ export class ConnectionManager {
     return new Promise<InboundMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
-          // Neutral message — candle callers append the "downloading history"
-          // hint themselves; an order caller must NOT (nonsense mid-submit).
+          // Keep message neutral: order callers must not imply mid-submit state.
           reject(
             new BridgeRequestError(
               `Request ${type} (${id}) timed out after ${timeoutMs}ms`,
@@ -182,6 +185,7 @@ export class ConnectionManager {
       lastHeartbeatAt: now,
       ntVersion: null,
       instruments: [],
+      caps: null,
       watchdog: this.startWatchdog(),
     };
     this.active = conn;
@@ -204,8 +208,7 @@ export class ConnectionManager {
 
   private rejectAllPending(reason: string): void {
     if (this.pending.size === 0) return;
-    // Already on the wire when the socket dropped — outcome unknown, never
-    // "certainly not submitted".
+    // Already on the wire when the socket dropped — outcome unknown (wasSent=true).
     const err = new BridgeRequestError(reason, "disconnected", true);
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
@@ -227,9 +230,11 @@ export class ConnectionManager {
       case "hello":
         conn.ntVersion = msg.ntVersion;
         conn.instruments = [...msg.instruments];
+        conn.caps = msg.caps ? [...msg.caps] : null;
         conn.lastHeartbeatAt = Date.now();
         console.error(
-          `[bridge] hello received: NT ${msg.ntVersion}, instruments=[${msg.instruments.join(", ")}]`,
+          `[bridge] hello received: NT ${msg.ntVersion}, instruments=[${msg.instruments.join(", ")}]` +
+            (msg.caps ? `, caps=[${msg.caps.join(", ")}]` : ", caps=<none> (pre-phase-2 AddOn)"),
         );
         break;
       case "heartbeat":
@@ -240,7 +245,7 @@ export class ConnectionManager {
         break;
     }
 
-    // Correlate any inbound message that carries an id with a pending request.
+    // Correlate an inbound id with a pending request.
     const maybeId = (msg as { id?: unknown }).id;
     if (typeof maybeId === "string") {
       const entry = this.pending.get(maybeId);
@@ -248,8 +253,8 @@ export class ConnectionManager {
         clearTimeout(entry.timer);
         this.pending.delete(maybeId);
         if (msg.type === "error") {
-          // NT8 processed the request and refused it; the optional `code` lets
-          // the write path tell a pre-Submit block from an ambiguous one.
+          // NT8 processed and refused it; `code` lets the write path tell a
+          // pre-Submit block from an ambiguous one.
           entry.reject(new BridgeRequestError(msg.message, "remote-error", true, msg.code));
         } else {
           entry.resolve(msg);

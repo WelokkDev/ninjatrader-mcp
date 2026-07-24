@@ -42,11 +42,13 @@ const DESCRIPTION =
   "Default-off and gated: it only reaches NT8 when trading is enabled AND the account is on the server allow-list AND the " +
   "quantity is within the cap — otherwise it is blocked and logged, never sent. Params: account (exact NT8 name), symbol " +
   "(e.g. 'MNQ', resolved to the front-month contract), action (Buy/Sell), orderType (Market/Limit/Stop/StopLimit), quantity " +
-  "(contracts), tif (Day/Gtc), and limitPrice/stopPrice as the type requires (Limit→limitPrice, Stop→stopPrice, " +
-  "StopLimit→both). A success ack means NT8 ACCEPTED the submit — it is NOT a fill and NOT proof the exchange took it; the " +
-  "order can still be rejected asynchronously. Confirm the real outcome via get_positions / the live position feed. Not a " +
-  "bracket: place protective stops/targets as their own orders after you see the entry fill. Leave clientOrderId unset for " +
-  "new orders; set it only to retry an ambiguous submit (timeout/disconnect) with the id you got back, so the retry is deduped.";
+  "(contracts), tif (Day/Gtc/Ioc — NT8 has no FOK; Ioc fills what it can immediately and cancels the rest), and " +
+  "limitPrice/stopPrice as the type requires (Limit→limitPrice, Stop→stopPrice, StopLimit→both). Prices are tick-rounded " +
+  "by the AddOn; the ack echoes effective values. A success ack means NT8 ACCEPTED the submit — it is NOT a fill and NOT " +
+  "proof the exchange took it; the order can still be rejected asynchronously. Confirm the real outcome via get_positions " +
+  "/ the live position feed. Not a bracket: after you see the entry fill, use place_oco for the protective stop + target " +
+  "pair, and change_order to trail. Leave clientOrderId unset for new orders; set it only to retry an ambiguous submit " +
+  "(timeout/disconnect) with the id you got back, so the retry is deduped.";
 
 export function createPlaceOrderHandler(service: () => ExecutionService) {
   return async (args: PlaceOrderArgs): Promise<ToolResult> => {

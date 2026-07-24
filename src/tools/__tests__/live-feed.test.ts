@@ -45,6 +45,7 @@ function makeDeps(runtime: LiveFeedRuntime | null): LiveFeedToolsDeps {
       lastHeartbeatAt: NOW - 1,
       ntVersion: "NT8",
       instruments: ["NQ"],
+      caps: null,
       pendingRequests: 0,
       listening: true,
       port: 9472,

@@ -2,17 +2,14 @@ import { z } from "zod";
 
 export const PROTOCOL_VERSION = 1;
 
-// Each message shape is defined once as a zod schema; the TS types are z.infer
-// of them. The C# AddOn (ninja-addon/addons/mcp-bridge.cs) mirrors these shapes
-// by hand. Parsing strips unknown keys, rejects missing/wrong-typed/non-finite
-// fields, and keeps absent optionals absent.
+// Schemas are the single source; TS types are z.infer. The C# AddOn
+// (ninja-addon/addons/mcp-bridge.cs) mirrors these shapes by hand.
 
-/** Envelope for unsolicited messages. */
 function msg<T extends string, S extends z.ZodRawShape>(type: T, shape: S) {
   return z.object({ v: z.literal(1), type: z.literal(type), ...shape });
 }
 
-/** Envelope for request/response messages correlated by id. */
+/** Request/response envelope correlated by id. */
 function reqMsg<T extends string, S extends z.ZodRawShape>(type: T, shape: S) {
   return z.object({ v: z.literal(1), id: z.string(), type: z.literal(type), ...shape });
 }
@@ -22,6 +19,9 @@ export const helloMessageSchema = msg("hello", {
   instruments: z.array(z.string()),
   // NT8-configured timezone id (bars are stamped in it); older AddOns omit it.
   timeZone: z.string().optional(),
+  // Write ops this AddOn supports; absent = old AddOn (place_order only), so
+  // ExecutionService fails fast on unsupported ops rather than timing out (deploy skew).
+  caps: z.array(z.string()).optional(),
 });
 export type HelloMessage = z.infer<typeof helloMessageSchema>;
 
@@ -44,8 +44,7 @@ export const drawZoneFields = {
   symbol: z.string().min(1),
   proximal: z.number(),
   distal: z.number(),
-  // Unix seconds; omit fromTs for the bars-back fallback anchor, toTs to
-  // extend to the current bar.
+  // Unix seconds; omit fromTs for the bars-back anchor, toTs to extend to current bar.
   fromTs: z.number().int().optional(),
   toTs: z.number().int().optional(),
 };
@@ -95,8 +94,7 @@ export type DrawMessage = z.infer<typeof drawMessageSchema>;
 export const clearZonesMessageSchema = msg("clear_zones", {
   // Omit symbol to clear every renderer-attached chart.
   symbol: z.string().optional(),
-  // Legacy single-id form; prefer `ids`.
-  id: z.string().optional(),
+  id: z.string().optional(), // legacy single-id form; prefer `ids`
   ids: z.array(z.string()).optional(),
 });
 export type ClearZonesMessage = z.infer<typeof clearZonesMessageSchema>;
@@ -106,8 +104,7 @@ export const requestCandlesMessageSchema = reqMsg("request_candles", {
   timeframe: z.string(),
   from: z.number(),
   to: z.number(),
-  // Session-template name (e.g. "cme_us_index_futures_eth"); the AddOn fails
-  // the request closed on a missing/unknown template.
+  // Session-template name; AddOn fails the request closed on a missing/unknown template.
   tradingHoursTemplate: z.string(),
 });
 export type RequestCandlesMessage = z.infer<typeof requestCandlesMessageSchema>;
@@ -126,8 +123,7 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   symbol: z.string(),
   timeframe: z.string(),
   candles: z.array(candlePayloadSchema),
-  // NT8 feed that served this fetch (e.g. "Rithmic", "Simulated Data Feed");
-  // older AddOns omit it. Ingest rejects sim-feed bars — see data-source.ts.
+  // NT8 feed that served this fetch; older AddOns omit. Ingest rejects sim-feed bars (data-source.ts).
   dataSource: z.string().optional(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
@@ -138,12 +134,9 @@ export const barCloseMessageSchema = msg("bar_close", {
   candle: candlePayloadSchema,
   // Monotonic per subscription; a jump = undelivered bars, a reset = re-seed.
   seq: z.number().optional(),
-  // Resolved NT8 contract (e.g. "MNQ 09-26") — makes rolls visible.
-  contract: z.string().optional(),
-  // Feed that served this live bar; sim-feed bars are rejected on ingest.
-  dataSource: z.string().optional(),
-  // Closed well before emission; act-on-close consumers skip these.
-  backfill: z.boolean().optional(),
+  contract: z.string().optional(), // resolved NT8 contract (e.g. "MNQ 09-26"); makes rolls visible
+  dataSource: z.string().optional(), // feed; sim-feed bars rejected on ingest
+  backfill: z.boolean().optional(), // closed well before emission; act-on-close consumers skip these
 });
 export type BarCloseMessage = z.infer<typeof barCloseMessageSchema>;
 
@@ -164,13 +157,9 @@ export type UnsubscribeBarsMessage = z.infer<typeof unsubscribeBarsMessageSchema
 export const subscribeAckMessageSchema = reqMsg("subscribe_ack", {
   symbol: z.string(),
   timeframe: z.string(),
-  // Resolved NT8 contract FullName the stream is bound to.
-  contract: z.string(),
-  // Bars in the C# seed request; 0 on an alreadyActive re-subscribe.
-  seedCount: z.number(),
-  // Unix seconds of the last seeded bar; 0 when none.
-  seedLastTs: z.number(),
-  // The subscription already existed C#-side.
+  contract: z.string(), // resolved NT8 contract FullName the stream is bound to
+  seedCount: z.number(), // bars in the C# seed request; 0 on an alreadyActive re-subscribe
+  seedLastTs: z.number(), // unix seconds of the last seeded bar; 0 when none
   alreadyActive: z.boolean(),
 });
 export type SubscribeAckMessage = z.infer<typeof subscribeAckMessageSchema>;
@@ -205,9 +194,8 @@ export type SessionCalendarResponseMessage = z.infer<typeof sessionCalendarRespo
 export const requestOpenChartsMessageSchema = reqMsg("request_open_charts", {});
 export type RequestOpenChartsMessage = z.infer<typeof requestOpenChartsMessageSchema>;
 
-/** One open chart tab. `timeframe` is compact ("5m") when the bars type maps
- *  to SUPPORTED_TIMEFRAMES, else NT8's display string ("150 Tick"); empty
- *  strings mean the tab hadn't finished loading. */
+/** One open chart tab. `timeframe` is compact ("5m") when mappable to
+ *  SUPPORTED_TIMEFRAMES, else NT8's display string ("150 Tick"); empty = tab still loading. */
 export const openChartEntrySchema = z.object({
   window: z.string(),
   symbol: z.string(),
@@ -224,8 +212,7 @@ export const openChartsResponseMessageSchema = reqMsg("open_charts_response", {
 });
 export type OpenChartsResponseMessage = z.infer<typeof openChartsResponseMessageSchema>;
 
-/** Programmatic Go To: scroll charts of `symbol` to `ts` (unix seconds, draw
- *  ET convention) and/or zoom to `barsOnScreen`; at least one is required. */
+/** Scroll charts of `symbol` to `ts` (unix seconds) and/or zoom to `barsOnScreen`; at least one required. */
 export const navigateChartMessageSchema = reqMsg("navigate_chart", {
   symbol: z.string().min(1),
   ts: z.number().int().optional(),
@@ -236,8 +223,8 @@ export const navigateChartMessageSchema = reqMsg("navigate_chart", {
 });
 export type NavigateChartMessage = z.infer<typeof navigateChartMessageSchema>;
 
-/** Per-matched-tab outcome; times are unix seconds. `clamped` = the target
- *  fell outside the loaded bars (the fix is more Days To Load in NT8). */
+/** Per-matched-tab outcome; times are unix seconds. `clamped` = target fell
+ *  outside loaded bars (fix: more Days To Load in NT8). */
 export const navigateChartResultSchema = z.object({
   window: z.string(),
   symbol: z.string(),
@@ -261,8 +248,8 @@ export const navigateChartAckMessageSchema = reqMsg("navigate_chart_ack", {
 });
 export type NavigateChartAckMessage = z.infer<typeof navigateChartAckMessageSchema>;
 
-// ---------- live position tracking (read-only) ----------
-// Enum-ish fields carry NT8's own ToString() values so new values pass through.
+// Live position tracking (read-only). Enum-ish fields carry NT8's own
+// ToString() values so new values pass through.
 
 export const positionPayloadSchema = z.object({
   instrument: z.string(), // resolved contract, e.g. "MNQ 09-26"
@@ -368,8 +355,7 @@ export const positionEventMessageSchema = msg("position_event", {
   position: positionPayloadSchema.optional(),
   order: workingOrderPayloadSchema.optional(),
   execution: executionPayloadSchema.optional(),
-  // kind="position" only: NT8 Operation (Add | Update | Remove).
-  operation: z.string().optional(),
+  operation: z.string().optional(), // kind="position" only: NT8 Operation (Add|Update|Remove)
 }).superRefine((data, ctx) => {
   // Only the payload named by `kind` is required; extras pass through.
   if (data[data.kind] === undefined) {
@@ -382,15 +368,15 @@ export const positionEventMessageSchema = msg("position_event", {
 });
 export type PositionEventMessage = z.infer<typeof positionEventMessageSchema>;
 
-// ---------- order placement (write path) ----------
-// Fields are shared with the place_order tool's params so the wire and tool
-// surfaces never drift. Cross-field rules (a Limit needs limitPrice) live in
-// the ExecutionService. clientOrderId is the idempotency key — it rides
-// through as the NT8 order Name and the C# side dedupes retries on it.
+// Order placement (write path). Fields are single-sourced with the place_order
+// tool params so wire and tool can't drift; cross-field rules (Limit needs
+// limitPrice) live in ExecutionService. clientOrderId is the idempotency key:
+// rides through as the NT8 order Name, C# dedupes retries on it.
 
 export const ORDER_ACTIONS = ["Buy", "Sell"] as const;
 export const ORDER_TYPES = ["Market", "Limit", "Stop", "StopLimit"] as const;
-export const ORDER_TIFS = ["Day", "Gtc"] as const;
+// NT8's TimeInForce has NO FOK (verified by reflection: Day/Gtc/Ioc/Opg/Gtd); we don't emulate it.
+export const ORDER_TIFS = ["Day", "Gtc", "Ioc"] as const;
 
 export const placeOrderFields = {
   account: z.string().min(1),
@@ -406,30 +392,134 @@ export const placeOrderFields = {
 export const placeOrderMessageSchema = reqMsg("place_order", placeOrderFields);
 export type PlaceOrderMessage = z.infer<typeof placeOrderMessageSchema>;
 
-/** Synchronous accept of a submit call — NOT a fill and NOT a broker accept.
- *  The order then transitions asynchronously (Accepted → Working → Filled, or
- *  → Rejected) via the position_event order stream. `orderId` may be absent
- *  until NT8 assigns one; correlate on `clientOrderId` (the order Name). */
+/** Synchronous accept of a submit call — NOT a fill/broker accept. Order then
+ *  transitions async (Accepted → Working → Filled | Rejected) via the position_event
+ *  order stream. `orderId` may be absent until NT8 assigns one; correlate on `clientOrderId`. */
 export const orderAckMessageSchema = reqMsg("order_ack", {
   clientOrderId: z.string(),
   contract: z.string(), // resolved NT8 contract, e.g. "MNQ 09-26"
   orderId: z.string().optional(),
   state: z.string(), // initial NT8 OrderState, e.g. "Submitted"
-  // The C# gate/dedup short-circuited without a fresh Submit (idempotent replay).
+  // C# gate/dedup short-circuited without a fresh Submit (idempotent replay).
   deduped: z.boolean().optional(),
+  // EFFECTIVE prices used (tick-rounded C#-side); older AddOns omit.
+  limitPrice: z.number().optional(),
+  stopPrice: z.number().optional(),
 });
 export type OrderAckMessage = z.infer<typeof orderAckMessageSchema>;
 
+// Order management (phase 2 write path). Same single-sourcing rule as
+// placeOrderFields; cross-field rules (change needs ≥1 field; oco leg-id
+// derivation) live in ExecutionService.
+
+export const cancelOrderFields = {
+  account: z.string().min(1),
+  clientOrderId: z.string().min(1).max(50),
+};
+export const cancelOrderMessageSchema = reqMsg("cancel_order", cancelOrderFields);
+export type CancelOrderMessage = z.infer<typeof cancelOrderMessageSchema>;
+
+export const cancelAllFields = {
+  account: z.string().min(1),
+  symbol: z.string().min(1),
+};
+export const cancelAllMessageSchema = reqMsg("cancel_all", cancelAllFields);
+export type CancelAllMessage = z.infer<typeof cancelAllMessageSchema>;
+
+export const flattenFields = {
+  account: z.string().min(1),
+  symbol: z.string().min(1),
+};
+export const flattenMessageSchema = reqMsg("flatten", flattenFields);
+export type FlattenMessage = z.infer<typeof flattenMessageSchema>;
+
+export const changeOrderFields = {
+  account: z.string().min(1),
+  clientOrderId: z.string().min(1).max(50),
+  quantity: z.number().int().positive().optional(),
+  limitPrice: z.number().optional(),
+  stopPrice: z.number().optional(),
+};
+export const changeOrderMessageSchema = reqMsg("change_order", changeOrderFields);
+export type ChangeOrderMessage = z.infer<typeof changeOrderMessageSchema>;
+
+/** Exit pair only: protective StopMarket + Limit target sharing action/qty/tif,
+ *  submitted in ONE Account.Submit so NT8 links them via `ocoId`. Leg names are
+ *  the leg clientOrderIds (dedupe keys). */
+export const placeOcoFields = {
+  account: z.string().min(1),
+  symbol: z.string().min(1),
+  action: z.enum(ORDER_ACTIONS),
+  quantity: z.number().int().positive(),
+  stopPrice: z.number(),
+  limitPrice: z.number(),
+  tif: z.enum(ORDER_TIFS),
+  ocoId: z.string().min(1),
+  stopClientOrderId: z.string().min(1).max(50),
+  targetClientOrderId: z.string().min(1).max(50),
+};
+export const placeOcoMessageSchema = reqMsg("place_oco", placeOcoFields);
+export type PlaceOcoMessage = z.infer<typeof placeOcoMessageSchema>;
+
+export const cancelAckMessageSchema = reqMsg("cancel_ack", {
+  clientOrderId: z.string(),
+  orderId: z.string().optional(),
+  state: z.string(), // post-Cancel() NT8 OrderState, e.g. "CancelSubmitted"
+});
+export type CancelAckMessage = z.infer<typeof cancelAckMessageSchema>;
+
+export const cancelAllAckMessageSchema = reqMsg("cancel_all_ack", {
+  contract: z.string(),
+  // Working orders counted just before CancelAllOrders — informational only.
+  cancelledCount: z.number().optional(),
+});
+export type CancelAllAckMessage = z.infer<typeof cancelAllAckMessageSchema>;
+
+export const flattenAckMessageSchema = reqMsg("flatten_ack", {
+  contract: z.string(),
+});
+export type FlattenAckMessage = z.infer<typeof flattenAckMessageSchema>;
+
+export const changeAckMessageSchema = reqMsg("change_ack", {
+  clientOrderId: z.string(),
+  orderId: z.string().optional(),
+  state: z.string(), // post-Change() NT8 OrderState, e.g. "ChangeSubmitted"
+  // EFFECTIVE post-rounding values the change was staged with.
+  quantity: z.number().optional(),
+  limitPrice: z.number().optional(),
+  stopPrice: z.number().optional(),
+});
+export type ChangeAckMessage = z.infer<typeof changeAckMessageSchema>;
+
+export const ocoLegAckSchema = z.object({
+  clientOrderId: z.string(),
+  orderId: z.string().optional(),
+  state: z.string(),
+});
+export type OcoLegAck = z.infer<typeof ocoLegAckSchema>;
+
+export const ocoAckMessageSchema = reqMsg("oco_ack", {
+  ocoId: z.string(),
+  contract: z.string(),
+  stop: ocoLegAckSchema,
+  target: ocoLegAckSchema,
+  // The C# dedup replayed a completed pair without a fresh Submit.
+  deduped: z.boolean().optional(),
+  // EFFECTIVE tick-rounded prices (stop leg's stopPrice, target leg's limitPrice).
+  stopPrice: z.number().optional(),
+  limitPrice: z.number().optional(),
+});
+export type OcoAckMessage = z.infer<typeof ocoAckMessageSchema>;
+
 export const errorMessageSchema = reqMsg("error", {
   message: z.string(),
-  // Optional machine-readable classifier for order rejections. The C# AddOn
-  // sets it on every place_order rejection (see HandlePlaceOrder); older AddOns
-  // and non-order rejections omit it, so consumers must tolerate its absence.
+  // Machine-readable classifier; C# sets it on every place_order rejection,
+  // older AddOns and non-order rejections omit it — consumers must tolerate absence.
   code: z.string().optional(),
 });
 export type ErrorMessage = z.infer<typeof errorMessageSchema>;
 
-// Registering here both admits a type to parseMessage and adds it to InboundMessage.
+// Registering here admits a type to parseMessage and adds it to InboundMessage.
 const INBOUND_SCHEMAS = {
   hello: helloMessageSchema,
   heartbeat: heartbeatMessageSchema,
@@ -447,6 +537,11 @@ const INBOUND_SCHEMAS = {
   position_sync: positionSyncMessageSchema,
   position_event: positionEventMessageSchema,
   order_ack: orderAckMessageSchema,
+  cancel_ack: cancelAckMessageSchema,
+  cancel_all_ack: cancelAllAckMessageSchema,
+  flatten_ack: flattenAckMessageSchema,
+  change_ack: changeAckMessageSchema,
+  oco_ack: ocoAckMessageSchema,
   error: errorMessageSchema,
 };
 
@@ -465,7 +560,12 @@ export type OutboundMessage =
   | RequestPositionsMessage
   | SubscribePositionsMessage
   | UnsubscribePositionsMessage
-  | PlaceOrderMessage;
+  | PlaceOrderMessage
+  | PlaceOcoMessage
+  | CancelOrderMessage
+  | CancelAllMessage
+  | FlattenMessage
+  | ChangeOrderMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

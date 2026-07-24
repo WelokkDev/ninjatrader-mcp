@@ -43,7 +43,8 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   │  ninjatrader-mcp (Node.js process)                               │
   │                                                                  │
   │   MCP tools (src/tools/) — 19 generic tools, plus:               │
-  │     place_order (registered only when trading is enabled)        │
+  │     6 write tools (place/oco/change when trading is enabled;     │
+  │     cancel/cancel_all/flatten when accounts are allow-listed)    │
   │     5 experiment-lab tools (registered by private bins           │
   │     that bind a Lab to their own engine)                         │
   │                                                                  │
@@ -93,14 +94,14 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 4. **Live fill.** `subscribe_live_bars` streams closed bars from NT8 straight into the same cache `get_candles` reads — 30m–4h derive automatically on 15m closes. Subscriptions persist across server restarts, replay on every NT8 reconnect, and missed bars heal automatically via `request_candles`. Local bots can consume the same stream over `ws://127.0.0.1:9472/feed` with the same bearer token.
 5. **Positions (read-only).** `get_positions` and the position event feed observe accounts — fills, order changes, position transitions, with snapshot self-heal on reconnect. When NT8 is disconnected the answer is marked stale, never assumed flat.
 6. **Trade import (no bridge).** `get_trades` / `sync_trades` read NinjaTrader's own `NinjaTrader.sqlite` directly — via a temp snapshot copy, never the live file — pair executions into round-trip trades, and store them in the ledger.
-7. **Orders (default-off).** There is exactly one submit path — `ExecutionService.submit()` — behind three independent fail-closed gates (tool registration, runtime config, and a C#-side gate the server can't recompile away). Every attempt is audited. See [TRADING.md](TRADING.md).
+7. **Orders (default-off).** There is exactly one write path — `ExecutionService` (place, OCO exit pairs, change, cancel, cancel-all, flatten) — behind three independent fail-closed gates (tool registration, runtime config, and a C#-side gate the server can't recompile away). Risk-reducing ops (cancel/flatten) are allow-list-only so they keep working through a kill-switch. Every attempt is audited. See [TRADING.md](TRADING.md).
 8. **Experiments run out of process.** `start_experiment` returns immediately; the lab spawns a detached runner that writes progress and results to `backtest-results/<experimentId>/`. The lab re-derives run state from **disk** on every restart, so killed servers or orphaned runs reconcile instead of dangling.
 
 ---
 
 ## MCP tools
 
-The public server (`build/index.js`) registers 19 tools. `place_order` appears only when trading is enabled at startup; the five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
+The public server (`build/index.js`) registers 19 tools. The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
 
 ### Market data
 
@@ -149,13 +150,18 @@ Drawings survive chart reloads: the AddOn retains every draw command per symbol 
 
 The importer copies `NinjaTrader.sqlite` (plus WAL/SHM) to a temp snapshot, integrity-checks it, and reads via a 4-table join. Trade side comes from `Orders.OrderAction` — fail-closed, never guessed. Executions are FIFO-paired into round trips per (account, symbol) over the **full** execution history, handling scale-ins, partial exits, and position flips; the requested range only filters the paired output. Inserts dedupe on `(source, external_id)`, so re-syncing is idempotent. Only closed round trips are imported (v1).
 
-### Order placement (default-off)
+### Order placement & management (default-off)
 
 | Tool | Summary |
 |---|---|
-| `place_order` | Submit a single flat order (Market / Limit / Stop / StopLimit) to an allow-listed account. **Absent from the tool surface entirely unless trading was enabled at startup.** An ack means NT8 accepted the submit — not a fill; confirm with `get_positions`. |
+| `place_order` | Submit a single order (Market / Limit / Stop / StopLimit; Day / Gtc / Ioc) to an allow-listed account. **Absent from the tool surface entirely unless trading was enabled at startup.** An ack means NT8 accepted the submit — not a fill; confirm with `get_positions`. |
+| `place_oco` | Place a protective stop + profit target as one atomic OCO exit pair; when one leg completes, NT8 cancels the sibling. Full trading gate (a triggered exit on a flat account opens a position). |
+| `change_order` | Amend a working order in place (qty / limit / stop) — no cancel+replace gap, prices tick-rounded, effective values echoed. Full trading gate. |
+| `cancel_order` | Cancel one working order by `clientOrderId`. **Risk-reducing: allow-list-gated only — works while trading is disabled.** |
+| `cancel_all` | Cancel every working order for an instrument on an account — including manually placed ones. Risk-reducing. |
+| `flatten` | Panic button: cancel all working orders AND close the position at market for the instrument. Risk-reducing. |
 
-Three independent fail-closed gates (TS registration, TS runtime config, a C#-side config read immediately before `Submit()`), every attempt audited. Read [TRADING.md](TRADING.md) before enabling anything.
+Three independent fail-closed gates (TS registration, TS runtime config, a C#-side config read immediately before every NT8 call), every attempt audited (`order_submissions` / `order_ops`). Read [TRADING.md](TRADING.md) before enabling anything.
 
 ### Experiment lab (runner-gated)
 
@@ -317,7 +323,7 @@ The repo is structured **open-core**. The substrate — bridge, cache, live feed
 
 Building a private module unlocks two more tool surfaces:
 
-- **`place_order`** — the gated write path — appears only when trading is enabled at startup. See [TRADING.md](TRADING.md).
+- **The write tools** — `place_order` / `place_oco` / `change_order` appear only when trading is enabled at startup; `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed. See [TRADING.md](TRADING.md).
 - **Five experiment-lab tools** (`start_experiment`, `experiment_status`, `experiment_result`, `list_experiments`, `diff_experiments`) appear only in a private bin that binds a `Lab` to your own backtest engine. The public server doesn't create `data/lab.db` at all.
 
 **What's still poorly defined is the build-your-own backend.** [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) gets you reliably from scaffold to your first custom tool, but past that point there are gaps, and you should expect to read source and makeshift:

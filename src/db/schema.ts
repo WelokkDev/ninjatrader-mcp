@@ -141,6 +141,29 @@ export function initializeSchema(db: Database.Database): void {
       order_id        TEXT,               -- NT8 order id on submit (may be null)
       state           TEXT,               -- initial NT8 order state on submit
       error           TEXT,               -- error text when decision='failed'
+      reason          TEXT,               -- caller-supplied rationale
+      oco_group       TEXT                -- shared id linking OCO leg rows
+    );
+
+    -- Append-only audit of every non-placement write attempt (cancel /
+    -- cancel-all / flatten / change) — the order_submissions counterpart for
+    -- order MANAGEMENT. client_order_id is the TARGET order; null for the
+    -- instrument-wide ops (cancel-all / flatten).
+    CREATE TABLE IF NOT EXISTS order_ops (
+      id              INTEGER PRIMARY KEY,
+      ts              INTEGER NOT NULL,   -- unix seconds
+      op              TEXT    NOT NULL,   -- 'cancel'|'cancel-all'|'flatten'|'change'
+      source          TEXT    NOT NULL,   -- 'claude' | 'algo' | ...
+      account         TEXT    NOT NULL,
+      symbol          TEXT,               -- cancel-all/flatten only
+      client_order_id TEXT,               -- target order (cancel/change only)
+      quantity        INTEGER,            -- change only: requested new qty
+      limit_price     REAL,               -- change only
+      stop_price      REAL,               -- change only
+      decision        TEXT    NOT NULL,   -- 'dispatched' | 'blocked' | 'failed'
+      deny_reason     TEXT,               -- gate/keystone reason when blocked
+      state           TEXT,               -- post-op NT8 order state when acked
+      error           TEXT,               -- error text when decision='failed'
       reason          TEXT                -- caller-supplied rationale
     );
 
@@ -152,26 +175,27 @@ export function initializeSchema(db: Database.Database): void {
       ON order_submissions (client_order_id);
     CREATE INDEX IF NOT EXISTS idx_order_submissions_ts
       ON order_submissions (ts);
+    CREATE INDEX IF NOT EXISTS idx_order_ops_ts
+      ON order_ops (ts);
+    CREATE INDEX IF NOT EXISTS idx_order_ops_client_order_id
+      ON order_ops (client_order_id);
   `);
 
-  // Forward migrations for columns added after a `trades` table already existed.
-  // CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table, so the
-  // backtest experiment's per-trade fields (management_mode / bars_in_trade /
-  // mfe) are added idempotently here. Cheap and safe: the table is keyed by an
-  // empty/append-only ledger and ALTER ... ADD COLUMN is non-destructive.
+  // Idempotent forward migrations: CREATE TABLE IF NOT EXISTS won't add columns
+  // to a pre-existing table. ALTER ... ADD COLUMN is non-destructive.
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");
   ensureColumn(db, "trades", "source", "TEXT");
   ensureColumn(db, "trades", "external_id", "TEXT");
-  // Index for idempotent upsert lookup — must come after ensureColumn so the column exists.
+  ensureColumn(db, "order_submissions", "oco_group", "TEXT");
+  // Must come after ensureColumn so the column exists.
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id)",
   );
 }
 
-// Add `column` to `table` if it isn't already present (a minimal idempotent
-// migration; SQLite has no `ADD COLUMN IF NOT EXISTS`).
+// Idempotent ADD COLUMN; SQLite has no `ADD COLUMN IF NOT EXISTS`.
 function ensureColumn(
   db: Database.Database,
   table: string,
