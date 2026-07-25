@@ -248,6 +248,60 @@ export const navigateChartAckMessageSchema = reqMsg("navigate_chart_ack", {
 });
 export type NavigateChartAckMessage = z.infer<typeof navigateChartAckMessageSchema>;
 
+// ---------- drawing-tool read-back (read-only) ----------
+// Reads NT8 drawing objects off open charts, including hand-drawn ones.
+// `toolType` is the tool's concrete GetType().Name ("RiskReward", "Ray", ...);
+// Risk/Reward tools carry parsed geometry (riskReward below).
+
+export const requestDrawingsMessageSchema = reqMsg("request_drawings", {
+  symbol: z.string().optional(), // only charts of this master symbol ("MNQ")
+  toolType: z.string().optional(), // only this concrete tool, e.g. "RiskReward"
+  userDrawnOnly: z.boolean().optional(), // drop NinjaScript-drawn objects (incl. our own mcp_ draws)
+});
+export type RequestDrawingsMessage = z.infer<typeof requestDrawingsMessageSchema>;
+
+/** ts (unix seconds, ET) is best-effort — omitted when the time won't convert. */
+export const drawingAnchorSchema = z.object({
+  price: z.number(),
+  ts: z.number().optional(),
+});
+export type DrawingAnchor = z.infer<typeof drawingAnchorSchema>;
+
+/** Parsed from a RiskReward tool's anchors [entry, stop (RiskAnchor),
+ *  target (RewardAnchor)]. `ratio` is NT8's stored value (best-effort);
+ *  computedRatio is rewardPoints/riskPoints from the anchor prices. */
+export const riskRewardPayloadSchema = z.object({
+  entry: z.number(),
+  stop: z.number(),
+  target: z.number(),
+  direction: z.enum(["long", "short", "flat"]),
+  riskPoints: z.number(),
+  rewardPoints: z.number(),
+  computedRatio: z.number().optional(),
+  ratio: z.number().optional(),
+});
+export type RiskRewardPayload = z.infer<typeof riskRewardPayloadSchema>;
+
+export const drawingEntrySchema = z.object({
+  window: z.string(),
+  symbol: z.string(),
+  timeframe: z.string(),
+  tag: z.string(),
+  toolType: z.string(), // concrete NT8 type name (GetType().Name)
+  isUserDrawn: z.boolean(),
+  isVisible: z.boolean(),
+  text: z.string().optional(), // Text-tool content / label, when the tool exposes one
+  anchors: z.array(drawingAnchorSchema),
+  riskReward: riskRewardPayloadSchema.optional(), // present only for RiskReward tools
+});
+export type DrawingEntry = z.infer<typeof drawingEntrySchema>;
+
+export const drawingsResponseMessageSchema = reqMsg("drawings_response", {
+  drawings: z.array(drawingEntrySchema),
+  skippedWindows: z.number().default(0),
+});
+export type DrawingsResponseMessage = z.infer<typeof drawingsResponseMessageSchema>;
+
 // Live position tracking (read-only). Enum-ish fields carry NT8's own
 // ToString() values so new values pass through.
 
@@ -529,6 +583,7 @@ const INBOUND_SCHEMAS = {
   session_calendar_response: sessionCalendarResponseMessageSchema,
   open_charts_response: openChartsResponseMessageSchema,
   navigate_chart_ack: navigateChartAckMessageSchema,
+  drawings_response: drawingsResponseMessageSchema,
   subscribe_ack: subscribeAckMessageSchema,
   unsubscribe_ack: unsubscribeAckMessageSchema,
   positions_response: positionsResponseMessageSchema,
@@ -555,6 +610,7 @@ export type OutboundMessage =
   | RequestSessionCalendarMessage
   | RequestOpenChartsMessage
   | NavigateChartMessage
+  | RequestDrawingsMessage
   | SubscribeBarsMessage
   | UnsubscribeBarsMessage
   | RequestPositionsMessage

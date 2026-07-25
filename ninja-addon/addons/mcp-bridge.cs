@@ -791,6 +791,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 					HandleNavigateChart(obj);
 					break;
 
+				case "request_drawings":
+					HandleRequestDrawings(obj);
+					break;
+
 				// Off the read thread: snapshots enumerate NT collections and
 				// must never starve heartbeats.
 				case "request_positions":
@@ -2142,6 +2146,270 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "isActive",    isActive },
 				{ "hasRenderer", hasRenderer },
 			};
+		}
+
+		// request_drawings — read NT8 drawing objects (including hand-drawn ones)
+		// off every open chart. Works against the base DrawingTool type only
+		// (Tag/IsUserDrawn/Anchors), so it never compiles against concrete tools
+		// like RiskReward: the concrete type is reported as GetType().Name and
+		// Risk/Reward geometry is parsed from its ordered anchors [entry, stop, target].
+
+		private const int DrawingsBudgetMs = 3_000;
+
+		private void HandleRequestDrawings(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_drawings missing id; dropping");
+				return;
+			}
+			var symbolFilter   = GetString(obj, "symbol");
+			var toolTypeFilter = GetString(obj, "toolType");
+			var userDrawnOnly  = GetBool(obj, "userDrawnOnly") ?? false;
+			Task.Run(async () =>
+			{
+				try { await BuildAndSendDrawingsAsync(id, symbolFilter, toolTypeFilter, userDrawnOnly); }
+				catch (Exception ex)
+				{
+					SendErrorResponse(id, "request_drawings failed: " + ex.Message);
+				}
+			});
+		}
+
+		private async Task BuildAndSendDrawingsAsync(string id, string symbolFilter, string toolTypeFilter, bool userDrawnOnly)
+		{
+			// Snapshot first: other threads open/close windows while we walk.
+			var chartWindows = new List<NinjaTrader.Gui.Chart.Chart>();
+			try
+			{
+				foreach (var w in Globals.AllWindows)
+				{
+					var chart = w as NinjaTrader.Gui.Chart.Chart;
+					if (chart != null) chartWindows.Add(chart);
+				}
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "window enumeration failed: " + ex.Message);
+				return;
+			}
+
+			var perWindow = new List<Task<List<Dictionary<string, object>>>>();
+			foreach (var chart in chartWindows)
+				perWindow.Add(ReadChartDrawingsAsync(chart, symbolFilter, toolTypeFilter, userDrawnOnly));
+
+			await Task.WhenAny(Task.WhenAll(perWindow), Task.Delay(DrawingsBudgetMs));
+
+			var drawings = new List<object>();
+			var skipped  = 0;
+			foreach (var t in perWindow)
+			{
+				if (t.Status == TaskStatus.RanToCompletion && t.Result != null)
+					foreach (var d in t.Result) drawings.Add(d);
+				else
+					skipped++;
+			}
+
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",              1 },
+				{ "id",             id },
+				{ "type",           "drawings_response" },
+				{ "drawings",       drawings },
+				{ "skippedWindows", skipped },
+			};
+			SendFireAndForget(Json.Serialize(payload),
+				"drawings_response id=" + id + " drawings=" + drawings.Count
+				+ (skipped > 0 ? " skippedWindows=" + skipped : ""));
+		}
+
+		// Read on the window's own dispatcher (InvokeAsync, never Invoke — deadlock
+		// risk); failures resolve to an empty list, never throwing across the boundary.
+		private static Task<List<Dictionary<string, object>>> ReadChartDrawingsAsync(
+			NinjaTrader.Gui.Chart.Chart chart, string symbolFilter, string toolTypeFilter, bool userDrawnOnly)
+		{
+			var tcs = new TaskCompletionSource<List<Dictionary<string, object>>>();
+			try
+			{
+				chart.Dispatcher.InvokeAsync(() =>
+				{
+					var outList = new List<Dictionary<string, object>>();
+					try
+					{
+						string title = null;
+						try { title = chart.Title; } catch { /* label only */ }
+
+						var tabControl = chart.MainTabControl;
+						if (tabControl != null)
+						{
+							foreach (var item in tabControl.Items)
+							{
+								try
+								{
+									var tabItem  = item as System.Windows.Controls.TabItem;
+									var chartTab = tabItem != null
+										? tabItem.Content as NinjaTrader.Gui.Chart.ChartTab
+										: null;
+									if (chartTab == null) continue;
+									ReadTabDrawings(title, chartTab, symbolFilter, toolTypeFilter, userDrawnOnly, outList);
+								}
+								catch (Exception ex) { Log("drawings tab read failed: " + ex.Message); }
+							}
+						}
+					}
+					catch (Exception ex) { Log("drawings window read failed: " + ex.Message); }
+					tcs.TrySetResult(outList);
+				});
+			}
+			catch (Exception ex)
+			{
+				// Window mid-close: its dispatcher is already shutting down.
+				Log("drawings dispatch failed: " + ex.Message);
+				tcs.TrySetResult(new List<Dictionary<string, object>>());
+			}
+			return tcs.Task;
+		}
+
+		// Read the drawing objects on one chart tab (on the window dispatcher).
+		// Symbol/timeframe come the same way as DescribeChartTab.
+		private static void ReadTabDrawings(
+			string windowTitle,
+			NinjaTrader.Gui.Chart.ChartTab chartTab,
+			string symbolFilter,
+			string toolTypeFilter,
+			bool userDrawnOnly,
+			List<Dictionary<string, object>> outList)
+		{
+			var cc = chartTab.ChartControl;
+			if (cc == null) return;
+
+			string symbol    = "";
+			string timeframe = "";
+			Bars bars = null;
+			try
+			{
+				var chartBars = cc.PrimaryBars;
+				if (chartBars == null && cc.BarsArray != null && cc.BarsArray.Count > 0)
+					chartBars = cc.BarsArray[0];
+				if (chartBars != null) bars = chartBars.Bars;
+			}
+			catch { /* chart mid-load */ }
+			try
+			{
+				Instrument inst = bars != null ? bars.Instrument : null;
+				if (inst == null) inst = chartTab.Instrument;
+				if (inst != null && inst.MasterInstrument != null) symbol = inst.MasterInstrument.Name;
+			}
+			catch { /* tab mid-load */ }
+			try { if (bars != null) timeframe = CompactTimeframe(bars.BarsPeriod); }
+			catch { /* bars mid-teardown */ }
+
+			if (!string.IsNullOrEmpty(symbolFilter)
+				&& !string.Equals(symbol, symbolFilter, StringComparison.OrdinalIgnoreCase))
+				return;
+
+			// Drawings live on panels, so walk ChartPanel.ChartObjects (NT8's own
+			// idiom). Snapshot first (reentrancy); the per-tag dedup collapses overlap.
+			var snapshot = new List<object>();
+			try
+			{
+				var panels = cc.ChartPanels;
+				if (panels != null)
+					foreach (var panel in panels)
+						if (panel != null && panel.ChartObjects != null)
+							foreach (var co in panel.ChartObjects) snapshot.Add(co);
+			}
+			catch (Exception ex) { Log("drawings ChartObjects snapshot failed: " + ex.Message); return; }
+
+			var seenTags = new HashSet<string>();
+			foreach (var co in snapshot)
+			{
+				var dt = co as NinjaTrader.NinjaScript.DrawingTools.DrawingTool;
+				if (dt == null) continue;
+				try
+				{
+					if (userDrawnOnly && !dt.IsUserDrawn) continue;
+
+					var toolType = dt.GetType().Name;
+					if (!string.IsNullOrEmpty(toolTypeFilter)
+						&& !string.Equals(toolType, toolTypeFilter, StringComparison.OrdinalIgnoreCase))
+						continue;
+
+					var tag = dt.Tag ?? "";
+					if (!string.IsNullOrEmpty(tag) && !seenTags.Add(tag)) continue;
+
+					var anchors = new List<object>();
+					var prices  = new List<double>();
+					try
+					{
+						foreach (var a in dt.Anchors)
+						{
+							if (a == null) continue;
+							var ad = new Dictionary<string, object> { { "price", a.Price } };
+							try { ad["ts"] = ExchangeTimeToUnixSeconds(a.Time); } catch { /* unconvertible */ }
+							anchors.Add(ad);
+							prices.Add(a.Price);
+						}
+					}
+					catch (Exception ex) { Log("drawings anchor read failed: " + ex.Message); }
+
+					var entry = new Dictionary<string, object>
+					{
+						{ "window",      string.IsNullOrEmpty(windowTitle) ? "Chart" : windowTitle },
+						{ "symbol",      symbol },
+						{ "timeframe",   timeframe },
+						{ "tag",         tag },
+						{ "toolType",    toolType },
+						{ "isUserDrawn", dt.IsUserDrawn },
+						{ "isVisible",   dt.IsVisible },
+						{ "anchors",     anchors },
+					};
+
+					// Best-effort text content (Text tool / labelled tools).
+					try
+					{
+						var textProp = dt.GetType().GetProperty("Text") ?? dt.GetType().GetProperty("DisplayText");
+						if (textProp != null && textProp.PropertyType == typeof(string))
+						{
+							var tv = textProp.GetValue(dt) as string;
+							if (!string.IsNullOrEmpty(tv)) entry["text"] = tv;
+						}
+					}
+					catch { /* no text property */ }
+
+					// Risk/Reward geometry from the tool's ordered anchors
+					// [entry, stop (RiskAnchor), target (RewardAnchor)].
+					if (string.Equals(toolType, "RiskReward", StringComparison.Ordinal) && prices.Count >= 3)
+					{
+						double e = prices[0], stop = prices[1], target = prices[2];
+						double riskPts   = Math.Abs(e - stop);
+						double rewardPts = Math.Abs(target - e);
+						string dir = target > e ? "long" : (target < e ? "short" : "flat");
+						var rr = new Dictionary<string, object>
+						{
+							{ "entry",        e },
+							{ "stop",         stop },
+							{ "target",       target },
+							{ "direction",    dir },
+							{ "riskPoints",   riskPts },
+							{ "rewardPoints", rewardPts },
+						};
+						if (riskPts > 0) rr["computedRatio"] = rewardPts / riskPts;
+						try
+						{
+							var ratioProp = dt.GetType().GetProperty("Ratio");
+							if (ratioProp != null && ratioProp.PropertyType == typeof(double))
+								rr["ratio"] = (double) ratioProp.GetValue(dt);
+						}
+						catch { /* no Ratio property */ }
+						entry["riskReward"] = rr;
+					}
+
+					outList.Add(entry);
+				}
+				catch (Exception ex) { Log("drawings object read failed: " + ex.Message); }
+			}
 		}
 
 		// Compact form matching the server's timeframe vocabulary
