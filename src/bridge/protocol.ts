@@ -302,6 +302,136 @@ export const drawingsResponseMessageSchema = reqMsg("drawings_response", {
 });
 export type DrawingsResponseMessage = z.infer<typeof drawingsResponseMessageSchema>;
 
+// ---------- chart indicator read-back (read-only) ----------
+// Split by call frequency: request_chart_indicators discovers what is attached
+// to each chart (rare); request_indicator_values then polls ONE indicator's
+// plot values by handle (cheap, repeatable). Neither mutates a chart.
+
+export const requestChartIndicatorsMessageSchema = reqMsg("request_chart_indicators", {
+  symbol: z.string().optional(), // master symbol as in list_open_charts ("MNQ")
+  timeframe: z.string().optional(), // compact form ("5m")
+});
+export type RequestChartIndicatorsMessage = z.infer<typeof requestChartIndicatorsMessageSchema>;
+
+/** `name` is the NT8 property name (what `match.params` keys on), `label` its
+ *  localized UI label. Only the indicator's own settings appear — the ~10 every
+ *  NinjaScript inherits (Calculate, Panel, IsVisible, …) are chart plumbing. */
+export const indicatorParamSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  value: z.union([z.string(), z.number(), z.boolean()]),
+});
+export type IndicatorParam = z.infer<typeof indicatorParamSchema>;
+
+/** Styling only; values come from request_indicator_values. `color` is null
+ *  when the brush isn't a solid color (e.g. a gradient). */
+export const indicatorPlotStyleSchema = z.object({
+  name: z.string(),
+  color: z.string().nullable().optional(), // "#FFFFA500"
+  style: z.string().optional(), // NT8 PlotStyle, e.g. "Line"
+});
+export type IndicatorPlotStyle = z.infer<typeof indicatorPlotStyleSchema>;
+
+/** `id` is NT8's IndicatorId — the handle request_indicator_values takes. Stable
+ *  within a session, but a chart reload / timeframe switch recreates indicators,
+ *  so a stale id reads back found:false and the caller re-discovers. */
+export const chartIndicatorSchema = z.object({
+  id: z.number().int(),
+  name: z.string(), // full type name, "NinjaTrader.NinjaScript.Indicators.SMA"
+  displayName: z.string(), // "SMA(20)"
+  panel: z.number().int(), // NT8's raw value; -1 = price panel
+  isOverlay: z.boolean(),
+  displacement: z.number().int(), // plot shift; values are NOT compensated for it
+  // Value-retention setting ("TwoHundredFiftySix" | "Infinite" | "unknown"),
+  // which bounds how far back values read — NOT how far the chart loaded.
+  readableDepth: z.string(),
+  params: z.array(indicatorParamSchema),
+  plots: z.array(indicatorPlotStyleSchema),
+});
+export type ChartIndicator = z.infer<typeof chartIndicatorSchema>;
+
+export const chartIndicatorsEntrySchema = z.object({
+  window: z.string(),
+  symbol: z.string(),
+  instrument: z.string(),
+  timeframe: z.string(),
+  isActive: z.boolean(),
+  indicators: z.array(chartIndicatorSchema),
+});
+export type ChartIndicatorsEntry = z.infer<typeof chartIndicatorsEntrySchema>;
+
+export const chartIndicatorsResponseMessageSchema = reqMsg("chart_indicators_response", {
+  charts: z.array(chartIndicatorsEntrySchema),
+  skippedWindows: z.number().default(0),
+});
+export type ChartIndicatorsResponseMessage = z.infer<typeof chartIndicatorsResponseMessageSchema>;
+
+/** Fallback selector when the caller holds no `id`: NT8 type name (short "SMA"
+ *  or full) plus enough params to disambiguate ({Period: 20}). */
+export const indicatorMatchSchema = z.object({
+  name: z.string().min(1),
+  params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+});
+export type IndicatorMatch = z.infer<typeof indicatorMatchSchema>;
+
+/** Exactly one of {indicatorId, match} selects the indicator; the range is
+ *  either from/to (unix seconds, either end optional) or bars (last N).
+ *  Cross-field rules live in the handler, per placeOrderFields. `indicatorId`
+ *  not `id`: the envelope's `id` is the correlation uuid and a same-named
+ *  payload key would clobber it. */
+export const requestIndicatorValuesMessageSchema = reqMsg("request_indicator_values", {
+  symbol: z.string(),
+  timeframe: z.string().optional(),
+  indicatorId: z.number().int().optional(),
+  match: indicatorMatchSchema.optional(),
+  from: z.number().int().optional(),
+  to: z.number().int().optional(),
+  bars: z.number().int().min(1).optional(),
+});
+export type RequestIndicatorValuesMessage = z.infer<typeof requestIndicatorValuesMessageSchema>;
+
+/** `t` is unix seconds on the get_candles convention, so points line up 1:1
+ *  with candles. */
+export const indicatorValuePointSchema = z.object({
+  t: z.number().int(),
+  v: z.number(),
+});
+export type IndicatorValuePoint = z.infer<typeof indicatorValuePointSchema>;
+
+/** availableFrom/To are the first/last timestamps this plot could actually serve
+ *  inside the requested window (null = nothing valid); narrower than requested
+ *  means the instance's retention wall, not missing chart data. `truncated` =
+ *  the window exceeded the AddOn's per-plot cap and the oldest points went. */
+export const indicatorValuePlotSchema = z.object({
+  name: z.string(),
+  values: z.array(indicatorValuePointSchema),
+  availableFrom: z.number().int().nullable(),
+  availableTo: z.number().int().nullable(),
+  truncated: z.boolean(),
+});
+export type IndicatorValuePlot = z.infer<typeof indicatorValuePlotSchema>;
+
+/** found:false is a normal outcome (stale handle / no matching chart), not an
+ *  error — `reason` says which. The resolved indicatorId hands a match-based read
+ *  a handle for the next poll; barsFrom/barsTo report the chart's loaded window,
+ *  so comparing it with a plot's availableFrom exposes the retention wall. */
+export const indicatorValuesResponseMessageSchema = reqMsg("indicator_values_response", {
+  found: z.boolean(),
+  reason: z.string().optional(),
+  symbol: z.string().optional(),
+  timeframe: z.string().optional(),
+  window: z.string().optional(),
+  indicatorId: z.number().int().optional(),
+  displayName: z.string().optional(),
+  matchCount: z.number().int().optional(), // >1 = the selector was ambiguous
+  displacement: z.number().int().optional(),
+  barCount: z.number().int().optional(),
+  barsFrom: z.number().int().nullable().optional(),
+  barsTo: z.number().int().nullable().optional(),
+  plots: z.array(indicatorValuePlotSchema).default([]),
+});
+export type IndicatorValuesResponseMessage = z.infer<typeof indicatorValuesResponseMessageSchema>;
+
 // Live position tracking (read-only). Enum-ish fields carry NT8's own
 // ToString() values so new values pass through.
 
@@ -584,6 +714,8 @@ const INBOUND_SCHEMAS = {
   open_charts_response: openChartsResponseMessageSchema,
   navigate_chart_ack: navigateChartAckMessageSchema,
   drawings_response: drawingsResponseMessageSchema,
+  chart_indicators_response: chartIndicatorsResponseMessageSchema,
+  indicator_values_response: indicatorValuesResponseMessageSchema,
   subscribe_ack: subscribeAckMessageSchema,
   unsubscribe_ack: unsubscribeAckMessageSchema,
   positions_response: positionsResponseMessageSchema,
@@ -611,6 +743,8 @@ export type OutboundMessage =
   | RequestOpenChartsMessage
   | NavigateChartMessage
   | RequestDrawingsMessage
+  | RequestChartIndicatorsMessage
+  | RequestIndicatorValuesMessage
   | SubscribeBarsMessage
   | UnsubscribeBarsMessage
   | RequestPositionsMessage

@@ -101,7 +101,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 ## MCP tools
 
-The public server (`build/index.js`) registers 19 tools. The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
+The public server (`build/index.js`) registers 23 tools. The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
 
 ### Market data
 
@@ -122,7 +122,7 @@ The public server (`build/index.js`) registers 19 tools. The write tools appear 
 
 **For bots and dashboards** there is a push channel on the same port: `ws://127.0.0.1:9472/feed`, same bearer token. Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is self-sufficient. A minimal Python consumer ships at `examples/python/live_feed_client.py`. Bars tagged `backfill: true` closed well before delivery — act-on-close logic must skip them.
 
-### Chart drawing
+### Chart drawing & reads
 
 | Tool | Summary |
 |---|---|
@@ -131,8 +131,12 @@ The public server (`build/index.js`) registers 19 tools. The write tools appear 
 | `clear_zones` | Remove drawn primitives by id, or all of them; optionally scoped to one symbol. |
 | `list_open_charts` | Enumerate open NT8 charts/tabs and their symbols. |
 | `navigate_chart` | Programmatic Go To: scroll a chart to a date/time (centered or right-aligned) and/or zoom to a bar count; selects the tab, focuses the window, and reports the resulting visible range. Only reaches what the chart has loaded — `clamped: true` in the response means increase the chart's Days To Load. |
+| `list_chart_indicators` | Discover the indicators on your open charts: identity, the indicator's own configured parameters, plot styling, readable depth, and an `id` handle. Step 1 of the two-step indicator read. |
+| `read_indicator_values` | Read one indicator's computed plot values — by `id` (preferred) or a `name` + params selector — as the last N points or a `from`/`to` unix range. |
 
 Drawings survive chart reloads: the AddOn retains every draw command per symbol and the renderer replays them when a chart's data series reloads. All drawing tools fail closed with a clear message when NT8 is not connected.
+
+**Reading indicators is discover-then-poll:** call `list_chart_indicators` once for an `id`, then poll `read_indicator_values` with it — the poll is lean (values only, no reflection). An `id` is stable within a session but a chart reload or timeframe switch recreates indicators and invalidates it; the read then answers `found: false` (a normal outcome, not an error) and you re-discover. Value timestamps use the same unix-seconds convention as `get_candles`, so points line up 1:1 with candles. When a plot's `availableFrom`/`availableTo` are narrower than the range you asked for, you hit that indicator instance's value-retention wall (`readableDepth`, usually NT8's default 256 bars) rather than a gap in the chart — the response reports the chart's own loaded window alongside, so the two are distinguishable. Both tools are strictly read-only: they cannot add, remove, or reconfigure an indicator.
 
 ### Ledger reads
 

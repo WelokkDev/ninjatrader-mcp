@@ -16,6 +16,8 @@ import { registerClearZones } from "./tools/clear-zones.js";
 import { registerListOpenCharts } from "./tools/list-open-charts.js";
 import { registerNavigateChart } from "./tools/navigate-chart.js";
 import { registerGetDrawings } from "./tools/read-drawings.js";
+import { registerListChartIndicators } from "./tools/list-chart-indicators.js";
+import { registerReadIndicatorValues } from "./tools/read-indicator-values.js";
 import {
   registerSubscribeLiveBars,
   registerUnsubscribeLiveBars,
@@ -79,6 +81,8 @@ export function registerGenericTools(
   unless(["list_open_charts"], () => registerListOpenCharts(server));
   unless(["navigate_chart"], () => registerNavigateChart(server));
   unless(["get_drawings"], () => registerGetDrawings(server));
+  unless(["list_chart_indicators"], () => registerListChartIndicators(server));
+  unless(["read_indicator_values"], () => registerReadIndicatorValues(server));
   unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server));
   unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server));
   unless(["live_feed_status"], () => registerLiveFeedStatus(server));
