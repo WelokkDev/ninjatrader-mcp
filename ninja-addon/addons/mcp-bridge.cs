@@ -85,8 +85,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		// Raw timeframes this bridge will serve via request_candles. Keep in
 		// sync with RAW_TIMEFRAMES in the server's src/core/constants.ts.
+		// "1d" is historical-fetch only — subscribe_bars rejects it (see
+		// HandleSubscribeBars); the server's LIVE_TIMEFRAMES matches.
 		private static readonly HashSet<string> ALLOWED_RAW_TIMEFRAMES =
-			new HashSet<string>(StringComparer.Ordinal) { "15s", "5m", "15m" };
+			new HashSet<string>(StringComparer.Ordinal) { "15s", "5m", "15m", "1d" };
 
 		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
 			new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1183,7 +1185,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 				error = "Malformed timeframe: '" + timeframe + "'";
 				return false;
 			}
-			periodType        = unit == 's' ? BarsPeriodType.Second : BarsPeriodType.Minute;
+			// 'd' => BarsPeriodType.Day: NT8 builds one bar per session using the
+			// SAME TradingHours template resolved below, which is what makes a
+			// daily bar line up with the server's session-days.
+			if (unit == 's')      periodType = BarsPeriodType.Second;
+			else if (unit == 'd') periodType = BarsPeriodType.Day;
+			else                  periodType = BarsPeriodType.Minute;
 			periodValue       = n;
 			resolvedTimeframe = timeframe;
 			return true;
@@ -1566,6 +1573,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 				out resolvedTf, out tfError))
 			{
 				SendErrorResponse(id, tfError);
+				return;
+			}
+			if (periodType == BarsPeriodType.Day)
+			{
+				// A Day bar closes once per session, and the tfSeconds math plus
+				// the server's gap/heal machinery below are built on intraday
+				// grids. Daily is fetched, not streamed.
+				SendErrorResponse(id, "subscribe_bars does not support '" + timeframe
+					+ "': daily bars are historical-fetch only. Use request_candles.");
 				return;
 			}
 

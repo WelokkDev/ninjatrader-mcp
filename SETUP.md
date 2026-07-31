@@ -465,7 +465,7 @@ it has to be a real process environment variable.
 ## 12. Next steps
 
 You now have the public tool surface: `get_candles`, `resolve_session_days`,
-`prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`, `draw_zone`,
+`prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`,
 `clear_zones`, `list_trades`, `list_decisions`, `get_trades`, `sync_trades`.
 
 The trading logic — zone detection, decision engines, strategies — is

@@ -18,7 +18,7 @@ import {
   mismatchIsEmpty,
   validateSessionDay,
 } from "../core/cache/validator.js";
-import { classifySessionDay, ensureCached } from "../core/cache/fill.js";
+import { classifySessionDay, ensureCached, planFetchWindows } from "../core/cache/fill.js";
 import { isConnected as defaultIsConnected } from "../bridge/index.js";
 import {
   computeDerivedForSessionDay,
@@ -41,16 +41,16 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
 
 export interface GetCandlesArgs {
   symbol: string;
-  timeframe: "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h";
+  timeframe: "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
   start: string;
   end: string;
   limit?: number;
 }
 
-// 15s and 5m are their own raw streams; everything else derives from
+// 15s, 5m and 1d are their own raw streams; everything else derives from
 // 15m via the aggregation chain in ingest.ts.
 function fetchTimeframeFor(requested: Timeframe): Timeframe {
-  if (requested === "15s" || requested === "5m") return requested;
+  if (requested === "15s" || requested === "5m" || requested === "1d") return requested;
   return "15m";
 }
 
@@ -179,16 +179,25 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     const rawTF = fetchTimeframeFor(timeframe);
     const nowUnix = Math.floor(Date.now() / 1000);
 
-    // Refuse inline fills past the cold-day cap. Disconnected calls do no
-    // fetch work (instant per-window failures), so the guard doesn't apply.
+    // Refuse inline fills past the cap. Disconnected calls do no fetch work
+    // (instant per-window failures), so the guard doesn't apply.
+    //
+    // The cap is on bridge ROUND-TRIPS, not cold days — that is the work a
+    // synchronous call must fit inside the MCP tool-call timeout. For intraday
+    // TFs the two are the same (one window per cold day); daily batches many
+    // days into one request, so a long daily backfill stays inline.
     if (deps.isConnected()) {
       const coldDays = requestedDays.filter(
         (day) => classifySessionDay(deps.db, symbol, day, rawTF, nowUnix) !== "complete",
       );
-      if (coldDays.length > MAX_INLINE_COLD_DAYS) {
+      const coldWindows = planFetchWindows(
+        coldDays.map((day) => ({ day, class: "empty" as const })),
+        rawTF,
+      );
+      if (coldWindows.length > MAX_INLINE_COLD_DAYS) {
         return errorResult(
           `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
-            `over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
+            `${coldWindows.length} fetches, over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
             `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
             `poll prefetch_status until it completes, then re-issue this get_candles.`,
         );
@@ -328,11 +337,26 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     };
     const interSessionExcluded = flatInRange - totalInRange;
 
+    // The daily bar of an in-progress session is ALWAYS partial: it is stamped
+    // at the session close, which is still in the future, and its high/low/
+    // close keep moving until then. Only its `open` is settled. Consumers must
+    // not read H/L/C off a partial daily bar — that is tomorrow's information.
+    let partialBars = 0;
+    if (timeframe === "1d") {
+      for (const day of finalDays) {
+        if (day.endUnix <= nowUnix) continue;
+        for (const row of rows) {
+          if (row.timestamp !== day.endUnix) continue;
+          row.partial = true;
+          partialBars++;
+        }
+      }
+    }
+
     // A derived bar in an in-progress day is partial when its stamp is off
     // the expected grid (bucket still forming), or when its stamp is canonical
     // but a 15m constituent is missing (NT8-side gap), so its OHLC covers only
     // part of the bucket. Closed days are covered by validation instead.
-    let partialBars = 0;
     if (isDerived) {
       const cached15mStmt = deps.db.prepare(
         `SELECT timestamp FROM candles
@@ -467,13 +491,13 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (5m direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
-        .enum(["15s", "5m", "15m", "30m", "1h", "2h", "4h"])
+        .enum(["15s", "5m", "15m", "30m", "1h", "2h", "4h", "1d"])
         .describe(
-          "Candle timeframe. 15s and 5m are raw parallel streams; 30m–4h derive from 15m. 15s is DENSE (5,520 bars/session-day) — it always needs an explicit `limit` and is meant for engine consumption; use prefetch_candles for 15s batches.",
+          "Candle timeframe. 15s, 5m and 1d are raw parallel streams; 30m–4h derive from 15m. 15s is DENSE (5,520 bars/session-day) — it always needs an explicit `limit` and is meant for engine consumption; use prefetch_candles for 15s batches. 1d is exactly one bar per session-day, stamped at the session CLOSE (so today's daily bar carries a future timestamp and `partial: true` until the session ends).",
         ),
       start: z
         .string()

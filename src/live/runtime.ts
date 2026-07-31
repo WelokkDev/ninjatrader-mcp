@@ -13,7 +13,9 @@ import {
   sessionDaysOverlapping,
 } from "../core/sessions/session-day.js";
 import { expectedRawGrid } from "../core/cache/purge.js";
+import { ensureCached } from "../core/cache/fill.js";
 import { isValidCandle } from "../bridge/ingest.js";
+import type { EnsureBarsSummary } from "../bridge/consumer.js";
 import type {
   BarCloseMessage,
   HelloMessage,
@@ -54,6 +56,13 @@ export interface LiveFeedRuntime {
   handlePositionSync(msg: PositionSyncMessage): void;
   handlePositionEvent(msg: PositionEventMessage): void;
   handleHello(msg: HelloMessage): Promise<void>;
+  /** /feed ensure_bars: fill cache gaps at a raw TF (get_candles fill path). */
+  ensureBars(
+    symbol: string,
+    timeframe: LiveTimeframe,
+    fromUnix: number,
+    toUnix: number,
+  ): Promise<EnsureBarsSummary>;
 }
 
 export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntime {
@@ -170,6 +179,49 @@ export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntim
     positions.handleEvent(msg);
   };
 
+  const ensureBars = async (
+    symbol: string,
+    timeframe: LiveTimeframe,
+    fromUnix: number,
+    toUnix: number,
+  ): Promise<EnsureBarsSummary> => {
+    try {
+      const config = getInstrumentConfig(symbol); // throws on unknown symbol
+      const calendar = loadCalendar(deps.db, config.session.name);
+      const res = await ensureCached(
+        deps.db,
+        symbol,
+        fromUnix,
+        toUnix,
+        timeframe,
+        config.session,
+        { isConnected: deps.isConnected, request: deps.request },
+        nowUnix(),
+        calendar,
+      );
+      return {
+        ok: res.windowsFailed === 0 && !res.bridgeDisconnected && !res.simFeedRejected,
+        daysChecked: res.classifications.length,
+        windowsFetched: res.windowsFetched,
+        windowsFailed: res.windowsFailed,
+        bridgeDisconnected: res.bridgeDisconnected,
+        simFeedRejected: res.simFeedRejected,
+        errors: res.errors.slice(0, 5), // bounded
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        daysChecked: 0,
+        windowsFetched: 0,
+        windowsFailed: 0,
+        bridgeDisconnected: false,
+        simFeedRejected: false,
+        errors: [],
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+
   return {
     registry,
     recorder,
@@ -182,6 +234,7 @@ export function createLiveFeedRuntime(deps: LiveFeedRuntimeDeps): LiveFeedRuntim
     handlePositionSync,
     handlePositionEvent,
     handleHello,
+    ensureBars,
   };
 }
 
@@ -270,6 +323,8 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
       release: (symbol, tf, source) => runtime!.registry.release(symbol, tf, source),
       releaseAllForSource: (source) => runtime!.registry.releaseAllForSource(source),
       list: () => runtime!.registry.list(),
+      ensureBars: (symbol, tf, fromUnix, toUnix) =>
+        runtime!.ensureBars(symbol, tf, fromUnix, toUnix),
     },
     runtime.bus,
   );

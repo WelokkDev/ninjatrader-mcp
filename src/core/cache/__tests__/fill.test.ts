@@ -4,6 +4,7 @@ import { initializeSchema } from "../../../db/schema.js";
 import {
   CANDLE_FETCH_TIMEOUT_MS,
   classifySessionDay,
+  DAILY_FETCH_BATCH_DAYS,
   ensureCached,
   observeEarlyClose,
   planFetchWindows,
@@ -13,6 +14,7 @@ import {
 import { expectedCloseStamps } from "../validator.js";
 import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
 import type { SessionCalendar } from "../../sessions/calendar.js";
+import type { Timeframe } from "../../types.js";
 
 const unix = (y: number, mo1: number, d: number, h: number): number =>
   Math.floor(Date.UTC(y, mo1 - 1, d, h, 0, 0) / 1000);
@@ -35,9 +37,9 @@ describe("planFetchWindows (per-day, no merging)", () => {
   it("emits one window per non-complete day", () => {
     const windows = planFetchWindows(classify(["empty", "empty", "partial"]));
     expect(windows).toEqual([
-      { startUnix: DAYS[0].startUnix, endUnix: DAYS[0].endUnix, labels: ["2026-05-04"] },
-      { startUnix: DAYS[1].startUnix, endUnix: DAYS[1].endUnix, labels: ["2026-05-05"] },
-      { startUnix: DAYS[2].startUnix, endUnix: DAYS[2].endUnix, labels: ["2026-05-06"] },
+      { startUnix: DAYS[0].startUnix, endUnix: DAYS[0].endUnix, days: [DAYS[0]], labels: ["2026-05-04"] },
+      { startUnix: DAYS[1].startUnix, endUnix: DAYS[1].endUnix, days: [DAYS[1]], labels: ["2026-05-05"] },
+      { startUnix: DAYS[2].startUnix, endUnix: DAYS[2].endUnix, days: [DAYS[2]], labels: ["2026-05-06"] },
     ]);
   });
 
@@ -45,10 +47,65 @@ describe("planFetchWindows (per-day, no merging)", () => {
     const windows = planFetchWindows(classify(["empty", "complete", "in_progress"]));
     expect(windows.map((w) => w.labels)).toEqual([["2026-05-04"], ["2026-05-06"]]);
   });
+
+  it("keeps per-day windows for every intraday TF", () => {
+    for (const tf of ["15s", "5m", "15m", "30m", "1h"] as const) {
+      const windows = planFetchWindows(classify(["empty", "empty", "partial"]), tf);
+      expect(windows.map((w) => w.labels)).toEqual([
+        ["2026-05-04"],
+        ["2026-05-05"],
+        ["2026-05-06"],
+      ]);
+    }
+  });
+});
+
+describe("planFetchWindows at 1d (batched)", () => {
+  it("collapses the pending days into ONE window — a session-day is one daily bar", () => {
+    const windows = planFetchWindows(classify(["empty", "empty", "partial"]), "1d");
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toEqual({
+      startUnix: DAYS[0].startUnix,
+      endUnix: DAYS[2].endUnix,
+      days: DAYS,
+      labels: ["2026-05-04", "2026-05-05", "2026-05-06"],
+    });
+  });
+
+  it("bridges over an already-complete day rather than splitting the request", () => {
+    const windows = planFetchWindows(classify(["empty", "complete", "empty"]), "1d");
+    expect(windows).toHaveLength(1);
+    // The complete day is not re-listed as work, but the span covers it.
+    expect(windows[0].labels).toEqual(["2026-05-04", "2026-05-06"]);
+    expect(windows[0].endUnix).toBe(DAYS[2].endUnix);
+  });
+
+  it("chunks at DAILY_FETCH_BATCH_DAYS", () => {
+    const many: DayClassification[] = Array.from({ length: 250 }, (_, i) => ({
+      day: {
+        label: `d${i}`,
+        startUnix: 1_000_000 + i * 86_400,
+        endUnix: 1_000_000 + i * 86_400 + 82_800,
+      },
+      class: "empty" as const,
+    }));
+    const windows = planFetchWindows(many, "1d");
+    expect(windows.map((w) => w.days.length)).toEqual([
+      DAILY_FETCH_BATCH_DAYS,
+      DAILY_FETCH_BATCH_DAYS,
+      10,
+    ]);
+    // 250 daily bars in 3 round-trips, not 250.
+    expect(windows).toHaveLength(3);
+  });
+
+  it("emits nothing when every day is already complete", () => {
+    expect(planFetchWindows(classify(["complete", "complete", "complete"]), "1d")).toEqual([]);
+  });
 });
 
 describe("ensureCached fetch loop", () => {
-  function harness(request: EnsureCachedDeps["request"]) {
+  function harness(request: EnsureCachedDeps["request"], timeframe: Timeframe = "5m") {
     const db = new Database(":memory:");
     initializeSchema(db);
     return () =>
@@ -57,12 +114,26 @@ describe("ensureCached fetch loop", () => {
         "NQ",
         DAYS[0].startUnix,
         DAYS[2].endUnix,
-        "5m",
+        timeframe,
         CME_US_INDEX_FUTURES_ETH,
         { isConnected: () => true, request },
         NOW,
       );
   }
+
+  it("fetches three cold daily days in ONE request spanning all of them", async () => {
+    const request = vi.fn(
+      async (_type: string, _payload: Record<string, unknown>, _timeoutMs?: number) => ({}),
+    );
+    const result = await harness(request, "1d")();
+    expect(request).toHaveBeenCalledTimes(1);
+    const payload = request.mock.calls[0][1];
+    expect(payload.timeframe).toBe("1d");
+    expect(payload.from).toBe(DAYS[0].startUnix);
+    expect(payload.to).toBe(DAYS[2].endUnix);
+    // All three days are still credited to the window.
+    expect(result.fetchedDays).toEqual(["2026-05-04", "2026-05-05", "2026-05-06"]);
+  });
 
   it("threads the scaled candle-fetch timeout into every request", async () => {
     const request = vi.fn(

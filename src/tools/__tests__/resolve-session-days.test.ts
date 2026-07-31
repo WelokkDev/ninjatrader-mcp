@@ -81,7 +81,8 @@ describe("resolve_session_days relative anchors", () => {
       "2026-07-02",
       "2026-07-03",
     ]);
-    // 23h CME ETH session-days: 5520/276/92/46/23/12/6 bars per day.
+    // 23h CME ETH session-days: 5520/276/92/46/23/12/6 bars per day, and
+    // exactly 1 daily bar per session-day.
     expect(out.barCountEstimate).toEqual({
       "15s": 27600,
       "5m": 1380,
@@ -90,6 +91,7 @@ describe("resolve_session_days relative anchors", () => {
       "1h": 115,
       "2h": 60,
       "4h": 30,
+      "1d": 5,
     });
     const sum5m = out.sessionDays.reduce(
       (acc: number, d: { label: string; startUnix: number; endUnix: number }) =>

@@ -127,7 +127,6 @@ The public server (`build/index.js`) registers 23 tools. The write tools appear 
 | Tool | Summary |
 |---|---|
 | `draw` | Draw a generic primitive on the NT8 chart: `rectangle`, `hline`, `vline`, or `text`, with optional style (`color`, `opacity`, `label`). |
-| `draw_zone` | **Deprecated** — legacy rectangle-only path; prefer `draw`. |
 | `clear_zones` | Remove drawn primitives by id, or all of them; optionally scoped to one symbol. |
 | `list_open_charts` | Enumerate open NT8 charts/tabs and their symbols. |
 | `navigate_chart` | Programmatic Go To: scroll a chart to a date/time (centered or right-aligned) and/or zoom to a bar count; selects the tab, focuses the window, and reports the resulting visible range. Only reaches what the chart has loaded — `clamped: true` in the response means increase the chart's Days To Load. |

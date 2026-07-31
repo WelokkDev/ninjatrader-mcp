@@ -51,7 +51,7 @@ export function registerListOpenCharts(server: McpServer): void {
   });
   server.tool(
     "list_open_charts",
-    "List every chart currently open in NinjaTrader 8 — one entry per chart tab: {window, symbol, instrument, timeframe, isActive (selected tab of its window), hasRenderer (draw target ready)}. Chart-targeting etiquette: when the user references 'the chart'/'my chart' without naming an instrument or timeframe, call this first; if exactly one chart is open, target it without asking; if several are open, ask the user to pick (offer symbol+timeframe options; the active tab is the natural default). symbol matches what draw/draw_zone/clear_zones expect. Draws only render where hasRenderer is true.",
+    "List every chart currently open in NinjaTrader 8 — one entry per chart tab: {window, symbol, instrument, timeframe, isActive (selected tab of its window), hasRenderer (draw target ready)}. Chart-targeting etiquette: when the user references 'the chart'/'my chart' without naming an instrument or timeframe, call this first; if exactly one chart is open, target it without asking; if several are open, ask the user to pick (offer symbol+timeframe options; the active tab is the natural default). symbol matches what draw/clear_zones expect. Draws only render where hasRenderer is true.",
     {},
     handler,
   );

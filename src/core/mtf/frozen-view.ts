@@ -3,8 +3,9 @@ import type { SessionTemplate } from "../sessions/types.js";
 import type { FrozenView } from "./types.js";
 import { makeSessionDayResolver } from "../sessions/session-day.js";
 
-// Intraday period lengths in seconds. "1d" is intentionally absent, daily bars come from the private session-aligned daily aggregator, 
-// not here (mirrors core/aggregator.ts, which likewise refuses "1d").
+// Intraday period lengths in seconds. "1d" is intentionally absent: daily is a
+// RAW stream fetched from NT8 (one bar per session-day), never bucketed from
+// intraday bars (mirrors core/aggregator.ts, which likewise refuses "1d").
 export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
   "15s": 15,
   "5m": 5 * 60,
@@ -50,7 +51,7 @@ export function buildFrozenView(args: {
   for (const tf of timeframes) {
     if (tf === "1d") {
       throw new Error(
-        `buildFrozenView: "1d" is out of scope — daily bars come from the private session-aligned aggregator, not the intraday frozen view. Pass a subset of 15m/30m/1h/2h/4h.`,
+        `buildFrozenView: "1d" is out of scope — the frozen view buckets intraday bars, and daily is a raw NT8 stream (read it from the cache directly). Pass a subset of 15m/30m/1h/2h/4h.`,
       );
     }
     const { completedBars, formingBar } = bucketAsOf(

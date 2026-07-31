@@ -44,7 +44,7 @@ export function aggregateCandles(
 ): Candle[] {
   if (targetTimeframe === "1d") {
     throw new Error(
-      `aggregateCandles: target "1d" is not supported by the intraday aggregator. Daily bars come from the private session-aligned daily rollup layer.`,
+      `aggregateCandles: target "1d" is not derived — daily is a RAW stream fetched from NT8 (one bar per session-day, close-stamped at the session end). Fetch it via get_candles/prefetch_candles instead of aggregating.`,
     );
   }
   if (targetTimeframe === "15s" || targetTimeframe === "5m" || targetTimeframe === "15m") {

@@ -278,10 +278,7 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
     const barCountEstimate = Object.fromEntries(
       SUPPORTED_TIMEFRAMES.map((tf) => [
         tf,
-        days.reduce(
-          (acc, d) => acc + expectedBarCount(d, tf as Exclude<Timeframe, "1d">),
-          0,
-        ),
+        days.reduce((acc, d) => acc + expectedBarCount(d, tf), 0),
       ]),
     );
 

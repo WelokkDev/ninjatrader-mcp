@@ -11,7 +11,6 @@ import { registerGetCandles } from "./tools/get-candles.js";
 import { registerResolveSessionDays } from "./tools/resolve-session-days.js";
 import { registerPrefetchTools } from "./tools/prefetch-candles.js";
 import { registerDraw } from "./tools/draw.js";
-import { registerDrawZone } from "./tools/draw-zone.js";
 import { registerClearZones } from "./tools/clear-zones.js";
 import { registerListOpenCharts } from "./tools/list-open-charts.js";
 import { registerNavigateChart } from "./tools/navigate-chart.js";
@@ -76,7 +75,6 @@ export function registerGenericTools(
     registerPrefetchTools(server),
   );
   unless(["draw"], () => registerDraw(server));
-  unless(["draw_zone"], () => registerDrawZone(server));
   unless(["clear_zones"], () => registerClearZones(server));
   unless(["list_open_charts"], () => registerListOpenCharts(server));
   unless(["navigate_chart"], () => registerNavigateChart(server));

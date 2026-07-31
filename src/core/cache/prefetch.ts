@@ -6,6 +6,7 @@ import { sessionDayRange } from "../sessions/session-day.js";
 import {
   classifySessionDay,
   CANDLE_FETCH_TIMEOUT_MS,
+  DAILY_FETCH_BATCH_DAYS,
   observeEarlyClose,
   withCandleTimeoutHint,
 } from "./fill.js";
@@ -63,7 +64,7 @@ export type PrefetchJobState =
 interface Job {
   id: string;
   symbol: string;
-  rawTimeframe: Exclude<Timeframe, "1d">;
+  rawTimeframe: Timeframe;
   template: SessionTemplate;
   createdAtMs: number;
   finishedAtMs: number | null;
@@ -97,7 +98,7 @@ export interface PrefetchJobSnapshot {
 
 export interface StartJobArgs {
   symbol: string;
-  rawTimeframe: Exclude<Timeframe, "1d">;
+  rawTimeframe: Timeframe;
   days: SessionDay[];
   template: SessionTemplate;
 }
@@ -308,13 +309,18 @@ export class PrefetchManager {
     d.state = "fetching";
     const t0 = this.nowMs();
     try {
+      // A session-day holds ONE daily bar, so fetching day-by-day would be one
+      // round-trip per bar. Widen the request to cover the next batch of this
+      // job's still-pending days; when their turn comes they classify complete
+      // and self-skip, so a 200-day daily job costs ~2 requests, not 200.
+      const to = job.rawTimeframe === "1d" ? this.dailyBatchEnd(job, d) : d.day.endUnix;
       await this.deps.request(
         "request_candles",
         {
           symbol: job.symbol,
           timeframe: job.rawTimeframe,
           from: d.day.startUnix,
-          to: d.day.endUnix,
+          to,
           tradingHoursTemplate: job.template.name,
         },
         CANDLE_FETCH_TIMEOUT_MS,
@@ -344,6 +350,22 @@ export class PrefetchManager {
       d.error = withCandleTimeoutHint(err instanceof Error ? err.message : String(err));
     }
     this.finalizeIfDone(job);
+  }
+
+  /** End of the batched daily request that starts at `d`: the end of the last
+   *  of the next DAILY_FETCH_BATCH_DAYS still-pending days in this job. Never
+   *  reaches outside the job's own days. */
+  private dailyBatchEnd(job: Job, d: JobDay): number {
+    const from = job.days.indexOf(d);
+    if (from < 0) return d.day.endUnix;
+    let end = d.day.endUnix;
+    let taken = 1;
+    for (let i = from + 1; i < job.days.length && taken < DAILY_FETCH_BATCH_DAYS; i++) {
+      if (job.days[i].state !== "pending") continue;
+      end = job.days[i].day.endUnix;
+      taken++;
+    }
+    return end;
   }
 
   /** Try the observed-close interlock for a day that failed verification;

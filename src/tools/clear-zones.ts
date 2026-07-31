@@ -46,7 +46,7 @@ export function registerClearZones(server: McpServer): void {
 
   server.tool(
     "clear_zones",
-    "Remove drawings previously created via draw or draw_zone (cleared by id/tag; works for any shape). Omit symbol to clear on every chart with the renderer attached. Provide ids to clear specific drawings; omit ids to clear all.",
+    "Remove drawings previously created via draw or a scan's draw path (cleared by id/tag; works for any shape). Omit symbol to clear on every chart with the renderer attached. Provide ids to clear specific drawings; omit ids to clear all.",
     {
       symbol: z
         .string()

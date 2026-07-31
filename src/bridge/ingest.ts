@@ -12,6 +12,13 @@ import {
   DERIVED_TIMEFRAMES,
   recomputeDerivedForSessionDay,
 } from "../core/cache/derived.js";
+import {
+  describeReconcileMismatch,
+  normalizeDailyStamps,
+  reconcileDailyAgainstIntraday,
+  summarizeConventions,
+  type DailyReconcileResult,
+} from "../core/cache/daily.js";
 import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
@@ -39,6 +46,11 @@ export interface IngestResult {
   // Invalid OHLCV, outside any session-day, or off a closed day's grid.
   dropped: number;
   aggregated: Record<string, number>;
+  // "1d" only: session-days whose ingested daily bar disagreed with the
+  // intraday bars already cached for that same day. Non-empty means the daily
+  // stream is filed against the wrong sessions (or the wrong contract) — the
+  // rows are still written, but nothing downstream should trust them yet.
+  dailyMismatches?: DailyReconcileResult[];
 }
 
 export interface IngestOptions {
@@ -89,7 +101,32 @@ export function ingestCandles(
   const inSession: Array<{ candle: Candle; sessionDayLabel: string }> = [];
   const perDayCount = new Map<string, number>();
   const resolveDay = makeSessionDayResolver(config.session, calendar);
-  for (const c of valid) {
+
+  // Daily bars carry whatever stamp NT8's provider uses; the cache stores one
+  // canonical stamp — the session close. Re-stamp first, then let the shared
+  // path below place them exactly like any other raw bar.
+  let toPlace: readonly Candle[] = valid;
+  let normalizedDaily: ReturnType<typeof normalizeDailyStamps>["bars"] = [];
+  if (timeframe === "1d") {
+    const norm = normalizeDailyStamps(valid, resolveDay);
+    normalizedDaily = norm.bars;
+    toPlace = norm.bars.map((b) => b.candle);
+    for (const c of norm.unresolved) {
+      dropped++;
+      console.error(
+        `[ingest] dropping 1d bar for ${symbol} at unix=${c.timestamp} — in no session-day for template "${config.session.name}"`,
+      );
+    }
+    if (norm.bars.length > 0) {
+      const restamped = norm.bars.filter((b) => b.convention !== "session_close").length;
+      console.error(
+        `[ingest] 1d stamp convention for ${symbol}: ${summarizeConventions(norm.bars)}` +
+          (restamped > 0 ? ` (${restamped} bar(s) re-stamped onto the session close)` : ""),
+      );
+    }
+  }
+
+  for (const c of toPlace) {
     const sd = resolveDay(c.timestamp);
     if (sd === null) {
       dropped++;
@@ -133,12 +170,7 @@ export function ingestCandles(
         if (calEntry?.kind === "modified" && !calEntry.closeTime) {
           continue;
         }
-        const expectedSet = expectedRawGrid(
-          day,
-          timeframe as Exclude<Timeframe, "1d">,
-          config.session,
-          calendar,
-        );
+        const expectedSet = expectedRawGrid(day, timeframe, config.session, calendar);
         closedDayGrid.set(label, expectedSet);
         const removed = purgeOffGridRawRows(database, symbol, timeframe, day, expectedSet, nowUnix);
         if (removed > 0) {
@@ -178,7 +210,38 @@ export function ingestCandles(
 
   tx();
 
-  return { inserted, dropped, aggregated };
+  // Re-stamping put each daily bar on a session-day; this proves it was the
+  // RIGHT one. A bar filed against the wrong session cannot match that
+  // session's own intraday open/high/low/close.
+  const dailyMismatches: DailyReconcileResult[] = [];
+  if (timeframe === "1d") {
+    let checked = 0;
+    for (const b of normalizedDaily) {
+      const r = reconcileDailyAgainstIntraday(database, symbol, b.day, b.candle, nowUnix);
+      if (r.against === null) continue;
+      checked++;
+      if (r.mismatches.length > 0) dailyMismatches.push(r);
+    }
+    if (dailyMismatches.length > 0) {
+      const head = dailyMismatches.slice(0, 3).map(describeReconcileMismatch).join("; ");
+      const more = dailyMismatches.length > 3 ? ` …and ${dailyMismatches.length - 3} more` : "";
+      console.error(
+        `[ingest] 1d RECONCILE FAILED for ${symbol}: ${dailyMismatches.length}/${checked} day(s) disagree with their cached intraday bars — ${head}${more}. ` +
+          `The daily stream may be filed against the wrong sessions (NT8 stamp convention) or a different contract. Do NOT trust 1d for this symbol until this is resolved.`,
+      );
+    } else if (checked > 0) {
+      console.error(
+        `[ingest] 1d reconciled clean for ${symbol}: ${checked} day(s) match their cached intraday OHLC`,
+      );
+    }
+  }
+
+  return {
+    inserted,
+    dropped,
+    aggregated,
+    ...(dailyMismatches.length > 0 && { dailyMismatches }),
+  };
 }
 
 /**

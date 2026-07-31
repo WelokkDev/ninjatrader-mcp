@@ -48,8 +48,14 @@ export function classifySessionDay(
 export interface FetchWindow {
   startUnix: number;
   endUnix: number;
-  labels: string[]; // session-day labels covered by this window, in order
+  days: SessionDay[]; // session-days this window must fill, in order
+  labels: string[]; // their labels, in order
 }
+
+// Session-days per request when batching daily bars. Bounded so one request
+// still fits the bridge timeout when NT8 has to download history first;
+// ~6 months of sessions per round-trip.
+export const DAILY_FETCH_BATCH_DAYS = 120;
 
 /**
  * One fetch window per non-complete session-day — deliberately NOT
@@ -61,21 +67,40 @@ export interface FetchWindow {
  * Non-session calendar days (Saturdays, etc.) are already absent from
  * the input list because `sessionDaysOverlapping` only yields valid
  * session-days.
+ *
+ * Daily is the one exception: a session-day holds a SINGLE 1d bar, so
+ * per-day windows would mean one round-trip per bar — 200 requests to
+ * backfill 200 bars. Those days are batched into spans of
+ * DAILY_FETCH_BATCH_DAYS instead. A span may cover already-complete days in
+ * the middle; re-fetching them is one redundant bar each and ingest converges
+ * them to the same row.
  */
 export function planFetchWindows(
   classifications: DayClassification[],
+  timeframe?: Timeframe,
 ): FetchWindow[] {
-  const windows: FetchWindow[] = [];
-  for (const { day, class: cls } of classifications) {
-    if (cls !== "complete") {
+  const pending = classifications.filter((c) => c.class !== "complete").map((c) => c.day);
+
+  if (timeframe === "1d") {
+    const windows: FetchWindow[] = [];
+    for (let i = 0; i < pending.length; i += DAILY_FETCH_BATCH_DAYS) {
+      const batch = pending.slice(i, i + DAILY_FETCH_BATCH_DAYS);
       windows.push({
-        startUnix: day.startUnix,
-        endUnix: day.endUnix,
-        labels: [day.label],
+        startUnix: batch[0].startUnix,
+        endUnix: batch[batch.length - 1].endUnix,
+        days: batch,
+        labels: batch.map((d) => d.label),
       });
     }
+    return windows;
   }
-  return windows;
+
+  return pending.map((day) => ({
+    startUnix: day.startUnix,
+    endUnix: day.endUnix,
+    days: [day],
+    labels: [day.label],
+  }));
 }
 
 // Candle fetches get a wider timeout than the 10s bridge default: a cold
@@ -155,7 +180,7 @@ export async function ensureCached(
     day,
     class: classifySessionDay(db, symbol, day, rawTimeframe, nowUnix),
   }));
-  const windows = planFetchWindows(classifications);
+  const windows = planFetchWindows(classifications, rawTimeframe);
 
   const result: EnsureCachedResult = {
     classifications,
@@ -184,12 +209,13 @@ export async function ensureCached(
 
   const fetchedWindows: FetchWindow[] = [];
   for (const window of windows) {
-    const day: SessionDay = {
-      label: window.labels[0],
-      startUnix: window.startUnix,
-      endUnix: window.endUnix,
-    };
-    if (classifySessionDay(db, symbol, day, rawTimeframe, nowUnix) === "complete") {
+    // A window can complete between planning and its turn (a batched daily
+    // span, an overlapping fill). Only skip when EVERY day in it is complete.
+    if (
+      window.days.every(
+        (day) => classifySessionDay(db, symbol, day, rawTimeframe, nowUnix) === "complete",
+      )
+    ) {
       result.windowsFetched++;
       result.fetchedDays.push(...window.labels);
       continue;
@@ -232,40 +258,36 @@ export async function ensureCached(
   // in ingest: only this side knows which window was fetched, so a zero-bar
   // response's leftovers converge to honest-empty instead of refetch-looping.
   for (const window of fetchedWindows) {
-    const day: SessionDay = {
-      label: window.labels[0],
-      startUnix: window.startUnix,
-      endUnix: window.endUnix,
-    };
-    if (
-      calendar &&
-      observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)
-    ) {
-      result.calendarUpdated = true;
-      continue;
-    }
-    // Close time unrecorded, so the day's true grid is unknown: purging
-    // against template geometry would delete the genuine stub bar.
-    const calEntry = calendar?.get(day.label);
-    if (calEntry?.kind === "modified" && !calEntry.closeTime) {
-      continue;
-    }
-    if (rawTimeframe === "1d") continue; // no intraday grid to reconcile
-    const grid = expectedRawGrid(day, rawTimeframe, template, calendar);
-    const purged = purgeOffGridRawRows(db, symbol, rawTimeframe, day, grid, nowUnix);
-    if (purged > 0) {
-      console.error(
-        `[fill] post-fetch reconcile ${symbol} ${rawTimeframe} ${day.label}: removed ${purged} off-grid row(s)`,
-      );
-      // Without re-deriving, the day would serve derived OHLCV aggregated
-      // from the rows just deleted — at canonical stamps that pass every
-      // validator.
-      if (rawTimeframe === "15m") {
-        const config = getInstrumentConfig(symbol);
-        const cal = calendar ?? loadCalendar(db, template.name);
-        db.transaction(() => {
-          recomputeDerivedForSessionDay(db, symbol, day, config, cal, nowUnix);
-        })();
+    for (const day of window.days) {
+      if (
+        calendar &&
+        observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)
+      ) {
+        result.calendarUpdated = true;
+        continue;
+      }
+      // Close time unrecorded, so the day's true grid is unknown: purging
+      // against template geometry would delete the genuine stub bar.
+      const calEntry = calendar?.get(day.label);
+      if (calEntry?.kind === "modified" && !calEntry.closeTime) {
+        continue;
+      }
+      const grid = expectedRawGrid(day, rawTimeframe, template, calendar);
+      const purged = purgeOffGridRawRows(db, symbol, rawTimeframe, day, grid, nowUnix);
+      if (purged > 0) {
+        console.error(
+          `[fill] post-fetch reconcile ${symbol} ${rawTimeframe} ${day.label}: removed ${purged} off-grid row(s)`,
+        );
+        // Without re-deriving, the day would serve derived OHLCV aggregated
+        // from the rows just deleted — at canonical stamps that pass every
+        // validator.
+        if (rawTimeframe === "15m") {
+          const config = getInstrumentConfig(symbol);
+          const cal = calendar ?? loadCalendar(db, template.name);
+          db.transaction(() => {
+            recomputeDerivedForSessionDay(db, symbol, day, config, cal, nowUnix);
+          })();
+        }
       }
     }
   }
@@ -289,6 +311,11 @@ export function observeEarlyClose(
   calendar: SessionCalendar,
   nowUnix: number,
 ): boolean {
+  // A daily bar is one stamp per session and carries no intra-session
+  // structure, so it can never evidence WHEN a session closed early. Inferring
+  // a close time from it would be fabrication.
+  if (rawTimeframe === "1d") return false;
+
   const entry = calendar.get(day.label);
   if (
     entry?.kind !== "modified" ||

@@ -14,10 +14,14 @@ const DELETE_CHUNK = 5000;
  * day's open time. That addition keeps bars cached under the old anchor from
  * being re-graded off-grid and deleted; on period-aligned shifts the two
  * lattices coincide and it is inert.
+ *
+ * At "1d" the grid is the single {endUnix} stamp, and the template-anchored
+ * addition contributes the template close — so a daily bar cached before an
+ * early close was recorded survives the reclassification like any other.
  */
 export function expectedRawGrid(
   day: SessionDay,
-  timeframe: Exclude<Timeframe, "1d">,
+  timeframe: Timeframe,
   session: SessionTemplate,
   calendar?: SessionCalendar,
 ): Set<number> {

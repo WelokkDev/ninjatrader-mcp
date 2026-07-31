@@ -39,6 +39,15 @@ function stubBinding(over: Partial<ConsumerHubBinding> = {}): ConsumerHubBinding
     release: vi.fn(async () => ({ removedUpstream: true })),
     releaseAllForSource: vi.fn(async () => {}),
     list: () => [],
+    ensureBars: vi.fn(async () => ({
+      ok: true,
+      daysChecked: 3,
+      windowsFetched: 2,
+      windowsFailed: 0,
+      bridgeDisconnected: false,
+      simFeedRejected: false,
+      errors: [],
+    })),
     ...over,
   };
 }
@@ -223,6 +232,119 @@ describe("/feed channel", () => {
         expect.stringMatching(/^consumer:\d+$/),
       );
     });
+  });
+
+  it("ensure_bars delegates to the binding and echoes the reqId", async () => {
+    const binding = stubBinding();
+    const { port } = await boot(binding);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({
+        type: "ensure_bars",
+        reqId: "warmup-1",
+        symbol: "MNQ",
+        timeframe: "5m",
+        fromUnix: 1_785_100_000,
+        toUnix: 1_785_400_000,
+      }),
+    );
+    const reply = await client.next();
+    expect(reply.type).toBe("ensure_bars_result");
+    expect(reply.reqId).toBe("warmup-1");
+    expect(reply.ok).toBe(true);
+    expect(reply.windowsFetched).toBe(2);
+    expect(binding.ensureBars).toHaveBeenCalledWith("MNQ", "5m", 1_785_100_000, 1_785_400_000);
+    client.ws.close();
+  });
+
+  it("ensure_bars rejects a derived timeframe and an oversized range as typed failures", async () => {
+    const binding = stubBinding();
+    const { port } = await boot(binding);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({
+        type: "ensure_bars",
+        reqId: "bad-tf",
+        symbol: "MNQ",
+        timeframe: "1h",
+        fromUnix: 1,
+        toUnix: 2,
+      }),
+    );
+    let reply = await client.next();
+    expect(reply.type).toBe("ensure_bars_result");
+    expect(reply.reqId).toBe("bad-tf");
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/timeframe/);
+
+    client.ws.send(
+      JSON.stringify({
+        type: "ensure_bars",
+        reqId: "too-big",
+        symbol: "MNQ",
+        timeframe: "5m",
+        fromUnix: 0,
+        toUnix: 46 * 86_400,
+      }),
+    );
+    reply = await client.next();
+    expect(reply.reqId).toBe("too-big");
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/range exceeds/);
+    expect(binding.ensureBars).not.toHaveBeenCalled();
+    client.ws.close();
+  });
+
+  it("a second ensure_bars while one is in flight is refused, then allowed after it settles", async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const binding = stubBinding({
+      ensureBars: vi.fn(async () => {
+        await gate;
+        return {
+          ok: true,
+          daysChecked: 1,
+          windowsFetched: 1,
+          windowsFailed: 0,
+          bridgeDisconnected: false,
+          simFeedRejected: false,
+          errors: [],
+        };
+      }),
+    });
+    const { port } = await boot(binding);
+    const client = await connect(port, "/feed");
+    await client.next();
+    const req = (reqId: string) =>
+      client.ws.send(
+        JSON.stringify({
+          type: "ensure_bars",
+          reqId,
+          symbol: "MNQ",
+          timeframe: "5m",
+          fromUnix: 1,
+          toUnix: 1000,
+        }),
+      );
+    req("first");
+    req("second");
+    const busy = await client.next(); // the overlap refusal answers first
+    expect(busy.reqId).toBe("second");
+    expect(busy.ok).toBe(false);
+    expect(busy.error).toMatch(/in flight/);
+    release!();
+    const done = await client.next();
+    expect(done.reqId).toBe("first");
+    expect(done.ok).toBe(true);
+    req("third");
+    const third = await client.next();
+    expect(third.reqId).toBe("third");
+    expect(third.ok).toBe(true);
+    client.ws.close();
   });
 
   it("malformed JSON gets an error reply and the connection survives", async () => {

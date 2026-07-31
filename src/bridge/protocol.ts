@@ -38,7 +38,11 @@ export const helloAckMessageSchema = msg("hello_ack", {
 });
 export type HelloAckMessage = z.infer<typeof helloAckMessageSchema>;
 
-/** Shared with the draw_zone MCP tool's params (draw-zone.ts). */
+/**
+ * Legacy zone-rectangle wire message. The `draw_zone` MCP *tool* was removed
+ * 2026-07-27 (superseded by the generic `draw` tool), but this message type
+ * stays: scan_zones' `draw:true` path and the NT8 AddOn still speak it.
+ */
 export const drawZoneFields = {
   id: z.string().min(1),
   symbol: z.string().min(1),

@@ -4,7 +4,9 @@ import type { SessionCalendar } from "../sessions/calendar.js";
 import type { Timeframe } from "../types.js";
 import { sessionDaysOverlapping } from "../sessions/session-day.js";
 
-// "1d" is excluded — the SQLite cache holds only intraday bars; daily bars are sourced on demand
+// Intraday period lengths. "1d" has no fixed period — its geometry is the
+// session-day itself (see DAILY_* below), so it is absent by design and every
+// lookup here is guarded by an isDaily() check first.
 const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "15s": 15,
   "5m": 300,
@@ -14,6 +16,19 @@ const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "2h": 7200,
   "4h": 14400,
 };
+
+/**
+ * Daily geometry: exactly ONE bar per session-day, close-stamped at the
+ * session's end — the same convention every other TF uses for its final bar.
+ *
+ * This is the cache's canonical stamp, not necessarily the stamp NT8 hands
+ * over: the ingest path re-stamps incoming daily bars onto their session-day's
+ * `endUnix` (see normalizeDailyStamps in bridge/ingest.ts) so that every
+ * validator, purge and query below stays pure session geometry.
+ */
+function isDaily(tf: Timeframe): tf is "1d" {
+  return tf === "1d";
+}
 
 // NT8 emits a historical bar only for buckets with >=1 tick, so a closed
 // 15s session-day legitimately misses a sliver of stamps in overnight
@@ -30,7 +45,9 @@ const SPARSE_TOLERANCE: Partial<
 export function isAcceptableSparseMismatch(
   r: Pick<ValidationResult, "timeframe" | "expected" | "missing" | "extra">,
 ): boolean {
-  if (r.timeframe === "1d") return false;
+  // A session-day either has its daily bar or it doesn't — nothing to be
+  // tolerant about, and no period to measure a gap run against.
+  if (isDaily(r.timeframe)) return false;
   const tol = SPARSE_TOLERANCE[r.timeframe];
   if (!tol || r.extra.length > 0 || r.expected.length === 0) return false;
   if (r.missing.length / r.expected.length > tol.maxMissingFraction) return false;
@@ -51,11 +68,14 @@ export function isAcceptableSparseMismatch(
  * bar when the period doesn't evenly divide the session duration. Shared
  * by validateSessionDay, the get_candles fail-closed gate, and
  * resolve_session_days' barCountEstimate so all three speak the same geometry.
+ *
+ * A session-day holds exactly one "1d" bar, by definition.
  */
 export function expectedBarCount(
   sd: Pick<SessionDay, "startUnix" | "endUnix">,
-  tf: Exclude<Timeframe, "1d">,
+  tf: Timeframe,
 ): number {
+  if (isDaily(tf)) return 1;
   const period = SECONDS_PER_TIMEFRAME[tf];
   const duration = sd.endUnix - sd.startUnix;
   return Math.floor(duration / period) + (duration % period !== 0 ? 1 : 0);
@@ -65,12 +85,14 @@ export function expectedBarCount(
  * The close-stamps session geometry demands for one (session-day, timeframe):
  * full periods from the session start, plus a stub at the close when the
  * period doesn't divide the duration. Works off resolved unix bounds, so
- * calendar-adjusted days get their adjusted stub automatically.
+ * calendar-adjusted days get their adjusted stub automatically — including
+ * "1d", whose single stamp IS the (possibly early) close.
  */
 export function expectedCloseStamps(
   sd: Pick<SessionDay, "startUnix" | "endUnix">,
-  tf: Exclude<Timeframe, "1d">,
+  tf: Timeframe,
 ): number[] {
+  if (isDaily(tf)) return [sd.endUnix];
   const periodSeconds = SECONDS_PER_TIMEFRAME[tf];
   const duration = sd.endUnix - sd.startUnix;
   const hasStub = duration % periodSeconds !== 0;
@@ -117,7 +139,7 @@ export function mismatchIsEmpty(r: Pick<ValidationResult, "actual">): boolean {
 export function validateRangeComplete(
   db: Database,
   symbol: string,
-  timeframe: Exclude<Timeframe, "1d">,
+  timeframe: Timeframe,
   startUnix: number,
   endUnix: number,
   template: SessionTemplate,
@@ -204,6 +226,11 @@ export interface ValidationResult {
  * because unix seconds are TZ-agnostic — DST shifts only the wall-clock
  * label, not the duration.
  *
+ * "1d" short-circuits the formula: its expected set is [endUnix] — the
+ * session-day IS the bar. A daily row therefore validates ok/mismatch on
+ * presence alone, and an early-close day expects its adjusted close stamp
+ * for free (ingest re-stamps daily bars onto the resolved session end).
+ *
  * SessionTemplate is intentionally not a parameter: the caller has
  * already used the template to construct the SessionDay, and the
  * validator only needs the resolved unix-second window.
@@ -220,12 +247,6 @@ export function validateSessionDay(
     symbol,
     timeframe,
   };
-
-  if (timeframe === "1d") {
-    throw new Error(
-      `validateSessionDay: timeframe "1d" is not stored in the intraday cache. Daily candles are sourced on demand by the SMA rollup layer.`,
-    );
-  }
 
   if (sessionDay.endUnix > nowUnix) {
     return {

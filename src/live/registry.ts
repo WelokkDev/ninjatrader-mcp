@@ -1,5 +1,5 @@
 import type { Database } from "better-sqlite3";
-import { RAW_TIMEFRAMES } from "../core/constants.js";
+import { LIVE_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import type {
   BarCloseMessage,
@@ -128,11 +128,11 @@ export class LiveSubscriptionRegistry {
       const m = err instanceof Error ? err.message : String(err);
       return { ok: false, state: this.deadState(symbol, timeframe), error: m };
     }
-    if (!RAW_TIMEFRAMES.includes(timeframe)) {
+    if (!LIVE_TIMEFRAMES.includes(timeframe)) {
       return {
         ok: false,
         state: this.deadState(symbol, timeframe),
-        error: `'${timeframe}' is not a streamable raw timeframe (${RAW_TIMEFRAMES.join(", ")})`,
+        error: `'${timeframe}' is not a streamable raw timeframe (${LIVE_TIMEFRAMES.join(", ")})`,
       };
     }
 

@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import { RAW_TIMEFRAMES } from "../core/constants.js";
+import { LIVE_TIMEFRAMES } from "../core/constants.js";
 import type { EnsureResult, LiveSubState, LiveTimeframe } from "../live/registry.js";
 import type { Bus, LiveBarEvent, LiveFeedBus } from "../live/bus.js";
 import type { PositionBroadcast } from "../live/positions.js";
@@ -7,6 +7,22 @@ import { SERVER_VERSION } from "./server.js";
 
 // Consumers whose socket buffer exceeds this are dropped (stuck-bot guard).
 const MAX_BUFFERED_BYTES = 4_000_000;
+
+// Bounds one ensure_bars request's worth of NT8 history fetches.
+const MAX_ENSURE_RANGE_SECS = 45 * 86_400;
+
+/** EnsureCachedResult's counters without per-day classification internals. */
+export interface EnsureBarsSummary {
+  ok: boolean;
+  daysChecked: number;
+  windowsFetched: number;
+  windowsFailed: number;
+  bridgeDisconnected: boolean;
+  simFeedRejected: boolean;
+  errors: Array<{ window: string; message: string }>;
+  /** Catastrophic failure (unknown symbol, handler threw) — counters are zeros. */
+  error?: string;
+}
 
 export interface ConsumerHubBinding {
   ensure: (
@@ -21,6 +37,14 @@ export interface ConsumerHubBinding {
   ) => Promise<{ removedUpstream: boolean; pendingUpstreamRelease?: boolean }>;
   releaseAllForSource: (source: string) => Promise<void>;
   list: () => LiveSubState[];
+  /** Fill cache gaps for (fromUnix, toUnix] at a raw TF via the get_candles
+   *  fill path — a bot's self-serve warm-up. Read-path only. */
+  ensureBars: (
+    symbol: string,
+    timeframe: LiveTimeframe,
+    fromUnix: number,
+    toUnix: number,
+  ) => Promise<EnsureBarsSummary>;
 }
 
 interface ConsumerConn {
@@ -29,6 +53,8 @@ interface ConsumerConn {
   keys: Set<string>;
   // Opted into position broadcasts (position_event/position_sync/trade_closed).
   positions: boolean;
+  // One ensure_bars in flight per consumer; overlap is refused, not queued.
+  ensureInFlight: boolean;
 }
 
 /**
@@ -66,7 +92,13 @@ export class ConsumerHub {
 
   attach(ws: WebSocket): void {
     const id = `consumer:${this.nextId++}`;
-    const conn: ConsumerConn = { id, ws, keys: new Set(), positions: false };
+    const conn: ConsumerConn = {
+      id,
+      ws,
+      keys: new Set(),
+      positions: false,
+      ensureInFlight: false,
+    };
     this.consumers.set(id, conn);
 
     this.send(conn, {
@@ -200,6 +232,75 @@ export class ConsumerHub {
         this.send(conn, { type: "unsubscribed_positions", ok: true });
         return;
       }
+      case "ensure_bars": {
+        // Every outcome (validation included) answers as ensure_bars_result
+        // with reqId echoed, so a bot can await it.
+        const reqId = typeof msg.reqId === "string" ? msg.reqId : null;
+        const fail = (message: string): void =>
+          this.send(conn, {
+            type: "ensure_bars_result",
+            ...(reqId !== null ? { reqId } : {}),
+            ok: false,
+            error: message,
+          });
+        const { symbol, timeframe, fromUnix, toUnix } = msg;
+        if (typeof symbol !== "string" || symbol.length === 0) {
+          fail("ensure_bars: missing symbol");
+          return;
+        }
+        if (
+          typeof timeframe !== "string" ||
+          !LIVE_TIMEFRAMES.includes(timeframe as LiveTimeframe)
+        ) {
+          fail(`ensure_bars: timeframe must be one of ${LIVE_TIMEFRAMES.join(", ")}`);
+          return;
+        }
+        if (
+          typeof fromUnix !== "number" ||
+          typeof toUnix !== "number" ||
+          !Number.isInteger(fromUnix) ||
+          !Number.isInteger(toUnix) ||
+          fromUnix >= toUnix
+        ) {
+          fail("ensure_bars: fromUnix/toUnix must be integers with fromUnix < toUnix");
+          return;
+        }
+        if (toUnix - fromUnix > MAX_ENSURE_RANGE_SECS) {
+          fail(
+            `ensure_bars: range exceeds ${MAX_ENSURE_RANGE_SECS / 86_400} days — split the request`,
+          );
+          return;
+        }
+        if (!this.binding) {
+          fail("live feed runtime not started");
+          return;
+        }
+        if (conn.ensureInFlight) {
+          fail("ensure_bars already in flight for this consumer");
+          return;
+        }
+        conn.ensureInFlight = true;
+        try {
+          const summary = await this.binding.ensureBars(
+            symbol,
+            timeframe as LiveTimeframe,
+            fromUnix,
+            toUnix,
+          );
+          this.send(conn, {
+            type: "ensure_bars_result",
+            ...(reqId !== null ? { reqId } : {}),
+            symbol,
+            timeframe,
+            ...summary,
+          });
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
+        } finally {
+          conn.ensureInFlight = false;
+        }
+        return;
+      }
       case "subscribe":
       case "unsubscribe": {
         const symbol = msg.symbol;
@@ -210,11 +311,11 @@ export class ConsumerHub {
         }
         if (
           typeof timeframe !== "string" ||
-          !RAW_TIMEFRAMES.includes(timeframe as LiveTimeframe)
+          !LIVE_TIMEFRAMES.includes(timeframe as LiveTimeframe)
         ) {
           this.send(conn, {
             type: "error",
-            message: `${msg.type}: timeframe must be one of ${RAW_TIMEFRAMES.join(", ")}`,
+            message: `${msg.type}: timeframe must be one of ${LIVE_TIMEFRAMES.join(", ")}`,
           });
           return;
         }
