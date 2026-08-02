@@ -2,9 +2,15 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { WebSocket } from "ws";
 import { ConnectionManager } from "../connection.js";
 import { startServer, type BridgeServer } from "../server.js";
-import { consumerHub, type ConsumerHubBinding } from "../consumer.js";
-import { LiveFeedBus } from "../../live/bus.js";
+import {
+  consumerHub,
+  type ConsumerHubBinding,
+  type ExecutionBinding,
+  type PositionsBinding,
+} from "../consumer.js";
+import { Bus, LiveFeedBus } from "../../live/bus.js";
 import type { LiveSubState } from "../../live/registry.js";
+import type { PositionBroadcast } from "../../live/positions.js";
 
 const TOKEN = "test-token";
 
@@ -52,11 +58,48 @@ function stubBinding(over: Partial<ConsumerHubBinding> = {}): ConsumerHubBinding
   };
 }
 
-async function boot(binding?: ConsumerHubBinding | null) {
+function stubExecution(): ExecutionBinding {
+  return {
+    submit: vi.fn(async () => ({
+      ok: true as const,
+      clientOrderId: "cid-1",
+      contract: "MNQ 09-26",
+      orderId: "42",
+      state: "Submitted",
+      deduped: false,
+    })),
+    submitOco: vi.fn(async () => ({
+      ok: true as const,
+      ocoId: "base",
+      clientOrderId: "base",
+      contract: "MNQ 09-26",
+      stop: { clientOrderId: "base:S", orderId: "43", state: "Accepted" },
+      target: { clientOrderId: "base:T", orderId: "44", state: "Working" },
+      deduped: false,
+    })),
+    cancel: vi.fn(async () => ({
+      ok: true as const,
+      clientOrderId: "cid-1",
+      orderId: "42",
+      state: "CancelSubmitted",
+    })),
+    cancelAll: vi.fn(async () => ({ ok: true as const, contract: "MNQ 09-26" })),
+    flatten: vi.fn(async () => ({ ok: true as const, contract: "MNQ 09-26" })),
+    change: vi.fn(async () => ({
+      ok: true as const,
+      clientOrderId: "cid-1",
+      orderId: "42",
+      state: "ChangeSubmitted",
+    })),
+  };
+}
+
+async function boot(binding?: ConsumerHubBinding | null, execution?: ExecutionBinding | null) {
   const bus = new LiveFeedBus();
   if (binding !== null) {
     consumerHub.bind(binding ?? stubBinding(), bus);
   }
+  consumerHub.bindExecution(execution === undefined ? stubExecution() : execution);
   server = await startServer({
     port: 0,
     token: TOKEN,
@@ -344,6 +387,243 @@ describe("/feed channel", () => {
     const third = await client.next();
     expect(third.reqId).toBe("third");
     expect(third.ok).toBe(true);
+    client.ws.close();
+  });
+
+  function stubPositions(over: Partial<PositionsBinding> = {}): PositionsBinding {
+    return {
+      status: () => ({ desired: true, upstreamAcked: true, lastSyncAt: 1_785_100_500 }),
+      snapshot: () => [
+        {
+          name: "Sim101",
+          connection: "Sim",
+          connectionStatus: "Connected",
+          positions: [
+            {
+              instrument: "MNQ 09-26",
+              symbol: "MNQ",
+              marketPosition: "Long",
+              quantity: 1,
+              updatedAt: 1_785_100_400,
+            },
+          ],
+          orders: [
+            {
+              orderId: "9",
+              name: "zd6bc68a-sxxxxx-1:S",
+              instrument: "MNQ 09-26",
+              symbol: "MNQ",
+              action: "Sell",
+              orderType: "StopMarket",
+              state: "Working",
+              quantity: 1,
+              filled: 0,
+              updatedAt: 1_785_100_400,
+            },
+          ],
+        },
+        { name: "Sim102", connection: "Sim", connectionStatus: "Connected", positions: [], orders: [] },
+      ],
+      pull: vi.fn(async () => ({ ok: true })),
+      ...over,
+    };
+  }
+
+  it("sync_positions without a bound feed is a typed failure", async () => {
+    const { port } = await boot();
+    consumerHub.bindPositions(new Bus<PositionBroadcast>(), null);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(JSON.stringify({ type: "sync_positions", reqId: "r-0" }));
+    const reply = await client.next();
+    expect(reply.type).toBe("sync_positions_result");
+    expect(reply.reqId).toBe("r-0");
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/not bound/);
+    client.ws.close();
+  });
+
+  it("sync_positions serves the snapshot with trust context and an account filter", async () => {
+    const positions = stubPositions();
+    const { port } = await boot();
+    consumerHub.bindPositions(new Bus<PositionBroadcast>(), positions);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({ type: "sync_positions", reqId: "r-1", account: "Sim101" }),
+    );
+    const reply = await client.next();
+    expect(reply.type).toBe("sync_positions_result");
+    expect(reply.reqId).toBe("r-1");
+    expect(reply.ok).toBe(true);
+    expect(reply.feedDesired).toBe(true);
+    expect(reply.feedUpstreamAcked).toBe(true);
+    expect(reply.lastSyncAtUnix).toBe(1_785_100_500);
+    expect(reply.pulled).toBe(false); // cached serve — no fresh flag given
+    const accounts = reply.accounts as Array<Record<string, unknown>>;
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0].name).toBe("Sim101");
+    expect((accounts[0].positions as unknown[]).length).toBe(1);
+    expect((accounts[0].orders as unknown[]).length).toBe(1);
+    expect(positions.pull).not.toHaveBeenCalled();
+    client.ws.close();
+  });
+
+  it("sync_positions fresh pulls NT8 first and reports a pull failure without hiding the mirror", async () => {
+    const positions = stubPositions({
+      pull: vi.fn(async () => ({ ok: false, error: "NinjaTrader bridge not connected" })),
+    });
+    const { port } = await boot();
+    consumerHub.bindPositions(new Bus<PositionBroadcast>(), positions);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(JSON.stringify({ type: "sync_positions", reqId: "r-2", fresh: true }));
+    const reply = await client.next();
+    expect(reply.ok).toBe(true);
+    expect(reply.pulled).toBe(false);
+    expect(reply.pullError).toMatch(/bridge not connected/);
+    expect((reply.accounts as unknown[]).length).toBe(2); // no filter → both accounts
+    expect(positions.pull).toHaveBeenCalledTimes(1);
+    client.ws.close();
+  });
+
+  it("a second sync_positions while a fresh pull is in flight is refused", async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const positions = stubPositions({
+      pull: vi.fn(async () => {
+        await gate;
+        return { ok: true };
+      }),
+    });
+    const { port } = await boot();
+    consumerHub.bindPositions(new Bus<PositionBroadcast>(), positions);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(JSON.stringify({ type: "sync_positions", reqId: "s-1", fresh: true }));
+    client.ws.send(JSON.stringify({ type: "sync_positions", reqId: "s-2" }));
+    const busy = await client.next();
+    expect(busy.reqId).toBe("s-2");
+    expect(busy.ok).toBe(false);
+    expect(busy.error).toMatch(/in flight/);
+    release!();
+    const done = await client.next();
+    expect(done.reqId).toBe("s-1");
+    expect(done.ok).toBe(true);
+    expect(done.pulled).toBe(true);
+    client.ws.close();
+  });
+
+  it("place_order delegates with a server-derived feed source and echoes the result", async () => {
+    const execution = stubExecution();
+    const { port } = await boot(undefined, execution);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({
+        type: "place_order",
+        reqId: "ord-1",
+        account: "Sim101",
+        symbol: "MNQ",
+        action: "Buy",
+        orderType: "Market",
+        quantity: 1,
+        tif: "Day",
+        clientOrderId: "zd-1E",
+        reason: "zone_dip entry",
+      }),
+    );
+    const reply = await client.next();
+    expect(reply.type).toBe("place_order_result");
+    expect(reply.reqId).toBe("ord-1");
+    expect(reply.ok).toBe(true);
+    expect(reply.state).toBe("Submitted");
+    expect(execution.submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        account: "Sim101",
+        symbol: "MNQ",
+        action: "Buy",
+        quantity: 1,
+        clientOrderId: "zd-1E",
+        reason: "zone_dip entry",
+        source: expect.stringMatching(/^feed:consumer:\d+$/),
+      }),
+    );
+    client.ws.close();
+  });
+
+  it("place_order with a bad enum fails typed without touching the gateway", async () => {
+    const execution = stubExecution();
+    const { port } = await boot(undefined, execution);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({
+        type: "place_order",
+        reqId: "bad",
+        account: "Sim101",
+        symbol: "MNQ",
+        action: "YOLO",
+        orderType: "Market",
+        quantity: 1,
+        tif: "Day",
+      }),
+    );
+    const reply = await client.next();
+    expect(reply.type).toBe("place_order_result");
+    expect(reply.ok).toBe(false);
+    expect(reply.certainlyNotSubmitted).toBe(true);
+    expect(execution.submit).not.toHaveBeenCalled();
+    client.ws.close();
+  });
+
+  it("place_oco and flatten delegate and answer with their result types", async () => {
+    const execution = stubExecution();
+    const { port } = await boot(undefined, execution);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({
+        type: "place_oco",
+        reqId: "oco-1",
+        account: "Sim101",
+        symbol: "MNQ",
+        action: "Sell",
+        quantity: 1,
+        stopPrice: 100,
+        limitPrice: 200,
+        tif: "Gtc",
+        clientOrderId: "zd-1",
+      }),
+    );
+    const oco = await client.next();
+    expect(oco.type).toBe("place_oco_result");
+    expect((oco.stop as { clientOrderId: string }).clientOrderId).toBe("base:S");
+
+    client.ws.send(
+      JSON.stringify({ type: "flatten", reqId: "f1", account: "Sim101", symbol: "MNQ" }),
+    );
+    const flat = await client.next();
+    expect(flat.type).toBe("flatten_result");
+    expect(flat.ok).toBe(true);
+    expect(execution.flatten).toHaveBeenCalledWith(
+      expect.objectContaining({ account: "Sim101", symbol: "MNQ" }),
+    );
+    client.ws.close();
+  });
+
+  it("write ops without a wired gateway fail closed", async () => {
+    const { port } = await boot(undefined, null);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(
+      JSON.stringify({ type: "flatten", reqId: "f2", account: "Sim101", symbol: "MNQ" }),
+    );
+    const reply = await client.next();
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/not wired/);
     client.ws.close();
   });
 

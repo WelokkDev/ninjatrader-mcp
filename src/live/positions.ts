@@ -146,6 +146,15 @@ export interface PositionFeedDeps {
   onBroadcast?: (b: PositionBroadcast) => void;
 }
 
+/** One account's live working state, JSON-shaped for /feed consumers. */
+export interface AccountSnapshotView {
+  name: string;
+  connection: string | null;
+  connectionStatus: string | null;
+  positions: TrackedPosition[];
+  orders: TrackedOrder[];
+}
+
 export interface PositionFeedStatus {
   desired: boolean;
   upstreamAcked: boolean;
@@ -741,6 +750,19 @@ export class PositionFeed {
 
   accountsView(): AccountState[] {
     return [...this.accounts.values()];
+  }
+
+  /** Plain-array view for the consumer channel (AccountState's Maps stay
+   *  private). Orders are re-filtered defensively — a terminal state must
+   *  never leak to a reconciling consumer as "working". */
+  snapshotView(): AccountSnapshotView[] {
+    return [...this.accounts.values()].map((a) => ({
+      name: a.name,
+      connection: a.connection,
+      connectionStatus: a.connectionStatus,
+      positions: [...a.positions.values()],
+      orders: [...a.orders.values()].filter((o) => !TERMINAL_ORDER_STATES.has(o.state)),
+    }));
   }
 
   openTrades(): LiveTradeState[] {

@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Lab } from "./lab/lab.js";
 import { startBridge, stopBridge } from "./bridge/index.js";
+import { consumerHub } from "./bridge/consumer.js";
+import { getExecutionService } from "./execution/service.js";
 import {
   registerCandlesResponseHandler,
   registerLiveIngestHandler,
@@ -142,6 +144,8 @@ export function registerExperimentTools(server: McpServer, lab: Lab): void {
 /** NT8 bridge + live/candles ingest + calendar sync. Run exactly one process. */
 export async function startRuntime(): Promise<void> {
   await startBridge();
+  // server.ts is the seam: bridge/ stays import-free of execution/.
+  consumerHub.bindExecution(getExecutionService());
   // Ingest must register before the live runtime: bar_close persists to the
   // cache before the feed bus publishes (read-your-writes for /feed).
   registerLiveIngestHandler();

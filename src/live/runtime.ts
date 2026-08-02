@@ -328,9 +328,13 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
     },
     runtime.bus,
   );
-  consumerHub.bindPositions(runtime.positionBus, () => {
-    const s = runtime!.positions.status();
-    return { desired: s.desired, upstreamAcked: s.upstreamAcked };
+  consumerHub.bindPositions(runtime.positionBus, {
+    status: () => {
+      const s = runtime!.positions.status();
+      return { desired: s.desired, upstreamAcked: s.upstreamAcked, lastSyncAt: s.lastSyncAt };
+    },
+    snapshot: () => runtime!.positions.snapshotView(),
+    pull: () => runtime!.positions.pull(),
   });
   return runtime;
 }
