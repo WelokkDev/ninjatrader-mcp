@@ -183,6 +183,9 @@ export function initializeSchema(db: Database.Database): void {
 
   // Idempotent forward migrations: CREATE TABLE IF NOT EXISTS won't add columns
   // to a pre-existing table. ALTER ... ADD COLUMN is non-destructive.
+  // Provenance of a cached bar: NULL means NT8 (predates this column), else
+  // an external importer (e.g. 'databento') — see isImportedSource.
+  ensureColumn(db, "candles", "source", "TEXT");
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");

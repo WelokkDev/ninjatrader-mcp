@@ -249,6 +249,51 @@ timeframes — no NT8 required. It runs `build/scripts/seed.js` directly, so
 **build first**. It's ES/NQ 15m only: useful to prove the cache works, not a
 substitute for real history.
 
+### Importing vendor history (Databento)
+
+NT8 only retains about a year of tick data, and second-based bars are built from
+it — so a deeper `1s`/`5s` history has to come from outside. `npm run
+import-databento` loads a Databento DBN batch file into the cache:
+
+```
+npm run import-databento -- --file path/to/x.ohlcv-1s.dbn.zst --symbol MNQ --dry-run
+npm run import-databento -- --file path/to/x.ohlcv-1s.dbn.zst --symbol MNQ
+```
+
+Request the batch with `schema=ohlcv-1s` and a parent symbol (`MNQ.FUT`); the
+importer keeps outright contracts only and picks a **volume-ranked front month
+per session-day, without back-adjusting**. Start with `--dry-run` — it prints
+the resolved session-days and the roll schedule without writing.
+
+Two things it handles that a hand-rolled CSV load will get wrong:
+
+- **Databento stamps an OHLCV bar at the interval START; this cache is
+  close-stamped.** The importer adds one period. Get this wrong and every bar
+  lands one period early — nothing errors, and backtests read the future.
+- Rows are written with `source='databento'`, which `classifySessionDay` treats
+  as immutable. Without it, a day whose geometry doesn't satisfy the validator
+  classifies `partial`, and `ensure_bars` refetches it from NT8 — replacing one
+  vendor's bars with another's inside a single series.
+
+Then cross-check the result against a coarser timeframe NT8 fetched
+independently:
+
+```
+npm run verify-import -- --symbol MNQ --fine 1s --coarse 5m
+npm run verify-import -- --symbol MNQ --fine 1s --coarse 5m --shift -1
+```
+
+The second run is the point: the chosen convention has to *beat* its neighbours,
+not merely look plausible on its own. Expect near-total OHLC agreement, minus
+the days where NT8 rolled contracts on a different date than the importer did.
+
+Needs a one-time `python -m venv .venv-tools && .venv-tools/Scripts/pip install
+databento`. Deliberately its own venv, not `src/private/py/.venv` — public
+commands must not depend on the private module.
+
+The MCP server can stay running: the import commits per batch with a busy
+timeout, so live ingest interleaves rather than stalling.
+
 ## 7. Smoke test — draw on a chart
 
 With `McpBridgeRenderer` attached to a chart, call `draw`:

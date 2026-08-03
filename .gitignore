@@ -35,6 +35,9 @@ audit-report.html
 __pycache__/
 *.pyc
 
+# Public-tooling Python venv — not src/private/py/.venv (public code can't depend on private).
+.venv-tools/
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 

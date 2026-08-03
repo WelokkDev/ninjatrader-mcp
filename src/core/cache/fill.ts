@@ -13,7 +13,7 @@ import { getInstrumentConfig } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
 import { recomputeDerivedForSessionDay } from "./derived.js";
-import { isSimulatedFeed } from "../../bridge/data-source.js";
+import { isImportedSource, isSimulatedFeed } from "../../bridge/data-source.js";
 
 // Classification of a single session-day's cache state at a given raw TF.
 //   complete    — bars match expected geometry, nothing to do
@@ -33,6 +33,31 @@ export interface DayClassification {
   class: SessionDayClass;
 }
 
+/**
+ * The `source` of a closed session-day's rows, or null if empty.
+ *
+ * One row is enough: a session-day has exactly one writer (fill path or
+ * importer, never both), so provenance can't be mixed within it. Indexed seek
+ * via the (symbol, timeframe, timestamp) primary key, not a scan.
+ */
+function sessionDaySource(
+  db: Database,
+  symbol: string,
+  day: SessionDay,
+  timeframe: Timeframe,
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT source FROM candles
+        WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?
+        ORDER BY timestamp LIMIT 1`,
+    )
+    .get(symbol, timeframe, day.startUnix, day.endUnix) as
+    | { source: string | null }
+    | undefined;
+  return row?.source ?? null;
+}
+
 export function classifySessionDay(
   db: Database,
   symbol: string,
@@ -40,6 +65,15 @@ export function classifySessionDay(
   rawTimeframe: Timeframe,
   nowUnix: number,
 ): SessionDayClass {
+  // Imported days are immutable (see isImportedSource) — report complete
+  // before validation runs, so nothing refetches and overwrites them.
+  // In-progress days fall through: the live stream owns "today", not an import.
+  if (
+    day.endUnix <= nowUnix &&
+    isImportedSource(sessionDaySource(db, symbol, day, rawTimeframe))
+  ) {
+    return "complete";
+  }
   const r = validateSessionDay(db, symbol, day, rawTimeframe, nowUnix);
   if (r.status === "skipped") return "in_progress";
   if (r.status === "ok") return "complete";

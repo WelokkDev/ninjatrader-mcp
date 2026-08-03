@@ -19,3 +19,17 @@ export const SIMULATED_DATA_FEED = "Simulated Data Feed";
 export function isSimulatedFeed(dataSource: string | null | undefined): boolean {
   return (dataSource ?? "").trim().toLowerCase() === SIMULATED_DATA_FEED.toLowerCase();
 }
+
+/** `candles.source` for NT8-fetched bars. NULL means the same (predates the column). */
+export const NATIVE_CANDLE_SOURCE = "nt8";
+
+/**
+ * True when a row's `source` marks it as externally imported (e.g. a
+ * Databento batch) rather than an NT8 fetch. Imported bars are immutable to
+ * the fill path — without this check, a day that fails validation gets
+ * refetched from NT8 and overwritten, mixing provenance within one series.
+ */
+export function isImportedSource(source: string | null | undefined): boolean {
+  const s = (source ?? "").trim().toLowerCase();
+  return s !== "" && s !== NATIVE_CANDLE_SOURCE;
+}

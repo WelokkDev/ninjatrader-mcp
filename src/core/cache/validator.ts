@@ -35,13 +35,20 @@ function isDaily(tf: Timeframe): tf is "1d" {
 // NT8 emits a bar only for buckets with >=1 tick, so sub-minute days
 // legitimately miss stamps — coarser TFs don't and have no entry here.
 //
-// Sub-15s values are unmeasured estimates; 15s is measured at 97% of its
-// ceiling (`npm run audit-bars`, 2026-08-03) — retune all three once real
-// 1s/5s days are cached.
+// 1s is MEASURED over 260 imported MNQ session-days (Aug 2025 - Aug 2026):
+//
+//                     p50     p90     p99     max
+//   missingFraction  0.140   0.272   0.435   0.491
+//   maxGapSeconds       13      24      38      40
+//
+// Prior guesses (0.8 / 900) left the gap ceiling 22x the observed max. Values
+// below have headroom above these maxima — thinner instruments than MNQ will
+// be sparser. 5s/15s remain estimates (15s measured at 97% of its ceiling,
+// `npm run audit-bars`, 2026-08-03).
 export const SPARSE_TOLERANCE: Partial<
   Record<Timeframe, { maxMissingFraction: number; maxGapSeconds: number }>
 > = {
-  "1s": { maxMissingFraction: 0.8, maxGapSeconds: 900 },
+  "1s": { maxMissingFraction: 0.6, maxGapSeconds: 180 },
   "5s": { maxMissingFraction: 0.35, maxGapSeconds: 600 },
   "15s": { maxMissingFraction: 0.02, maxGapSeconds: 120 },
 };

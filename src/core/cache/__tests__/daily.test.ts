@@ -55,7 +55,7 @@ describe("1d cache geometry", () => {
   it("validates a day holding its single close-stamped bar", () => {
     const db = memDb();
     db.prepare(
-      `INSERT INTO candles VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`,
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume) VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`,
     ).run(D1.endUnix);
     expect(validateSessionDay(db, "NQ", D1, "1d", NOW).status).toBe("ok");
     expect(classifySessionDay(db, "NQ", D1, "1d", NOW)).toBe("complete");
@@ -66,7 +66,7 @@ describe("1d cache geometry", () => {
     expect(classifySessionDay(db, "NQ", D1, "1d", NOW)).toBe("empty");
 
     // Mid-session stamp — the shape a non-normalized ingest would leave.
-    db.prepare(`INSERT INTO candles VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`).run(
+    db.prepare(`INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume) VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`).run(
       D1.startUnix + 3600,
     );
     const r = validateSessionDay(db, "NQ", D1, "1d", NOW);
@@ -284,7 +284,7 @@ describe("ingestCandles at 1d", () => {
     const db = memDb();
     const errs = vi.spyOn(console, "error").mockImplementation(() => {});
     // A stale off-grid daily row from an earlier geometry.
-    db.prepare(`INSERT INTO candles VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`).run(
+    db.prepare(`INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume) VALUES ('NQ','1d',?,1,2,0.5,1.5,10)`).run(
       D1.startUnix + 7200,
     );
     ingestCandles("NQ", "1d", [bar(D1.endUnix)], db, { mode: "day-refill", nowUnix: NOW });

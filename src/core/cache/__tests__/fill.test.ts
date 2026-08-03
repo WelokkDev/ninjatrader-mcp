@@ -243,6 +243,55 @@ describe("sparse 15s days through classify and early-close observation", () => {
     expect(classifySessionDay(gapped, "NQ", DAYS[0], "15s", NOW)).toBe("partial");
   });
 
+  it("never reclassifies an imported day, however broken its geometry", () => {
+    // A 3-minute hole — would classify "partial" and trigger a refetch.
+    const all = expectedCloseStamps(DAYS[0], "15s");
+    const hole = all.slice(2000, 2012);
+
+    for (const [source, expected] of [
+      ["databento", "complete"],
+      ["nt8", "partial"],
+      [null, "partial"], // predates the column
+    ] as const) {
+      const db = new Database(":memory:");
+      initializeSchema(db);
+      seed15s(db, DAYS[0], hole);
+      db.prepare(`UPDATE candles SET source = ? WHERE symbol = 'NQ'`).run(source);
+      expect(classifySessionDay(db, "NQ", DAYS[0], "15s", NOW), `source=${source}`).toBe(expected);
+    }
+  });
+
+  it("plans no fetch window over an imported day, so nothing overwrites it", async () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    seed15s(db, DAYS[0], expectedCloseStamps(DAYS[0], "15s").slice(2000, 2012));
+    db.prepare(`UPDATE candles SET source = 'databento' WHERE symbol = 'NQ'`).run();
+
+    const request = vi.fn();
+    const result = await ensureCached(
+      db,
+      "NQ",
+      DAYS[0].startUnix,
+      DAYS[0].endUnix,
+      "15s",
+      CME_US_INDEX_FUTURES_ETH,
+      { isConnected: () => true, request },
+      NOW,
+    );
+    expect(request).not.toHaveBeenCalled();
+    expect(result.classifications.map((c) => c.class)).toEqual(["complete"]);
+  });
+
+  it("still treats an in-progress day as in_progress even if rows are imported", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    seed15s(db, DAYS[0], []);
+    db.prepare(`UPDATE candles SET source = 'databento' WHERE symbol = 'NQ'`).run();
+    // now < endUnix: the live stream owns today, so the guard must not fire.
+    const during = DAYS[0].endUnix - 3600;
+    expect(classifySessionDay(db, "NQ", DAYS[0], "15s", during)).toBe("in_progress");
+  });
+
   it("records an observed early close over a sparse 15s prefix", () => {
     const db = new Database(":memory:");
     initializeSchema(db);
