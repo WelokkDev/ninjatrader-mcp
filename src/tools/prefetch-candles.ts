@@ -2,7 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
-import { SUPPORTED_SYMBOLS } from "../core/constants.js";
+import { RAW_TIMEFRAMES, SUPPORTED_SYMBOLS } from "../core/constants.js";
+import type { RawTimeframe } from "../core/types.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   SessionClosedError,
@@ -21,7 +22,7 @@ import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 export interface PrefetchStartArgs {
   symbol: string;
-  timeframe: "15s" | "5m" | "15m" | "1d";
+  timeframe: RawTimeframe;
   start: string;
   end: string;
 }
@@ -101,9 +102,9 @@ export function registerPrefetchTools(server: McpServer): void {
         .string()
         .describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
-        .enum(["15s", "5m", "15m", "1d"])
+        .enum(RAW_TIMEFRAMES as unknown as [RawTimeframe, ...RawTimeframe[]])
         .describe(
-          "RAW timeframe to ingest. '15m' also rebuilds the derived 30m/1h/2h/4h aggregates; '5m', '15s' and '1d' are their own parallel streams. 15s is tick-derived and dense (5,520 bars/day) — expect slower per-day fetches; this background job is the right transport for it. '1d' is one bar per session-day and is fetched in batches of 120 days per request, so even multi-year daily history is a handful of round-trips.",
+          "RAW timeframe to ingest. '15m' also rebuilds the derived 30m/1h/2h/4h aggregates; '1s', '5s', '15s', '5m' and '1d' are their own parallel streams. The sub-minute TFs are tick-derived and dense (~5,520 bars/day at 15s, ~16,560 at 5s, up to ~82,800 at 1s) — expect slow per-day fetches and large cache growth; this background job is the only sane transport for them, and second-granularity history is SHALLOW provider-side, so old ranges may simply return nothing. '1d' is one bar per session-day and is fetched in batches of 120 days per request, so even multi-year daily history is a handful of round-trips.",
         ),
       start: z
         .string()

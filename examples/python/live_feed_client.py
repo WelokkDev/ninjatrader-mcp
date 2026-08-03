@@ -52,7 +52,9 @@ def load_token() -> str:
 
 def parse_streams(argv: list[str]) -> list[tuple[str, str]]:
     if len(argv) < 2 or len(argv) % 2 != 1:
-        raise SystemExit(f"usage: {argv[0]} SYMBOL TF [SYMBOL TF ...]   (TF: 15s|5m|15m)")
+        raise SystemExit(
+            f"usage: {argv[0]} SYMBOL TF [SYMBOL TF ...]   (TF: 1s|5s|15s|5m|15m)"
+        )
     pairs = list(zip(argv[1::2], argv[2::2]))
     return [(sym.upper(), tf) for sym, tf in pairs]
 

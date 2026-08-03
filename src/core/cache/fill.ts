@@ -1,5 +1,6 @@
 import type { Database } from "better-sqlite3";
 import type { Timeframe } from "../types.js";
+import { isSubMinuteTimeframe } from "../constants.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDaysOverlapping } from "../sessions/session-day.js";
 import {
@@ -108,6 +109,15 @@ export function planFetchWindows(
 // Even a fetch that outlives this timeout is not wasted — the late
 // candles_response is ingested by the global handler in bridge/ingest.ts.
 export const CANDLE_FETCH_TIMEOUT_MS = 30_000;
+
+// Sub-minute TFs need far longer — up to ~82,800 buckets/day at 1s to load
+// and serialize; a spurious timeout here strands the day "cold" forever.
+export const DENSE_TF_FETCH_TIMEOUT_MS = 180_000;
+
+/** Per-TF request timeout for one fetch window. */
+export function candleFetchTimeoutMs(tf: Timeframe): number {
+  return isSubMinuteTimeframe(tf) ? DENSE_TF_FETCH_TIMEOUT_MS : CANDLE_FETCH_TIMEOUT_MS;
+}
 
 /** Append the candle-specific "downloading history" hint to a timed-out message.
  *  Lives here, not in the bridge core, so an order submit is never told NT8 is
@@ -234,7 +244,7 @@ export async function ensureCached(
           to: window.endUnix,
           tradingHoursTemplate: template.name,
         },
-        CANDLE_FETCH_TIMEOUT_MS,
+        candleFetchTimeoutMs(rawTimeframe),
       );
       // Sim feed → ingest already rejected the bars, so the day didn't fill.
       // Flag it and skip, counting the window neither fetched nor failed.

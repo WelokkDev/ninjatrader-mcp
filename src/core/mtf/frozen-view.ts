@@ -7,6 +7,8 @@ import { makeSessionDayResolver } from "../sessions/session-day.js";
 // RAW stream fetched from NT8 (one bar per session-day), never bucketed from
 // intraday bars (mirrors core/aggregator.ts, which likewise refuses "1d").
 export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
+  "1s": 1,
+  "5s": 5,
   "15s": 15,
   "5m": 5 * 60,
   "15m": 15 * 60,

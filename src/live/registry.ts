@@ -6,7 +6,9 @@ import type {
   SubscribeAckMessage,
 } from "../bridge/protocol.js";
 
-export type LiveTimeframe = "15s" | "5m" | "15m";
+// Re-exported from core/types.ts — this file is the live path's import site.
+import type { LiveTimeframe } from "../core/types.js";
+export type { LiveTimeframe };
 
 /** Persisted operator source; "consumer:<n>" sources die with their socket. */
 export const MCP_SOURCE = "mcp";

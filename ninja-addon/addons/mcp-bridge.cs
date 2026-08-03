@@ -81,14 +81,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public  static event Action<DrawCommand>      DrawReceived;
 		public  static event Action<ClearZonesCommand> ClearZonesReceived;
 
-		private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
+		// MaxJsonLength defaults to 2 MB and throws past it; a dense 1s session-day
+		// (up to ~8 MB) blows through that. Raised well clear of the 100 MB ws cap.
+		private static readonly JavaScriptSerializer Json =
+			new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
 
 		// Raw timeframes this bridge will serve via request_candles. Keep in
 		// sync with RAW_TIMEFRAMES in the server's src/core/constants.ts.
 		// "1d" is historical-fetch only — subscribe_bars rejects it (see
 		// HandleSubscribeBars); the server's LIVE_TIMEFRAMES matches.
 		private static readonly HashSet<string> ALLOWED_RAW_TIMEFRAMES =
-			new HashSet<string>(StringComparer.Ordinal) { "15s", "5m", "15m", "1d" };
+			new HashSet<string>(StringComparer.Ordinal) { "1s", "5s", "15s", "5m", "15m", "1d" };
 
 		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
 			new Dictionary<string, string>(StringComparer.Ordinal)
@@ -115,12 +118,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private const int LiveSeedBarsBack      = 30;   // enough to establish the index baseline
 		private const int LiveSendQueueCapacity = 2048; // beyond this, bars drop (TS-side heal recovers)
 		private const int BackfillThresholdBars = 2;    // older than 2 bar-widths at emit => backfill:true
+		// ...but never tighter than this — at 1s the bar-width window alone is 2
+		// SECONDS, which would mistag live bars backfill:true on ordinary emit
+		// latency and silently stall consumers that skip stale closes.
+		private const int BackfillThresholdMinSeconds = 30;
 
 		private class LiveSub
 		{
 			public string      Key;        // symbol + "|" + timeframe
 			public string      Symbol;     // roster symbol, e.g. "MNQ"
-			public string      Timeframe;  // "15s" | "5m" | "15m"
+			public string      Timeframe;  // "1s" | "5s" | "15s" | "5m" | "15m"
 			public string      TradingHoursTemplate; // internal key, for reconnect re-resolution
 			public int         TfSeconds;
 			public Instrument  Instrument;
@@ -1830,7 +1837,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 								} },
 						};
 						// Tag stale catch-up bars so act-on-close consumers skip them.
-						if (nowUnix - ts > (long) BackfillThresholdBars * sub.TfSeconds)
+						var staleAfter = Math.Max(
+							(long) BackfillThresholdBars * sub.TfSeconds,
+							(long) BackfillThresholdMinSeconds);
+						if (nowUnix - ts > staleAfter)
 							msg["backfill"] = true;
 						payloads.Add(Json.Serialize(msg));
 					}

@@ -1,7 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "mcp__ninjatrader__draw_zone",
       "mcp__ninjatrader__clear_zones",
       "mcp__ninjatrader__get_candles",
       "mcp__ninjatrader__scan_zones",
@@ -16,7 +15,8 @@
       "mcp__ninjatrader__list_trades",
       "mcp__ninjatrader__list_decisions",
       "mcp__ninjatrader__draw",
-      "mcp__ninjatrader__prefetch_status"
+      "mcp__ninjatrader__prefetch_status",
+      "mcp__ninjatrader__live_feed_status"
     ]
   },
   "enableAllProjectMcpServers": true,

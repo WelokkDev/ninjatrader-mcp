@@ -4,7 +4,12 @@ import { mkdtempSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { initializeSchema } from "../../db/schema.js";
-import { LiveBarRecorder, missingStampsBetween } from "../recorder.js";
+import {
+  LiveBarRecorder,
+  longestMissingRunSecs,
+  missingStampsBetween,
+} from "../recorder.js";
+import { GAP_MIN_SPAN_SECS } from "../heal.js";
 import type { BarCloseMessage } from "../../bridge/protocol.js";
 
 const unix = (y: number, mo1: number, d: number, h: number): number =>
@@ -146,6 +151,72 @@ describe("gap detection (session-aware)", () => {
     rec.record(bar({ ts: t5(9), symbol: "ZZZ" }));
     expect(rec.recent({ symbol: "ZZZ", limit: 10 })).toHaveLength(2);
     expect(gaps).toHaveLength(0);
+  });
+});
+
+describe("longestMissingRunSecs", () => {
+  it("measures a contiguous run, not the first-to-last extent", () => {
+    // Two 3s clusters 176,400s apart (the weekend break): the extent is the
+    // whole weekend, the longest actual run is 3 seconds.
+    const missing = [100, 101, 102, 176_500, 176_501, 176_502];
+    expect(missing[missing.length - 1] - missing[0] + 1).toBe(176_403); // old measure
+    expect(longestMissingRunSecs(missing, 1)).toBe(3);
+  });
+
+  it("is period-aware and degenerate-safe", () => {
+    expect(longestMissingRunSecs([300, 600, 900], 300)).toBe(900);
+    expect(longestMissingRunSecs([300, 1200], 300)).toBe(300);
+    expect(longestMissingRunSecs([], 1)).toBe(0);
+    expect(longestMissingRunSecs([100], 0)).toBe(0); // unknown TF → no period
+  });
+});
+
+describe("sparse-TF heal floor (GAP_MIN_SPAN_SECS)", () => {
+  it("does NOT heal a few tickless 1s buckets either side of the weekend break", () => {
+    const gaps: Array<{ fromTs: number; toTs: number }> = [];
+    const rec = makeRecorder({ onGap: (g) => gaps.push(g) });
+    // Last 1s bar of Friday arrives 3s before the close, first of Monday 3s
+    // after the reopen — 5 genuinely absent seconds, split by a ~49h break.
+    rec.record(bar({ ts: DAY_END - 3, timeframe: "1s" }));
+    rec.record(bar({ ts: SUNDAY_OPEN + 3, timeframe: "1s" }));
+
+    // The gap is still SEEN (diagnostics stay honest)...
+    expect(rec.status()[0].gapCount).toBe(1);
+    // ...but no heal is requested: the longest real run is 3s, far under 180s.
+    expect(gaps).toHaveLength(0);
+    expect(GAP_MIN_SPAN_SECS["1s"]).toBe(180);
+  });
+
+  it("still heals a genuine contiguous 1s outage at or above the floor", () => {
+    const gaps: Array<{ fromTs: number; toTs: number }> = [];
+    const rec = makeRecorder({ onGap: (g) => gaps.push(g) });
+    const t = DAY_START + 3_600;
+    rec.record(bar({ ts: t, timeframe: "1s" }));
+    rec.record(bar({ ts: t + 201, timeframe: "1s" })); // 200s contiguous hole
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].fromTs).toBe(t + 1);
+    expect(gaps[0].toTs).toBe(t + 200);
+  });
+
+  it("suppresses a sub-floor mid-session 1s lull but still counts it", () => {
+    const gaps: unknown[] = [];
+    const rec = makeRecorder({ onGap: (g) => gaps.push(g) });
+    const t = DAY_START + 3_600;
+    rec.record(bar({ ts: t, timeframe: "1s" }));
+    rec.record(bar({ ts: t + 60, timeframe: "1s" })); // 59s hole, under 180s
+    expect(gaps).toHaveLength(0);
+    expect(rec.status()[0].gapCount).toBe(1);
+    expect(rec.status()[0].lastGapAt).not.toBeNull();
+  });
+
+  it("leaves floor-0 timeframes (5m) healing on any missing stamp", () => {
+    const gaps: Array<{ fromTs: number; toTs: number }> = [];
+    const rec = makeRecorder({ onGap: (g) => gaps.push(g) });
+    expect(GAP_MIN_SPAN_SECS["5m"]).toBe(0);
+    rec.record(bar({ ts: t5(1) }));
+    rec.record(bar({ ts: t5(3) })); // one missing 5m stamp
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].fromTs).toBe(t5(2));
   });
 });
 

@@ -3,19 +3,41 @@ import type { DetectedGap } from "./recorder.js";
 import type { LiveTimeframe } from "./registry.js";
 
 /**
- * Max heal reach per raw TF. Seconds history is shallow provider-side, so
- * 15s stays tight; older gaps belong to get_candles' day-level backfill.
+ * Max heal reach per raw TF — shallower for finer TFs since seconds history
+ * is shallow provider-side (1s tightest: a 6h reach would mean a ~20k-bar
+ * refetch on one gap). Older gaps belong to get_candles' day-level backfill.
  */
 export const HEAL_MAX_WINDOW_SECS: Record<LiveTimeframe, number> = {
+  "1s": 30 * 60,
+  "5s": 2 * 3600,
   "15s": 6 * 3600,
   "5m": 3 * 86400,
   "15m": 3 * 86400,
 };
 
 export const TF_SECS: Record<LiveTimeframe, number> = {
+  "1s": 1,
+  "5s": 5,
   "15s": 15,
   "5m": 300,
   "15m": 900,
+};
+
+/**
+ * Minimum LONGEST CONTIGUOUS RUN of missing buckets (seconds) before a gap
+ * triggers a heal (see longestMissingRunSecs). 0 = always heal.
+ *
+ * Deliberately BELOW the validator's own "still ok" ceilings
+ * (SPARSE_TOLERANCE.maxGapSeconds) — healing a lull costs one request,
+ * missing an outage costs silent data loss. Sub-15s values are unverified
+ * estimates; retune via `npm run audit-bars` once real data is cached.
+ */
+export const GAP_MIN_SPAN_SECS: Record<LiveTimeframe, number> = {
+  "1s": 180,
+  "5s": 120,
+  "15s": 0,
+  "5m": 0,
+  "15m": 0,
 };
 
 const HEAL_REQUEST_TIMEOUT_MS = 30_000;

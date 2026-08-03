@@ -17,7 +17,19 @@ export interface Candle {
   partial?: boolean;
 }
 
-export type Timeframe = "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
+export type Timeframe =
+  | "1s" | "5s" | "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
+
+// Persisted straight from NT8, not bucketed from another TF.
+export type RawTimeframe = "1s" | "5s" | "15s" | "5m" | "15m" | "1d";
+
+// "1d" excluded — no such thing as a "live" daily bar.
+export type LiveTimeframe = Exclude<RawTimeframe, "1d">;
+
+export type SubMinuteTimeframe = Extract<LiveTimeframe, "1s" | "5s" | "15s">;
+
+// Everything bucketed from 15m by the aggregation chain.
+export type DerivedTimeframe = Exclude<Timeframe, RawTimeframe>;
 
 export type ZoneType = "supply" | "demand";
 

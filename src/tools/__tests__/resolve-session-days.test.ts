@@ -81,9 +81,13 @@ describe("resolve_session_days relative anchors", () => {
       "2026-07-02",
       "2026-07-03",
     ]);
-    // 23h CME ETH session-days: 5520/276/92/46/23/12/6 bars per day, and
-    // exactly 1 daily bar per session-day.
+    // 23h CME ETH session-days: 82800/16560/5520/276/92/46/23/12/6 bars per
+    // day, and exactly 1 daily bar per session-day. The sub-minute counts are
+    // full-GRID estimates — NT8 emits no bar for a bucket that saw no tick, so
+    // the realized 1s/5s row counts land materially below these.
     expect(out.barCountEstimate).toEqual({
+      "1s": 414000,
+      "5s": 82800,
       "15s": 27600,
       "5m": 1380,
       "15m": 460,

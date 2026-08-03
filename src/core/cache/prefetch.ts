@@ -5,7 +5,7 @@ import { loadCalendar } from "../sessions/calendar.js";
 import { sessionDayRange } from "../sessions/session-day.js";
 import {
   classifySessionDay,
-  CANDLE_FETCH_TIMEOUT_MS,
+  candleFetchTimeoutMs,
   DAILY_FETCH_BATCH_DAYS,
   observeEarlyClose,
   withCandleTimeoutHint,
@@ -323,7 +323,7 @@ export class PrefetchManager {
           to,
           tradingHoursTemplate: job.template.name,
         },
-        CANDLE_FETCH_TIMEOUT_MS,
+        candleFetchTimeoutMs(job.rawTimeframe),
       );
 
       // Verify what actually landed — ingest runs in the candles_response

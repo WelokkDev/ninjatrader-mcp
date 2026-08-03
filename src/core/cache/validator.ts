@@ -8,6 +8,8 @@ import { sessionDaysOverlapping } from "../sessions/session-day.js";
 // session-day itself (see DAILY_* below), so it is absent by design and every
 // lookup here is guarded by an isDaily() check first.
 const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
+  "1s": 1,
+  "5s": 5,
   "15s": 15,
   "5m": 300,
   "15m": 900,
@@ -30,14 +32,17 @@ function isDaily(tf: Timeframe): tf is "1d" {
   return tf === "1d";
 }
 
-// NT8 emits a historical bar only for buckets with >=1 tick, so a closed
-// 15s session-day legitimately misses a sliver of stamps in overnight
-// lulls (observed worst on NQ: 0.72% / 45s contiguous; 1.34% on a holiday
-// half-day) and still counts as structurally ok. Denser TFs trade every
-// bucket in practice — they stay exact.
-const SPARSE_TOLERANCE: Partial<
+// NT8 emits a bar only for buckets with >=1 tick, so sub-minute days
+// legitimately miss stamps — coarser TFs don't and have no entry here.
+//
+// Sub-15s values are unmeasured estimates; 15s is measured at 97% of its
+// ceiling (`npm run audit-bars`, 2026-08-03) — retune all three once real
+// 1s/5s days are cached.
+export const SPARSE_TOLERANCE: Partial<
   Record<Timeframe, { maxMissingFraction: number; maxGapSeconds: number }>
 > = {
+  "1s": { maxMissingFraction: 0.8, maxGapSeconds: 900 },
+  "5s": { maxMissingFraction: 0.35, maxGapSeconds: 600 },
   "15s": { maxMissingFraction: 0.02, maxGapSeconds: 120 },
 };
 

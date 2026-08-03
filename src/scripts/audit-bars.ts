@@ -11,7 +11,11 @@
 // the response's `validation` field.
 
 import db from "../db/connection.js";
-import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
+import {
+  isRawTimeframe,
+  isSubMinuteTimeframe,
+  SUPPORTED_TIMEFRAMES,
+} from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   sessionDayContaining,
@@ -20,10 +24,12 @@ import {
 import { loadCalendar, type SessionCalendar } from "../core/sessions/calendar.js";
 import { formatExchangeTime } from "../core/time.js";
 import {
+  SPARSE_TOLERANCE,
   validateSessionDay,
   type ValidationResult,
 } from "../core/cache/validator.js";
 import type { SessionDay } from "../core/sessions/types.js";
+import type { Timeframe } from "../core/types.js";
 
 function timeOnlyET(unix: number): string {
   // formatExchangeTime returns "YYYY-MM-DD HH:MM:SS". Strip to HH:MM.
@@ -38,6 +44,40 @@ function formatStamps(stamps: number[]): string {
 function formatStampsWithUnix(stamps: number[]): string {
   if (stamps.length === 0) return "(none)";
   return stamps.map((t) => `${timeOnlyET(t)} (unix ${t})`).join(", ");
+}
+
+/** A day that validated ok despite missing stamps — SPARSE_TOLERANCE absorbed
+ *  it. Only place this shows; used to retune the tolerance/heal floors. */
+interface SparseObservation {
+  symbol: string;
+  label: string;
+  timeframe: string;
+  expected: number;
+  missing: number;
+  missingFraction: number;
+  longestRunSecs: number;
+}
+
+function observeSparse(r: ValidationResult): SparseObservation | null {
+  // Read the period off the grid itself so this works for any fixed-period TF.
+  if (r.missing.length === 0 || r.expected.length < 2) return null;
+  const period = r.expected[1] - r.expected[0];
+  if (period <= 0) return null;
+  let longest = period;
+  let run = period;
+  for (let i = 1; i < r.missing.length; i++) {
+    run = r.missing[i] - r.missing[i - 1] === period ? run + period : period;
+    if (run > longest) longest = run;
+  }
+  return {
+    symbol: r.symbol,
+    label: r.sessionDay,
+    timeframe: r.timeframe,
+    expected: r.expected.length,
+    missing: r.missing.length,
+    missingFraction: r.missing.length / r.expected.length,
+    longestRunSecs: longest,
+  };
 }
 
 function main(): void {
@@ -92,6 +132,7 @@ function main(): void {
   let mismatch = 0;
   let skipped = 0;
   const issues: ValidationResult[] = [];
+  const sparse: SparseObservation[] = [];
 
   const countStmt = db.prepare(
     `SELECT COUNT(*) AS c FROM candles
@@ -114,8 +155,8 @@ function main(): void {
       // TFs are expected whenever their 15m source exists, and still
       // checked when they hold orphan rows without one.
       const rows = rowsAt(tf);
-      if (RAW_TIMEFRAMES.includes(tf) && rows === 0) continue;
-      if (!RAW_TIMEFRAMES.includes(tf) && !has15m && rows === 0) continue;
+      if (isRawTimeframe(tf) && rows === 0) continue;
+      if (!isRawTimeframe(tf) && !has15m && rows === 0) continue;
       const result = validateSessionDay(
         db,
         pair.symbol,
@@ -123,8 +164,14 @@ function main(): void {
         tf,
         nowUnix,
       );
-      if (result.status === "ok") ok++;
-      else if (result.status === "skipped") skipped++;
+      if (result.status === "ok") {
+        ok++;
+        // "ok" with missing stamps means SPARSE_TOLERANCE absorbed the day.
+        if (isSubMinuteTimeframe(tf)) {
+          const obs = observeSparse(result);
+          if (obs) sparse.push(obs);
+        }
+      } else if (result.status === "skipped") skipped++;
       else {
         mismatch++;
         issues.push(result);
@@ -163,8 +210,44 @@ function main(): void {
     console.log();
   }
 
+  if (sparse.length > 0) {
+    console.log("SPARSE (validated ok, absorbed by SPARSE_TOLERANCE)");
+    console.log(
+      "  These are the observations to retune validator.ts SPARSE_TOLERANCE",
+    );
+    console.log("  and live/heal.ts GAP_MIN_SPAN_SECS from.");
+    console.log();
+    const byTf = new Map<string, SparseObservation[]>();
+    for (const o of sparse) {
+      const list = byTf.get(o.timeframe);
+      if (list) list.push(o);
+      else byTf.set(o.timeframe, [o]);
+    }
+    for (const [tf, obs] of [...byTf.entries()].sort()) {
+      const tol = SPARSE_TOLERANCE[tf as Timeframe];
+      const worstFrac = obs.reduce((a, o) => Math.max(a, o.missingFraction), 0);
+      const worstRun = obs.reduce((a, o) => Math.max(a, o.longestRunSecs), 0);
+      const meanFrac = obs.reduce((a, o) => a + o.missingFraction, 0) / obs.length;
+      console.log(
+        `  ${tf}: ${obs.length} day(s)` +
+          `  missingFraction mean ${meanFrac.toFixed(4)} / worst ${worstFrac.toFixed(4)}` +
+          (tol ? ` (tolerance ${tol.maxMissingFraction})` : "") +
+          `  longest run ${worstRun}s` +
+          (tol ? ` (tolerance ${tol.maxGapSeconds}s)` : ""),
+      );
+      // The single worst day per TF, so a retune has a concrete date to pull.
+      const worstDay = obs.reduce((a, o) => (o.longestRunSecs > a.longestRunSecs ? o : a));
+      console.log(
+        `      worst run: ${worstDay.symbol} ${worstDay.label} — ${worstDay.longestRunSecs}s ` +
+          `(${worstDay.missing}/${worstDay.expected} stamps absent)`,
+      );
+    }
+    console.log();
+  }
+
   console.log(
     `Audit: ${ok} ok, ${mismatch} mismatch, ${skipped} skipped (in-progress)` +
+      (sparse.length > 0 ? `, ${sparse.length} sparse-tolerated` : "") +
       (orphanClosedDayBars > 0
         ? `, ${orphanClosedDayBars} orphan timestamp(s) outside any session-day`
         : ""),

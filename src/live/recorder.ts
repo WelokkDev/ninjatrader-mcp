@@ -12,6 +12,7 @@ import { expectedRawGrid } from "../core/cache/purge.js";
 import type { Timeframe } from "../core/types.js";
 import type { BarCloseMessage } from "../bridge/protocol.js";
 import type { LiveTimeframe } from "./registry.js";
+import { GAP_MIN_SPAN_SECS, TF_SECS } from "./heal.js";
 
 export interface RecordedBar {
   receivedAtMs: number;
@@ -82,6 +83,24 @@ export function missingStampsBetween(
     }
   }
   return missing.sort((a, b) => a - b);
+}
+
+/**
+ * Longest run of CONSECUTIVE grid stamps in `missing`, in seconds (0 if
+ * empty or period unknown). Deliberately not first-to-last extent: session
+ * breaks contribute no stamps, so tickless buckets either side of a weekend
+ * would otherwise measure as one ~176,000s span instead of the few seconds
+ * actually missing.
+ */
+export function longestMissingRunSecs(missing: number[], periodSecs: number): number {
+  if (missing.length === 0 || periodSecs <= 0) return 0;
+  let longest = periodSecs;
+  let run = periodSecs;
+  for (let i = 1; i < missing.length; i++) {
+    run = missing[i] - missing[i - 1] === periodSecs ? run + periodSecs : periodSecs;
+    if (run > longest) longest = run;
+  }
+  return longest;
 }
 
 /**
@@ -209,8 +228,13 @@ export class LiveBarRecorder {
       return;
     }
     if (missing.length === 0) return;
+    // A no-tick lull on a sparse TF isn't a gap (GAP_MIN_SPAN_SECS) — still
+    // counted, but healed only if the longest contiguous run clears the floor.
+    const tf = timeframe as LiveTimeframe;
+    const floor = GAP_MIN_SPAN_SECS[tf] ?? 0;
     state.gapCount++;
     state.lastGapAt = Math.floor(this.nowMs() / 1000);
+    if (floor > 0 && longestMissingRunSecs(missing, TF_SECS[tf] ?? 0) < floor) return;
     if (this.onGap) {
       try {
         this.onGap({

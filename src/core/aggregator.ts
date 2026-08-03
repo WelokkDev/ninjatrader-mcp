@@ -1,4 +1,5 @@
-import type { Candle, Timeframe } from "./types.js";
+import type { Candle, DerivedTimeframe, Timeframe } from "./types.js";
+import { isRawTimeframe } from "./constants.js";
 import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
 import type { SessionCalendar } from "./sessions/calendar.js";
 import {
@@ -7,8 +8,8 @@ import {
 } from "./sessions/session-day.js";
 
 // Derived targets only: "1d" is excluded (see core/constants.ts header)
-// and the raw streams (15s/5m/15m) short-circuit before this map is read.
-const PERIOD_MINUTES: Record<Exclude<Timeframe, "15s" | "5m" | "15m" | "1d">, number> = {
+// and the raw streams (1s/5s/15s/5m/15m) short-circuit before this map is read.
+const PERIOD_MINUTES: Record<DerivedTimeframe, number> = {
   "30m": 30,
   "1h": 60,
   "2h": 120,
@@ -47,7 +48,7 @@ export function aggregateCandles(
       `aggregateCandles: target "1d" is not derived — daily is a RAW stream fetched from NT8 (one bar per session-day, close-stamped at the session end). Fetch it via get_candles/prefetch_candles instead of aggregating.`,
     );
   }
-  if (targetTimeframe === "15s" || targetTimeframe === "5m" || targetTimeframe === "15m") {
+  if (isRawTimeframe(targetTimeframe)) {
     return markPartial([...candles].map(stripPartial), options);
   }
 

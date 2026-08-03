@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import db from "../db/connection.js";
-import { RAW_TIMEFRAMES } from "../core/constants.js";
+import { isRawTimeframe, RAW_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   makeSessionDayResolver,
@@ -68,7 +68,7 @@ export function ingestCandles(
   database: Database = db,
   opts: IngestOptions = {},
 ): IngestResult {
-  if (!RAW_TIMEFRAMES.includes(timeframe)) {
+  if (!isRawTimeframe(timeframe)) {
     throw new Error(
       `ingestCandles: timeframe '${timeframe}' is not a raw TF — only ${RAW_TIMEFRAMES.join(", ")} can be ingested directly`,
     );

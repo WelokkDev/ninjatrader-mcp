@@ -227,7 +227,7 @@ Restart your MCP client so it picks up the server, then:
    | Arg | Value |
    |---|---|
    | `symbol` | ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC |
-   | `timeframe` | `15s`, `5m`, or `15m` — the only raw streams NT8 serves. `15m` also rebuilds derived 30m/1h/2h/4h; `5m` and `15s` are parallel streams. |
+   | `timeframe` | `1s`, `5s`, `15s`, `5m`, `15m` or `1d` — the raw streams NT8 serves. `15m` also rebuilds derived 30m/1h/2h/4h; the rest are parallel streams. The sub-minute ones are dense (up to ~82,800 buckets/day at `1s`) and slow to fill — prefetch them a few days at a time. |
    | `start` | `YYYY-MM-DD` session day (close-date convention) |
    | `end` | `YYYY-MM-DD`, inclusive |
 
@@ -292,8 +292,9 @@ live_feed_status {}
 resolved contract (e.g. `MNQ 09-26`) — not just "message sent". After the next
 5m boundary, `live_feed_status` shows the bar count and lag (expect ≤ ~2 s
 during RTH), and `get_candles` serves the bar from the cache immediately.
-Higher timeframes (30m–4h) derive automatically on 15m closes; `15s` works but
-is subscribe-on-demand only (seconds history is shallow provider-side).
+Higher timeframes (30m–4h) derive automatically on 15m closes; `15s`, `5s` and
+`1s` work but are subscribe-on-demand only (seconds history is shallow
+provider-side, and shallower the finer the timeframe).
 
 Subscriptions persist across server restarts and replay whenever NT8
 reconnects; missed bars are healed automatically through `request_candles`
@@ -342,8 +343,8 @@ While on, the AddOn streams fills, order changes, and position transitions
 (sparse events — not a P&L ticker), and pushes a full snapshot on subscribe,
 provider reconnect, and account changes so state self-heals. `get_positions`
 then also carries per-trade age, fill history, and MAE/MFE — excursion
-granularity follows whatever live bar feeds are running (a `15s` bar sub on
-the traded symbol gives the finest picture). The toggle persists across server
+granularity follows whatever live bar feeds are running (a sub-minute bar sub
+on the traded symbol gives the finest picture — `1s` the finest of all). The toggle persists across server
 restarts and replays on every NT8 reconnect. Health lives in
 `live_feed_status` under `positions`; events also broadcast on the `/feed`
 channel (send `{"type": "subscribe_positions"}`).
@@ -441,7 +442,7 @@ Then read them back with `get_trades` or `list_trades`.
 | `[bridge] heartbeat timeout (30123ms) — closing socket` | 30s of silence from NT8. It'll reconnect on its own. |
 | `[McpBridge] [startup] WARNING: mapping target NOT FOUND in NT8: ...` | A Trading Hours template name doesn't match this install. Candle requests for it fail closed. See step 5. |
 | `NT8 has no TradingHours template named '...'` | Same root cause, hit at request time. |
-| `Unsupported timeframe for request_candles: 'x'. Supported raw TFs: 15s, 5m, 15m.` | Only those three are fetched raw; 30m–4h are derived from 15m. |
+| `Unsupported timeframe: 'x'. Supported raw TFs: …` | Only the raw TFs (`1s`, `5s`, `15s`, `5m`, `15m`, `1d`) are fetched raw; 30m–4h are derived from 15m. The message lists the AddOn's own set — if it is missing `1s`/`5s`, the AddOn predates them and needs a recompile. |
 | `NinjaTrader is not connected — start NT8 with the McpBridge addon, then retry.` | Prefetch with no bridge client. Work back through step 5. |
 | Tool list is missing tools after a rebuild | Restart the MCP client — the tool list is read at startup. |
 

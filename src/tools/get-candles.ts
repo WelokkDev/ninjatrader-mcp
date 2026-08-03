@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Database } from "better-sqlite3";
 import defaultDb from "../db/connection.js";
-import { RAW_TIMEFRAMES, SUPPORTED_SYMBOLS } from "../core/constants.js";
+import { isRawTimeframe, SUPPORTED_SYMBOLS, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   SessionClosedError,
@@ -41,17 +41,15 @@ const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
 
 export interface GetCandlesArgs {
   symbol: string;
-  timeframe: "15s" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "1d";
+  timeframe: Timeframe;
   start: string;
   end: string;
   limit?: number;
 }
 
-// 15s, 5m and 1d are their own raw streams; everything else derives from
-// 15m via the aggregation chain in ingest.ts.
+// Raw TFs are fetched as themselves; everything else derives from 15m.
 function fetchTimeframeFor(requested: Timeframe): Timeframe {
-  if (requested === "15s" || requested === "5m" || requested === "1d") return requested;
-  return "15m";
+  return isRawTimeframe(requested) ? requested : "15m";
 }
 
 export interface GetCandlesDeps {
@@ -237,7 +235,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       matched = finalDays.reduce((acc, day) => acc + expectedBarCount(day, timeframe), 0);
     }
 
-    const isDerived = !RAW_TIMEFRAMES.includes(timeframe);
+    const isDerived = !isRawTimeframe(timeframe);
 
     let validation = validateRequestedRange(
       deps.db,
@@ -491,13 +489,13 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
-        .enum(["15s", "5m", "15m", "30m", "1h", "2h", "4h", "1d"])
+        .enum(SUPPORTED_TIMEFRAMES as [Timeframe, ...Timeframe[]])
         .describe(
-          "Candle timeframe. 15s, 5m and 1d are raw parallel streams; 30m–4h derive from 15m. 15s is DENSE (5,520 bars/session-day) — it always needs an explicit `limit` and is meant for engine consumption; use prefetch_candles for 15s batches. 1d is exactly one bar per session-day, stamped at the session CLOSE (so today's daily bar carries a future timestamp and `partial: true` until the session ends).",
+          "Candle timeframe. 1s, 5s, 15s, 5m and 1d are raw parallel streams; 30m–4h derive from 15m. The sub-minute TFs are DENSE — per session-day roughly 82,800 buckets at 1s, 16,560 at 5s, 5,520 at 15s — so they always need an explicit `limit`, are meant for engine consumption, and should be filled via prefetch_candles rather than inline here. They are also SPARSE: NT8 emits no bar for a bucket that saw no tick, so a 1s day legitimately returns well under its 82,800 buckets (>=14% absent) and that is not a gap. 1d is exactly one bar per session-day, stamped at the session CLOSE (so today's daily bar carries a future timestamp and `partial: true` until the session ends).",
         ),
       start: z
         .string()

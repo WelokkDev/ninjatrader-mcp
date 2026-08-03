@@ -1,14 +1,14 @@
 import type { Database } from "better-sqlite3";
 import { aggregateCandles } from "../aggregator.js";
-import { RAW_TIMEFRAMES, SUPPORTED_TIMEFRAMES } from "../constants.js";
+import { isRawTimeframe, SUPPORTED_TIMEFRAMES } from "../constants.js";
 import type { SessionCalendar } from "../sessions/calendar.js";
 import type { InstrumentConfig, SessionDay } from "../sessions/types.js";
-import type { Candle, Timeframe } from "../types.js";
+import type { Candle, DerivedTimeframe, Timeframe } from "../types.js";
 
 // Aggregated from 15m on the 15m ingest path; other raw TFs are parallel
 // streams and don't feed this chain.
-export const DERIVED_TIMEFRAMES: Timeframe[] = SUPPORTED_TIMEFRAMES.filter(
-  (tf) => !RAW_TIMEFRAMES.includes(tf),
+export const DERIVED_TIMEFRAMES: DerivedTimeframe[] = SUPPORTED_TIMEFRAMES.filter(
+  (tf): tf is DerivedTimeframe => !isRawTimeframe(tf),
 );
 
 /**
