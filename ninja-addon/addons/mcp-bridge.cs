@@ -46,17 +46,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 	{
 		public string    Id;
 		public string    Symbol;
-		public string    Kind;      // "rectangle" | "hline" | "vline" | "text"
+		public string    Kind;      // "rectangle" | "hline" | "vline" | "text" | "riskreward"
 		public double    Proximal;  // rectangle
 		public double    Distal;    // rectangle
 		public double    Price;     // hline / text y
 		public string    Text;      // text content
-		public DateTime? FromTime;  // rectangle / hline start (null => bar-anchor fallback)
-		public DateTime? ToTime;    // rectangle / hline end   (null => current bar)
+		public DateTime? FromTime;  // rectangle / hline / riskreward entry x (null => bar-anchor fallback)
+		public DateTime? ToTime;    // rectangle / hline / riskreward end x   (null => current bar)
 		public DateTime? AtTime;    // vline / text x
 		public string    Color;     // style "#rrggbb" (null => default)
 		public double?   Opacity;   // style 0..1 (null => default)
 		public string    Label;     // style companion label (null => none)
+
+		// riskreward. Nullable is load-bearing: which leg is present selects isStop.
+		public double    Entry;
+		public double?   Stop;
+		public double?   Target;
+		public double    Ratio;
 	}
 
 	// One retained drawing in the AddOn's persistence store. Exactly one of
@@ -622,6 +628,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return Convert.ToDouble(v);
 		}
 
+		// GetDouble collapses a missing key to 0.0, which is wrong wherever the
+		// key's PRESENCE is the signal — e.g. riskreward's stop/target picking isStop.
+		private static double? GetNullableDouble(IDictionary<string, object> obj, string key)
+		{
+			object v;
+			if (obj == null || !obj.TryGetValue(key, out v) || v == null) return null;
+			try { return Convert.ToDouble(v); } catch { return null; }
+		}
+
 		// JavaScriptSerializer deserializes JSON arrays as object[] (or ArrayList in
 		// some configurations); accept either and stringify each element.
 		private static List<string> GetStringArray(IDictionary<string, object> obj, string key)
@@ -740,7 +755,19 @@ namespace NinjaTrader.NinjaScript.AddOns
 						Color    = style != null ? GetString(style, "color") : null,
 						Opacity  = style != null && style.ContainsKey("opacity") ? (double?) GetDouble(style, "opacity") : null,
 						Label    = style != null ? GetString(style, "label") : null,
+						Entry    = GetDouble(shape, "entry"),
+						Stop     = GetNullableDouble(shape, "stop"),
+						Target   = GetNullableDouble(shape, "target"),
+						Ratio    = GetDouble(shape, "ratio"),
 					};
+
+					// Rendering a legless riskreward would anchor the derived leg at 0.
+					if (kind == "riskreward" && !cmd.Stop.HasValue && !cmd.Target.HasValue)
+					{
+						Log("draw: riskreward id=" + cmd.Id + " has neither stop nor target — ignored");
+						break;
+					}
+
 					Log("draw " + cmd.Symbol + " id=" + cmd.Id + " kind=" + cmd.Kind);
 					StoreUpsert(cmd.Symbol, new StoredDraw { Id = cmd.Id, Draw = cmd });
 					var dh = DrawReceived;

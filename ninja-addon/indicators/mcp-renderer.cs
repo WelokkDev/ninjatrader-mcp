@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Windows.Media;
 using NinjaTrader.Code;
+using NinjaTrader.Gui;       // Stroke, DashStyleHelper
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript.AddOns;
 using NinjaTrader.NinjaScript.DrawingTools;
@@ -236,6 +237,42 @@ namespace NinjaTrader.NinjaScript.Indicators
 					case "text":
 						Draw.Text(this, tag, dc.Text ?? "", BarsAgoFor(atTime), dc.Price, brush);
 						break;
+					case "riskreward":
+					{
+						// Fail closed rather than draw a misleading trade box. The server
+						// schema guarantees both, so a violation means a stale client.
+						if (!dc.Stop.HasValue && !dc.Target.HasValue)
+						{
+							Log("riskreward " + tag + ": neither stop nor target — skipped");
+							return;
+						}
+						if (dc.Ratio <= 0)
+						{
+							Log("riskreward " + tag + ": ratio " + dc.Ratio + " is not > 0 — skipped");
+							return;
+						}
+
+						// Direction needs no handling: risk is signed, so a stop above
+						// entry makes it a short and NT8 puts the target below.
+						var isStop = dc.Stop.HasValue;
+						var endY   = isStop ? dc.Stop.Value : dc.Target.Value;
+
+						var rr = Draw.RiskReward(this, tag, false, fromTime, dc.Entry, toTime, endY, dc.Ratio, isStop);
+
+						// Null when `tag` is already held by a different drawing-tool type.
+						if (rr != null && (!string.IsNullOrEmpty(dc.Color) || dc.Opacity.HasValue))
+						{
+							// No area brush here, so style.opacity drives the strokes, not a fill.
+							var strokeOpacity = dc.Opacity.HasValue
+								? Math.Max(0, Math.Min(100, (int) Math.Round(dc.Opacity.Value * 100)))
+								: 100;
+							// Entry takes style.color; stop/target keep NT8's semantic red/green.
+							rr.EntryLineStroke  = new Stroke(BrushFromHex(dc.Color, Brushes.Goldenrod), DashStyleHelper.Solid, 2f, strokeOpacity);
+							rr.StopLineStroke   = new Stroke(Brushes.Crimson,  DashStyleHelper.Solid, 2f, strokeOpacity);
+							rr.TargetLineStroke = new Stroke(Brushes.SeaGreen, DashStyleHelper.Solid, 2f, strokeOpacity);
+						}
+						break;
+					}
 					default:
 						Log("draw: unknown kind '" + dc.Kind + "'");
 						return;
@@ -248,7 +285,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 					var lblTag   = tag + "__lbl";
 					var lblTime  = dc.Kind == "vline" ? atTime : fromTime;
 					var lblPrice = dc.Kind == "rectangle" ? Math.Max(dc.Proximal, dc.Distal)
-						: dc.Kind == "hline" ? dc.Price : High[0];
+						: dc.Kind == "hline" ? dc.Price
+						: dc.Kind == "riskreward" ? dc.Entry : High[0];
 					// Always black, independent of the shape's brush — a label tinted to
 					// match its zone's fill/border color reads as illegible on same-color
 					// candles (e.g. a red SUPPLY label over red candles).

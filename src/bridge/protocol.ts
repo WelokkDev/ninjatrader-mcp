@@ -84,6 +84,40 @@ export const drawShapeSchema = z.discriminatedUnion("kind", [
     price: z.number(),
     text: z.string().min(1),
   }),
+  // Mirrors NT8's Draw.RiskReward: entry + one leg + ratio, third leg derived.
+  // Field names match riskRewardPayloadSchema, so a get_drawings read round-trips.
+  // toJSONSchema drops the refine below, so draw's tool description has to state
+  // the stop-XOR-target rule in prose as well.
+  z
+    .object({
+      kind: z.literal("riskreward"),
+      entry: z.number(),
+      stop: z.number().optional(),
+      target: z.number().optional(),
+      ratio: z.number().positive(),
+      fromTs: z.number().int().optional(),
+      toTs: z.number().int().optional(),
+    })
+    .superRefine((s, ctx) => {
+      const hasStop = s.stop !== undefined;
+      const hasTarget = s.target !== undefined;
+      if (hasStop === hasTarget) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "riskreward: provide exactly one of stop or target — the other leg is derived from ratio",
+        });
+        return;
+      }
+      // A zero-length leg collapses the whole drawing to one line at entry.
+      const leg = hasStop ? s.stop : s.target;
+      if (leg === s.entry) {
+        ctx.addIssue({
+          code: "custom",
+          message: `riskreward: ${hasStop ? "stop" : "target"} must differ from entry`,
+        });
+      }
+    }),
 ]);
 export type DrawShape = z.infer<typeof drawShapeSchema>;
 

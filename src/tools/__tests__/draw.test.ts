@@ -49,6 +49,34 @@ describe("draw tool", () => {
     expect(sent[0]).toMatchObject({ shape: { kind: "text", text: "hi", ts: 100, price: 25000 } });
   });
 
+  it("sends a riskreward shape in the stop form", async () => {
+    const { handler, sent } = harness();
+    await handler({
+      id: "rr1",
+      symbol: "NQ",
+      shape: { kind: "riskreward", entry: 25000, stop: 24980, ratio: 3, fromTs: 100, toTs: 200 },
+      style: { color: "#3b82f6", label: "LONG 1:3" },
+    });
+    expect(sent[0]).toMatchObject({
+      type: "draw",
+      id: "rr1",
+      shape: { kind: "riskreward", entry: 25000, stop: 24980, ratio: 3, fromTs: 100, toTs: 200 },
+      style: { color: "#3b82f6", label: "LONG 1:3" },
+    });
+    expect((sent[0] as any).shape.target).toBeUndefined();
+  });
+
+  it("sends a riskreward shape in the target form", async () => {
+    const { handler, sent } = harness();
+    await handler({
+      id: "rr2",
+      symbol: "NQ",
+      shape: { kind: "riskreward", entry: 25000, target: 25060, ratio: 3 },
+    });
+    expect(sent[0]).toMatchObject({ shape: { kind: "riskreward", entry: 25000, target: 25060, ratio: 3 } });
+    expect((sent[0] as any).shape.stop).toBeUndefined();
+  });
+
   it("does not send when NT is disconnected", async () => {
     const { handler, sent } = harness(false);
     const res = await handler({ id: "x", symbol: "NQ", shape: { kind: "vline", ts: 100 } });
