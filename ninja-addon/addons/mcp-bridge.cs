@@ -74,6 +74,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public DrawCommand     Draw;
 	}
 
+	// One reply to a SendClientRequest call. Deliberately vocabulary-free: the
+	// bridge routes it back by Id and knows nothing about what Kind means.
+	public class ClientResponse
+	{
+		public string Id;
+		public string Kind;
+		public bool   Ok;
+		public IDictionary<string, object> Payload; // null when !Ok
+		public string Error;                        // null when Ok
+	}
+
 	public class McpBridge : NinjaTrader.NinjaScript.AddOnBase
 	{
 		private const int    HeartbeatIntervalMs = 10_000;
@@ -86,6 +97,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 		public  static event Action<DrawZoneCommand>  DrawZoneReceived;
 		public  static event Action<DrawCommand>      DrawReceived;
 		public  static event Action<ClearZonesCommand> ClearZonesReceived;
+		// Replies to SendClientRequest. Every subscriber sees every response —
+		// filter on ClientResponse.Id (the value SendClientRequest returned) or
+		// on Kind, exactly as the draw events filter on Symbol.
+		public  static event Action<ClientResponse>   ClientResponseReceived;
 
 		// MaxJsonLength defaults to 2 MB and throws past it; a dense 1s session-day
 		// (up to ~8 MB) blows through that. Raised well clear of the 100 MB ws cap.
@@ -190,6 +205,53 @@ namespace NinjaTrader.NinjaScript.AddOns
 			if (registeredSymbols.TryRemove(symbol, out _))
 				PushRoster();
 			Log("indicator unregistered symbol: " + symbol);
+		}
+
+		// Companion-NinjaScript request seam. A private indicator hands over an
+		// opaque kind + payload; this forwards it and the server's reply comes
+		// back on ClientResponseReceived, correlated by the returned id.
+		//
+		// The AddOn deliberately understands NEITHER argument: no kind is
+		// enumerated here and no payload key is inspected, so a companion can
+		// define request types without any of its vocabulary landing in the
+		// public bridge. Returns null when the socket is down — callers must
+		// treat that as "ask again later", not as a silent success.
+		public string SendClientRequest(string kind, IDictionary<string, object> payload)
+		{
+			if (string.IsNullOrEmpty(kind))
+			{
+				Log("SendClientRequest: empty kind ignored");
+				return null;
+			}
+			if (socket == null || socket.State != WebSocketState.Open)
+			{
+				Log("SendClientRequest(" + kind + "): socket not open — dropped");
+				return null;
+			}
+
+			var id = Guid.NewGuid().ToString("N");
+			var msg = new Dictionary<string, object>
+			{
+				{ "v",       1 },
+				{ "id",      id },
+				{ "type",    "client_request" },
+				{ "kind",    kind },
+				{ "payload", payload ?? new Dictionary<string, object>() },
+			};
+
+			try
+			{
+				SendFireAndForget(Json.Serialize(msg), "client_request kind=" + kind + " id=" + id);
+			}
+			catch (Exception ex)
+			{
+				// Serialization is the realistic failure here (a payload value
+				// JavaScriptSerializer can't handle). Fail closed with null so
+				// the caller doesn't wait on a reply that will never come.
+				Log("SendClientRequest(" + kind + ") failed: " + ex.Message);
+				return null;
+			}
+			return id;
 		}
 
 		// draw persistence store — retained on the AddOn (which outlives chart
@@ -792,6 +854,24 @@ namespace NinjaTrader.NinjaScript.AddOns
 					StoreClear(cmd.Symbol, cmd.Id, cmd.Ids);
 					var handler = ClearZonesReceived;
 					if (handler != null) handler(cmd);
+					break;
+				}
+
+				case "client_response":
+				{
+					var ok = GetBool(obj, "ok");
+					var resp = new ClientResponse
+					{
+						Id      = GetString(obj, "id"),
+						Kind    = GetString(obj, "kind"),
+						Ok      = ok.HasValue && ok.Value,
+						Payload = GetDict(obj, "payload"),
+						Error   = GetString(obj, "error"),
+					};
+					Log("client_response kind=" + resp.Kind + " id=" + resp.Id
+						+ (resp.Ok ? " ok" : " FAILED: " + resp.Error));
+					var clientHandler = ClientResponseReceived;
+					if (clientHandler != null) clientHandler(resp);
 					break;
 				}
 

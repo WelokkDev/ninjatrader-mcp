@@ -733,6 +733,32 @@ export const ocoAckMessageSchema = reqMsg("oco_ack", {
 });
 export type OcoAckMessage = z.infer<typeof ocoAckMessageSchema>;
 
+// ---------- companion-NinjaScript request seam ----------
+// The ONE inbound path where NT8 asks the server for something rather than
+// answering it. Deliberately vocabulary-free: `kind` is an opaque routing
+// string and `payload` an opaque bag, so a private companion indicator can
+// define its own request types without any of its vocabulary landing here.
+// Handlers register in bridge/client-requests.ts; public code registers none.
+//
+// Correlation is inverted relative to reqMsg's usual use: NT8 mints the `id`
+// and holds the pending call, the server echoes it back on client_response.
+
+export const clientRequestMessageSchema = reqMsg("client_request", {
+  kind: z.string().min(1),
+  payload: z.record(z.string(), z.unknown()).default({}),
+});
+export type ClientRequestMessage = z.infer<typeof clientRequestMessageSchema>;
+
+/** `ok:false` carries `error` and no payload — an unroutable kind is a normal
+ *  outcome (deploy skew: newer indicator, older server), not a protocol fault. */
+export const clientResponseMessageSchema = reqMsg("client_response", {
+  kind: z.string().min(1),
+  ok: z.boolean(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+  error: z.string().optional(),
+});
+export type ClientResponseMessage = z.infer<typeof clientResponseMessageSchema>;
+
 export const errorMessageSchema = reqMsg("error", {
   message: z.string(),
   // Machine-readable classifier; C# sets it on every place_order rejection,
@@ -767,6 +793,7 @@ const INBOUND_SCHEMAS = {
   flatten_ack: flattenAckMessageSchema,
   change_ack: changeAckMessageSchema,
   oco_ack: ocoAckMessageSchema,
+  client_request: clientRequestMessageSchema,
   error: errorMessageSchema,
 };
 
@@ -793,7 +820,8 @@ export type OutboundMessage =
   | CancelOrderMessage
   | CancelAllMessage
   | FlattenMessage
-  | ChangeOrderMessage;
+  | ChangeOrderMessage
+  | ClientResponseMessage;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

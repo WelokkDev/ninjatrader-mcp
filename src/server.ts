@@ -8,6 +8,15 @@ import {
   registerLiveIngestHandler,
 } from "./bridge/ingest.js";
 import { registerCalendarSyncOnHello } from "./bridge/calendar-sync.js";
+import { startClientRequestDispatch } from "./bridge/client-requests.js";
+
+// The companion-NinjaScript request seam. Public registers no kinds; a private
+// bin claims its own after startRuntime(). Re-exported here so private code has
+// one import surface (this file) rather than reaching into bridge/ directly.
+export {
+  registerClientRequestHandler,
+  type ClientRequestHandler,
+} from "./bridge/client-requests.js";
 
 import { registerGetCandles } from "./tools/get-candles.js";
 import { registerResolveSessionDays } from "./tools/resolve-session-days.js";
@@ -151,6 +160,10 @@ export async function startRuntime(): Promise<void> {
   registerLiveIngestHandler();
   registerCandlesResponseHandler();
   registerCalendarSyncOnHello();
+  // Registered unconditionally: the dispatcher owns no kinds of its own, so on
+  // a stock public build it simply answers every client_request with ok:false
+  // instead of leaving a companion indicator waiting out its timeout.
+  startClientRequestDispatch();
   startLiveFeedRuntime();
 }
 
