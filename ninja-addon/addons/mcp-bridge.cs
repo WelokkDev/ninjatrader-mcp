@@ -899,6 +899,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 					HandleRequestSessionCalendar(obj);
 					break;
 
+				case "request_rollovers":
+					HandleRequestRollovers(obj);
+					break;
+
 				case "request_open_charts":
 					HandleRequestOpenCharts(obj);
 					break;
@@ -1186,6 +1190,113 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				Log("ClassifyDataSource failed: " + ex.Message);
 				return "";
+			}
+		}
+		
+		private void HandleRequestRollovers(IDictionary<string, object> obj)
+		{
+			var id     = GetString(obj, "id");
+			var symbol = GetString(obj, "symbol");
+
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_rollovers missing id; dropping");
+				return;
+			}
+			if (string.IsNullOrEmpty(symbol))
+			{
+				SendErrorResponse(id, "request_rollovers missing required field: symbol");
+				return;
+			}
+
+			Instrument instrument = ResolveInstrument(symbol);
+			if (instrument == null)
+			{
+				SendErrorResponse(id, "Unknown instrument: '" + symbol + "'");
+				return;
+			}
+
+			try
+			{
+				var master = instrument.MasterInstrument;
+				var rows   = new List<object>();
+				var rollovers = master.RolloverCollection;
+				if (rollovers != null)
+				{
+					foreach (var r in rollovers)
+					{
+						if (r == null) continue;
+						rows.Add(new Dictionary<string, object>
+						{
+							{ "contractMonth", r.ContractMonth.ToString("yyyy-MM-dd") },
+							{ "rolloverDate",  r.Date.ToString("yyyy-MM-dd") },
+							// Metadata only, never baked into the stored bars.
+							// wasEdited flags a hand-edited row — NT8 overwrites
+							// those with server values when it has them.
+							{ "offset",        r.Offset },
+							{ "wasEdited",     r.WasEdited },
+						});
+					}
+				}
+
+				var policy = master.MergePolicy;
+				if (policy == MergePolicy.UseGlobalSettings || policy == MergePolicy.UseDefault)
+					policy = Core.Globals.MarketDataOptions.GlobalMergePolicy;
+
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",           1 },
+					{ "id",          id },
+					{ "type",        "rollovers_response" },
+					{ "symbol",      symbol },
+					{ "instrument",  instrument.FullName },
+					{ "mergePolicy", policy.ToString() },
+					{ "priceBasis",  PriceBasisOf(policy) },
+					{ "rollovers",   rows },
+				};
+				SendFireAndForget(Json.Serialize(payload),
+					"rollovers_response id=" + id + " count=" + rows.Count);
+			}
+			catch (Exception ex)
+			{
+				Log("request_rollovers failed for '" + symbol + "': " + ex.Message);
+				SendErrorResponse(id, "request_rollovers failed: " + ex.Message);
+			}
+		}
+
+		// UseGlobalSettings / UseDefault resolved through Tools > Options > Market
+		// data. On failure returns UseDefault, which PriceBasisOf maps to unknown.
+		private static MergePolicy EffectiveMergePolicy(BarsRequest request)
+		{
+			try
+			{
+				var policy = request.MergePolicy;
+				if (policy == MergePolicy.UseGlobalSettings || policy == MergePolicy.UseDefault)
+					policy = Core.Globals.MarketDataOptions.GlobalMergePolicy;
+				return policy;
+			}
+			catch (Exception ex)
+			{
+				Log("EffectiveMergePolicy failed: " + ex.Message);
+				return MergePolicy.UseDefault;
+			}
+		}
+
+		// Price basis of the bars a policy produces. MergeBackAdjusted shifts ALL
+		// history by the accumulated roll gaps, so those bars are not comparable
+		// with as-traded ones and must never land in the same cache unlabelled.
+		// "unknown" is preserved as such rather than assumed safe.
+		private static string PriceBasisOf(MergePolicy policy)
+		{
+			switch (policy)
+			{
+				case MergePolicy.MergeBackAdjusted:    return "back_adjusted";
+				case MergePolicy.MergeNonBackAdjusted: return "as_traded";
+				// One expiry, never stitched, so nothing is adjusted — but it is
+				// also not continuous: a range spanning a roll silently returns
+				// the current contract's own older prices.
+				case MergePolicy.DoNotMerge:           return "as_traded";
+				default:                               return "unknown";
 			}
 		}
 
@@ -1491,7 +1602,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 								+ " (first=" + firstTs + " last=" + lastTs + ")");
 						}
 
-						SendCandlesResponse(id, symbol, resolvedTimeframe, candles);
+						SendCandlesResponse(id, symbol, resolvedTimeframe, candles,
+							EffectiveMergePolicy(barsRequest));
 					}
 					catch (Exception ex)
 					{
@@ -1512,7 +1624,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		private void SendCandlesResponse(string id, string symbol, string timeframe,
-			List<object> candles)
+			List<object> candles, MergePolicy mergePolicy)
 		{
 			var payload = new Dictionary<string, object>
 			{
@@ -1524,6 +1636,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "candles",   candles },
 				// Feed that served this fetch; the server rejects sim-feed bars.
 				{ "dataSource", ClassifyDataSource() },
+				{ "priceBasis",  PriceBasisOf(mergePolicy) },
+				{ "mergePolicy", mergePolicy.ToString() },
 			};
 			SendFireAndForget(Json.Serialize(payload),
 				"candles_response id=" + id + " count=" + candles.Count);
@@ -1918,6 +2032,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 					var nowUnix = (long) (DateTime.UtcNow - UnixEpoch).TotalSeconds;
 					// Classify once per batch, not per bar.
 					var barSource = ClassifyDataSource();
+					// Live bars land in the same table as historical ones, so they
+					// carry the same label. The two policies agree on the front
+					// month (back-adjustment leaves the current contract
+					// unshifted) — label it anyway, so a later policy change shows.
+					var barBasis = sub.Request != null
+						? PriceBasisOf(EffectiveMergePolicy(sub.Request))
+						: "unknown";
 
 					payloads = new List<string>();
 					for (int i = Math.Max(sub.LastMaxIndex, 0); i < newMax; i++)
@@ -1933,6 +2054,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 							{ "seq",       sub.Seq },
 							{ "contract",  sub.Instrument.FullName },
 							{ "dataSource", barSource },
+							{ "priceBasis", barBasis },
 							{ "candle",    new Dictionary<string, object>
 								{
 									{ "timestamp", ts },

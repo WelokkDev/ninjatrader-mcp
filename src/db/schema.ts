@@ -186,6 +186,12 @@ export function initializeSchema(db: Database.Database): void {
   // Provenance of a cached bar: NULL means NT8 (predates this column), else
   // an external importer (e.g. 'databento') — see isImportedSource.
   ensureColumn(db, "candles", "source", "TEXT");
+
+  // Price basis of a cached bar: NULL means unknown (predates this column, and
+  // cannot be classified after the fact), else 'as_traded' | 'back_adjusted'.
+  if (ensureColumn(db, "candles", "price_basis", "TEXT")) {
+    db.exec("UPDATE candles SET price_basis = 'as_traded' WHERE price_basis IS NULL");
+  }
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");
@@ -198,17 +204,18 @@ export function initializeSchema(db: Database.Database): void {
   );
 }
 
-// Idempotent ADD COLUMN; SQLite has no `ADD COLUMN IF NOT EXISTS`.
+// Idempotent ADD COLUMN; SQLite has no `ADD COLUMN IF NOT EXISTS`. Returns true
+// only on actual creation, so callers can hang a one-time migration off that.
 function ensureColumn(
   db: Database.Database,
   table: string,
   column: string,
   decl: string,
-): void {
+): boolean {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
     name: string;
   }>;
-  if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
-  }
+  if (cols.some((c) => c.name === column)) return false;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  return true;
 }

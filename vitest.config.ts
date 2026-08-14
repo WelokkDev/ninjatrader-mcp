@@ -11,6 +11,7 @@ export default defineConfig({
       "src/tools/**/*.test.ts",
       "src/core/**/*.test.ts",
       "src/bridge/**/*.test.ts",
+      "src/db/**/*.test.ts",
       "src/live/**/*.test.ts",
       "src/execution/**/*.test.ts",
     ],

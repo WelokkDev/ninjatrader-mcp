@@ -58,6 +58,11 @@ export interface IngestOptions {
   // days it touches; "append" (bar_close, direct callers) never deletes.
   mode?: "day-refill" | "append";
   nowUnix?: number;
+  // Basis the bridge reported for these bars ('as_traded' | 'back_adjusted' |
+  // 'unknown'), from the merge policy that served the fetch. Stored per row so
+  // a merge-policy change is visible instead of silently mixing two price
+  // series. Undefined leaves the column NULL, which reads as unknown.
+  priceBasis?: string;
 }
 
 export function ingestCandles(
@@ -141,10 +146,15 @@ export function ingestCandles(
 
   if (inSession.length === 0) return { inserted: 0, dropped, aggregated };
 
+  // 'unknown' is stored as NULL — a literal "unknown" would group as if it
+  // were a basis of its own.
+  const priceBasis =
+    opts.priceBasis && opts.priceBasis !== "unknown" ? opts.priceBasis : null;
+
   const insertStmt = database.prepare(
     `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   let inserted = 0;
@@ -190,7 +200,9 @@ export function ingestCandles(
         );
         continue;
       }
-      insertStmt.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+      insertStmt.run(
+        symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume, priceBasis,
+      );
       inserted++;
     }
 
@@ -265,7 +277,7 @@ export function createCandlesResponseHandler(database: Database = db) {
         msg.timeframe as Timeframe,
         msg.candles,
         database,
-        { mode: "day-refill" },
+        { mode: "day-refill", priceBasis: msg.priceBasis },
       );
       console.error(
         `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} dropped=${result.dropped} agg=${JSON.stringify(result.aggregated)}`,

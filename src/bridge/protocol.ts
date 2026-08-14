@@ -163,6 +163,11 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   candles: z.array(candlePayloadSchema),
   // NT8 feed that served this fetch; older AddOns omit. Ingest rejects sim-feed bars (data-source.ts).
   dataSource: z.string().optional(),
+  // Basis of these bars from the merge policy that served the fetch:
+  // 'as_traded' | 'back_adjusted' | 'unknown'. Older AddOns omit it; absent is
+  // stored as NULL and read as unknown, never assumed safe.
+  priceBasis: z.string().optional(),
+  mergePolicy: z.string().optional(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
