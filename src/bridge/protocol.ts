@@ -168,6 +168,9 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   // stored as NULL and read as unknown, never assumed safe.
   priceBasis: z.string().optional(),
   mergePolicy: z.string().optional(),
+  // Cross-check only — a merged request spans contracts, so per-row labels
+  // come from contract-windows.ts instead.
+  contract: z.string().optional(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
@@ -180,6 +183,9 @@ export const barCloseMessageSchema = msg("bar_close", {
   contract: z.string().optional(), // resolved NT8 contract (e.g. "MNQ 09-26"); makes rolls visible
   dataSource: z.string().optional(), // feed; sim-feed bars rejected on ingest
   backfill: z.boolean().optional(), // closed well before emission; act-on-close consumers skip these
+  // Basis of THIS bar. Zod strips unknown keys, so omitting it would silently
+  // discard what the AddOn computed.
+  priceBasis: z.string().optional(),
 });
 export type BarCloseMessage = z.infer<typeof barCloseMessageSchema>;
 
@@ -233,6 +239,31 @@ export const sessionCalendarResponseMessageSchema = reqMsg("session_calendar_res
   ),
 });
 export type SessionCalendarResponseMessage = z.infer<typeof sessionCalendarResponseMessageSchema>;
+
+export const requestRolloversMessageSchema = reqMsg("request_rollovers", {
+  symbol: z.string(),
+});
+export type RequestRolloversMessage = z.infer<typeof requestRolloversMessageSchema>;
+
+/** NT8's rollover table as the AddOn reports it. Doctrine lives on the
+ *  contract_rollovers DDL in db/schema.ts. */
+export const rolloversResponseMessageSchema = reqMsg("rollovers_response", {
+  symbol: z.string(),
+  instrument: z.string().optional(),
+  // Effective policy, with UseGlobalSettings already resolved by the AddOn.
+  mergePolicy: z.string().optional(),
+  priceBasis: z.string().optional(),
+  rollovers: z.array(
+    z.object({
+      // Calendar dates (YYYY-MM-DD) — no timezone to get wrong.
+      contractMonth: z.string(),
+      rolloverDate: z.string(),
+      offset: z.number(), // NT8's back-adjustment offset; metadata only
+      wasEdited: z.boolean().optional(), // NT8 may overwrite a hand-edit
+    }),
+  ),
+});
+export type RolloversResponseMessage = z.infer<typeof rolloversResponseMessageSchema>;
 
 export const requestOpenChartsMessageSchema = reqMsg("request_open_charts", {});
 export type RequestOpenChartsMessage = z.infer<typeof requestOpenChartsMessageSchema>;
@@ -780,6 +811,7 @@ const INBOUND_SCHEMAS = {
   candles_response: candlesResponseMessageSchema,
   bar_close: barCloseMessageSchema,
   session_calendar_response: sessionCalendarResponseMessageSchema,
+  rollovers_response: rolloversResponseMessageSchema,
   open_charts_response: openChartsResponseMessageSchema,
   navigate_chart_ack: navigateChartAckMessageSchema,
   drawings_response: drawingsResponseMessageSchema,
@@ -810,6 +842,7 @@ export type OutboundMessage =
   | ClearZonesMessage
   | RequestCandlesMessage
   | RequestSessionCalendarMessage
+  | RequestRolloversMessage
   | RequestOpenChartsMessage
   | NavigateChartMessage
   | RequestDrawingsMessage
@@ -866,6 +899,15 @@ export function parseMessage(raw: string): ParseResult {
     return { ok: false, reason: issueReason(obj.type, result.error) };
   }
   return { ok: true, message: result.data };
+}
+
+/** Correlation is by `id`, not type, so a reply's type is unverified until a
+ *  caller narrows it here. */
+export function isInboundType<T extends InboundMessage["type"]>(
+  msg: unknown,
+  type: T,
+): msg is Extract<InboundMessage, { type: T }> {
+  return typeof msg === "object" && msg !== null && (msg as { type?: unknown }).type === type;
 }
 
 export function encode(message: OutboundMessage): string {

@@ -47,6 +47,29 @@ export function initializeSchema(db: Database.Database): void {
       PRIMARY KEY (template, date)
     );
 
+    -- NT8's rollover table, mirrored per instrument: which contract a bar
+    -- belongs to, the thing a merged series discards. Windows are exactly
+    -- [rollover_date, next rollover_date). offset_points is metadata only,
+    -- never baked into stored bars; was_edited flags a hand-edit NT8 may
+    -- overwrite.
+    CREATE TABLE IF NOT EXISTS contract_rollovers (
+      symbol         TEXT    NOT NULL,
+      contract_month TEXT    NOT NULL,  -- YYYY-MM-DD
+      rollover_date  TEXT    NOT NULL,  -- YYYY-MM-DD; roll INTO contract_month
+      offset_points  REAL    NOT NULL,
+      was_edited     INTEGER NOT NULL DEFAULT 0,
+      fetched_at     INTEGER NOT NULL,
+      PRIMARY KEY (symbol, contract_month)
+    );
+
+    -- One row per completed one-shot migration. Separate from the schema shape
+    -- because gating on "did I just create the column" strands a database whose
+    -- process died between ADD COLUMN and backfill.
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      name       TEXT    PRIMARY KEY,
+      applied_at INTEGER NOT NULL
+    );
+
     -- Operator-desired live subscriptions (consumer interests are ephemeral).
     -- Replayed to the AddOn on startup and every hello.
     CREATE TABLE IF NOT EXISTS live_subscriptions (
@@ -187,11 +210,38 @@ export function initializeSchema(db: Database.Database): void {
   // an external importer (e.g. 'databento') — see isImportedSource.
   ensureColumn(db, "candles", "source", "TEXT");
 
-  // Price basis of a cached bar: NULL means unknown (predates this column, and
-  // cannot be classified after the fact), else 'as_traded' | 'back_adjusted'.
-  if (ensureColumn(db, "candles", "price_basis", "TEXT")) {
-    db.exec("UPDATE candles SET price_basis = 'as_traded' WHERE price_basis IS NULL");
-  }
+  // NULL = unknown, else 'as_traded' | 'back_adjusted'. ATOMIC ON PURPOSE:
+  // ADD COLUMN, backfill and the completion marker commit together, so a
+  // mid-backfill crash re-attempts cleanly instead of stranding the column.
+  //
+  // A cache where an earlier blanket "stamp every NULL as_traded" already ran
+  // over NT8 rows is NOT repairable here — those labels are indistinguishable
+  // from legitimate ones, so it needs a manual purge and re-prefetch.
+  db.transaction(() => {
+    ensureColumn(db, "candles", "price_basis", "TEXT");
+    const done = db
+      .prepare("SELECT 1 FROM schema_migrations WHERE name = ?")
+      .get("price_basis_vendor_backfill");
+    if (done) return;
+    // Vendor rows only — as-traded by construction. NT8 rows stay NULL: their
+    // basis depended on the merge policy at fetch time, unknowable after the
+    // fact. Mirrors isImportedSource (data-source.ts).
+    db.exec(
+      `UPDATE candles SET price_basis = 'as_traded'
+        WHERE price_basis IS NULL
+          AND source IS NOT NULL
+          AND LOWER(TRIM(source)) NOT IN ('', 'nt8')`,
+    );
+    db.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(
+      "price_basis_vendor_backfill",
+      Math.floor(Date.now() / 1000),
+    );
+  })();
+  // NT8 FullName; NULL = unattested. NO backfill ever — different write paths
+  // can genuinely disagree on the contract for one session, indistinguishable
+  // after the fact. The splice refuses to cross a roll on unattested rows, so
+  // NULL is fail-closed rather than a default.
+  ensureColumn(db, "candles", "contract", "TEXT");
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");
@@ -204,18 +254,17 @@ export function initializeSchema(db: Database.Database): void {
   );
 }
 
-// Idempotent ADD COLUMN; SQLite has no `ADD COLUMN IF NOT EXISTS`. Returns true
-// only on actual creation, so callers can hang a one-time migration off that.
+// Idempotent ADD COLUMN. One-time work tied to a column gates on
+// schema_migrations, never on this returning true.
 function ensureColumn(
   db: Database.Database,
   table: string,
   column: string,
   decl: string,
-): boolean {
+): void {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
     name: string;
   }>;
-  if (cols.some((c) => c.name === column)) return false;
+  if (cols.some((c) => c.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
-  return true;
 }

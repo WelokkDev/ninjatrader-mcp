@@ -174,3 +174,9 @@ vite.config.ts.timestamp-*
 
 # Active Claude skills are personal/local — ship shareable ones as .claude/skill-templates/
 .claude/skills/
+
+# Personal, per-machine Claude Code permissions — never share (was tracked until 2026-08-18).
+.claude/settings.local.json
+
+# Personal trade exports
+Last_Trades.xlsx

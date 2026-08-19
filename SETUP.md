@@ -249,50 +249,66 @@ timeframes — no NT8 required. It runs `build/scripts/seed.js` directly, so
 **build first**. It's ES/NQ 15m only: useful to prove the cache works, not a
 substitute for real history.
 
-### Importing vendor history (Databento)
+### Vendor history (Databento) — not into this cache
 
 NT8 only retains about a year of tick data, and second-based bars are built from
-it — so a deeper `1s`/`5s` history has to come from outside. `npm run
-import-databento` loads a Databento DBN batch file into the cache:
+it, so a deeper `1s`/`5s` history still has to come from outside. It just does
+not come in *here*.
+
+**`data/candles.db` is the NT8 store, and only the NT8 store.** Vendor bars
+belong in a separate Parquet bar lake, and the two never mix in one table: the
+two sources roll contracts on different dates, so a range crossing a roll would
+hold different contracts depending on which rows happened to answer, with
+nothing in the response to say so. The old `npm run import-databento` /
+`npm run verify-import` pair wrote `source='databento'` rows straight into the
+cache — the exact thing that rule forbids — and has been removed.
+
+The bar lake and its ingest live in the **private module**, not in this repo (a
+fresh public clone has no lake and needs none — NT8 fills the cache). If you
+have a private module, the way in is `src/private/py/scripts/ingest_lake.py`.
+Session geometry is TS-owned and handed to Python as data, so it takes a
+resolved session-day envelope rather than computing one:
 
 ```
-npm run import-databento -- --file path/to/x.ohlcv-1s.dbn.zst --symbol MNQ --dry-run
-npm run import-databento -- --file path/to/x.ohlcv-1s.dbn.zst --symbol MNQ
+npm run build   # session-envelope.mjs reads the compiled session resolver
+
+node src/private/scripts/session-envelope.mjs \
+  --symbol MNQ --from 2024-01-02 --to 2026-08-13 --out src/private/py/mnq-days.json
+
+cd src/private/py && uv run --no-sync python scripts/ingest_lake.py \
+  --archive path/to/x.ohlcv-1s.dbn.zst --session mnq-days.json \
+  --symbol MNQ --timeframe 1s --dry-run
 ```
 
 Request the batch with `schema=ohlcv-1s` and a parent symbol (`MNQ.FUT`); the
-importer keeps outright contracts only and picks a **volume-ranked front month
-per session-day, without back-adjusting**. Start with `--dry-run` — it prints
-the resolved session-days and the roll schedule without writing.
+ingest keeps outright contracts only and picks a **volume-ranked front month per
+session-day, without back-adjusting** — ranked on the *previous* day's volume,
+so a roll day carries no lookahead. Drop `--dry-run` to write. It writes one
+Parquet partition per session-day and then derives the resample ladder; re-runs
+replace whole partitions, so repeating one is safe.
 
-Two things it handles that a hand-rolled CSV load will get wrong:
-
-- **Databento stamps an OHLCV bar at the interval START; this cache is
-  close-stamped.** The importer adds one period. Get this wrong and every bar
-  lands one period early — nothing errors, and backtests read the future.
-- Rows are written with `source='databento'`, which `classifySessionDay` treats
-  as immutable. Without it, a day whose geometry doesn't satisfy the validator
-  classifies `partial`, and `ensure_bars` refetches it from NT8 — replacing one
-  vendor's bars with another's inside a single series.
-
-Then cross-check the result against a coarser timeframe NT8 fetched
-independently:
+What stays in this repo is the read-only inspector. It never writes anywhere:
 
 ```
-npm run verify-import -- --symbol MNQ --fine 1s --coarse 5m
-npm run verify-import -- --symbol MNQ --fine 1s --coarse 5m --shift -1
+.venv-tools/Scripts/python scripts/inspect-dbn.py path/to/x.ohlcv-1s.dbn.zst
 ```
 
-The second run is the point: the chosen convention has to *beat* its neighbours,
-not merely look plausible on its own. Expect near-total OHLC agreement, minus
-the days where NT8 rolled contracts on a different date than the importer did.
+It prints the file's metadata, its `instrument_id -> raw_symbol` map and a
+per-contract per-day volume profile, and re-checks the two conversion
+assumptions any importer depends on — `ts_event` is the interval **start** in
+nanoseconds on an exact second boundary, and prices are int64 fixed-point at
+1e-9. (That first one is the classic silent bug: this cache is close-stamped, so
+an ingest that forgets to add a period lands every bar one period early, nothing
+errors, and backtests read the future.)
 
-Needs a one-time `python -m venv .venv-tools && .venv-tools/Scripts/pip install
-databento`. Deliberately its own venv, not `src/private/py/.venv` — public
-commands must not depend on the private module.
+It needs a one-time `python -m venv .venv-tools && .venv-tools/Scripts/pip
+install databento`. Deliberately its own venv, not `src/private/py/.venv` —
+public commands must not depend on the private module.
 
-The MCP server can stay running: the import commits per batch with a busy
-timeout, so live ingest interleaves rather than stalling.
+If an older import left vendor rows in your cache, `node
+build/scripts/evict-vendor-rows.js` reports them (`--confirm` deletes and
+VACUUMs). Run it only *after* the same range is in the lake and verified there:
+it cannot see the lake, and deliberately does not pretend to.
 
 ## 7. Smoke test — draw on a chart
 

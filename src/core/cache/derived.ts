@@ -72,14 +72,37 @@ export function writeDerivedForSessionDay(
     )
     .run(symbol, ...DERIVED_TIMEFRAMES, day.startUnix, day.endUnix);
 
+  // Exactly one distinct value across the day's 15m rows propagates, else
+  // NULL — a derived bar can't be more certain than what built it.
+  const basisRows = database
+    .prepare(
+      `SELECT DISTINCT price_basis AS pb FROM candles
+        WHERE symbol = ? AND timeframe = '15m'
+          AND timestamp > ? AND timestamp <= ?`,
+    )
+    .all(symbol, day.startUnix, day.endUnix) as Array<{ pb: string | null }>;
+  const priceBasis = basisRows.length === 1 ? basisRows[0].pb : null;
+
+  // Contract inherits by the same one-distinct-value-or-NULL rule.
+  const contractRows = database
+    .prepare(
+      `SELECT DISTINCT contract AS ct FROM candles
+        WHERE symbol = ? AND timeframe = '15m'
+          AND timestamp > ? AND timestamp <= ?`,
+    )
+    .all(symbol, day.startUnix, day.endUnix) as Array<{ ct: string | null }>;
+  const contract = contractRows.length === 1 ? contractRows[0].ct : null;
+
   const insertStmt = database.prepare(
     `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const [tf, aggCandles] of computed) {
     for (const a of aggCandles) {
-      insertStmt.run(symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume);
+      insertStmt.run(
+        symbol, tf, a.timestamp, a.open, a.high, a.low, a.close, a.volume, priceBasis, contract,
+      );
     }
     counts[tf] += aggCandles.length;
   }

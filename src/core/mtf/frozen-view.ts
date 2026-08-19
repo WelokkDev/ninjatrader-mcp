@@ -20,7 +20,6 @@ export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
 
 // Bucket index for a close-stamped bar within its session-day. The `- 1` is load-bearing (see bucketAsOf): 
 // it pulls a boundary close-stamp into the bucket whose data window it ends, not the next one. 
-// Exported so the build-once frozen-source precompute uses the EXACT same math (no drift).
 export function bucketIndexOf(
   timestamp: number,
   sessionDayStartUnix: number,

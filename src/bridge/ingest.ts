@@ -23,7 +23,8 @@ import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import { isSimulatedFeed } from "./data-source.js";
-import type { CandlesResponseMessage } from "./protocol.js";
+import { contractForLabel, loadRolloverWindows } from "./contract-windows.js";
+import type { BarCloseMessage, CandlesResponseMessage } from "./protocol.js";
 
 // Exported: the live runtime applies the same gate before /feed publish.
 export function isValidCandle(c: Candle): boolean {
@@ -63,6 +64,9 @@ export interface IngestOptions {
   // a merge-policy change is visible instead of silently mixing two price
   // series. Undefined leaves the column NULL, which reads as unknown.
   priceBasis?: string;
+  // NT8 FullName, per session-DAY: one merged fetch can span a roll and serve
+  // a different contract each side of it.
+  contractForDay?: (sessionDayLabel: string) => string | null;
 }
 
 export function ingestCandles(
@@ -153,9 +157,13 @@ export function ingestCandles(
 
   const insertStmt = database.prepare(
     `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const contractByDay = new Map<string, string | null>();
+  for (const label of perDayCount.keys()) {
+    contractByDay.set(label, opts.contractForDay?.(label) ?? null);
+  }
 
   let inserted = 0;
   // Doubles as a screen on incoming bars, so a mis-stamped bar the provider
@@ -202,6 +210,7 @@ export function ingestCandles(
       }
       insertStmt.run(
         symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume, priceBasis,
+        contractByDay.get(sessionDayLabel) ?? null,
       );
       inserted++;
     }
@@ -272,13 +281,35 @@ export function createCandlesResponseHandler(database: Database = db) {
       return;
     }
     try {
+      // The mirror is the attestation. msg.contract names only the current
+      // window, so a disagreement is logged, never trusted over the mirror.
+      const windows = loadRolloverWindows(database, msg.symbol);
+      // Newest, not first: days iterate ascending and the oldest is expected
+      // to mismatch, so a first-hit latch would hide a divergence on TODAY.
+      let newestMismatch: { label: string; fromMirror: string } | null = null;
       const result = ingestCandles(
         msg.symbol,
         msg.timeframe as Timeframe,
         msg.candles,
         database,
-        { mode: "day-refill", priceBasis: msg.priceBasis },
+        {
+          mode: "day-refill",
+          priceBasis: msg.priceBasis,
+          contractForDay: (label) => {
+            const fromMirror = contractForLabel(windows, msg.symbol, label);
+            if (fromMirror !== null && msg.contract !== undefined && msg.contract !== fromMirror) {
+              newestMismatch = { label, fromMirror };
+            }
+            return fromMirror;
+          },
+        },
       );
+      if (newestMismatch !== null) {
+        const { label, fromMirror } = newestMismatch;
+        console.error(
+          `[ingest] contract cross-check for ${msg.symbol} ${label}: mirror says ${fromMirror}, AddOn resolved ${msg.contract} — expected for days outside the current window; investigate if this names TODAY`,
+        );
+      }
       console.error(
         `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} dropped=${result.dropped} agg=${JSON.stringify(result.aggregated)}`,
       );
@@ -295,8 +326,9 @@ export function registerCandlesResponseHandler(): void {
   onMessage("candles_response", createCandlesResponseHandler());
 }
 
-export function registerLiveIngestHandler(): void {
-  onMessage("bar_close", (msg) => {
+/** Live counterpart of createCandlesResponseHandler, over an injectable DB. */
+export function createBarCloseHandler(database: Database = db) {
+  return (msg: BarCloseMessage): void => {
     // Same quarantine as the historical path.
     if (isSimulatedFeed(msg.dataSource)) {
       console.error(
@@ -305,10 +337,31 @@ export function registerLiveIngestHandler(): void {
       return;
     }
     try {
+      const windows = loadRolloverWindows(database, msg.symbol);
       const result = ingestCandles(
         msg.symbol,
         msg.timeframe as Timeframe,
         [msg.candle],
+        database,
+        // Shares the candles table with historical fetches, so it must carry
+        // the same basis label the AddOn computed per batch.
+        {
+          priceBasis: msg.priceBasis,
+          // msg.contract only, never the mirror: every bar_close is a trade of
+          // the subscribed instrument (even a stale `backfill` catch-up), so a
+          // mirror label would launder old-contract bars into the new era
+          // across a roll. Mismatches log; the splice enforces, not ingest.
+          contractForDay: (label) => {
+            const fromMirror = contractForLabel(windows, msg.symbol, label);
+            const fromSub = msg.contract ?? null;
+            if (fromSub !== null && fromMirror !== null && fromSub !== fromMirror) {
+              console.error(
+                `[ingest] bar_close contract mismatch for ${msg.symbol} ${label}: subscription serves ${fromSub}, mirror window says ${fromMirror} — NT8's continuous series has rolled but this subscription has not; its bars are the OLD contract until resubscribe`,
+              );
+            }
+            return fromSub;
+          },
+        },
       );
       console.error(
         `[ingest] bar_close ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} agg=${JSON.stringify(result.aggregated)}`,
@@ -317,5 +370,9 @@ export function registerLiveIngestHandler(): void {
       const m = err instanceof Error ? err.message : String(err);
       console.error(`[ingest] bar_close ingest failed for ${msg.symbol} ${msg.timeframe}: ${m}`);
     }
-  });
+  };
+}
+
+export function registerLiveIngestHandler(): void {
+  onMessage("bar_close", createBarCloseHandler());
 }

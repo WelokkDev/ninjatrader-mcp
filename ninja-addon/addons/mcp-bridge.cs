@@ -1228,11 +1228,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 						if (r == null) continue;
 						rows.Add(new Dictionary<string, object>
 						{
-							{ "contractMonth", r.ContractMonth.ToString("yyyy-MM-dd") },
-							{ "rolloverDate",  r.Date.ToString("yyyy-MM-dd") },
-							// Metadata only, never baked into the stored bars.
-							// wasEdited flags a hand-edited row — NT8 overwrites
-							// those with server values when it has them.
+							// InvariantCulture: a non-Gregorian Windows locale (e.g. th-TH)
+							// would render a year the ISO-lexicographic splice guard can't match.
+							{ "contractMonth", r.ContractMonth.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
+							{ "rolloverDate",  r.Date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
+							// Metadata only; wasEdited flags a hand-edit NT8 may overwrite.
 							{ "offset",        r.Offset },
 							{ "wasEdited",     r.WasEdited },
 						});
@@ -1350,7 +1350,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{
 					holidays.Add(new Dictionary<string, object>
 					{
-						{ "date",        kvp.Key.ToString("yyyy-MM-dd") },
+						// InvariantCulture, same reason as above.
+						{ "date",        kvp.Key.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
 						{ "description", kvp.Value ?? "" },
 					});
 				}
@@ -1364,7 +1365,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					var partial = kvp.Value;
 					partialHolidays.Add(new Dictionary<string, object>
 					{
-						{ "date",         kvp.Key.ToString("yyyy-MM-dd") },
+						{ "date",         kvp.Key.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
 						{ "isEarlyClose", partial != null && partial.IsEarlyEnd },
 						{ "isLateBegin",  partial != null && partial.IsLateBegin },
 						{ "description",  partial != null && partial.Description != null ? partial.Description : "" },
@@ -1603,7 +1604,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						}
 
 						SendCandlesResponse(id, symbol, resolvedTimeframe, candles,
-							EffectiveMergePolicy(barsRequest));
+							EffectiveMergePolicy(barsRequest), instrument.FullName);
 					}
 					catch (Exception ex)
 					{
@@ -1624,7 +1625,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		private void SendCandlesResponse(string id, string symbol, string timeframe,
-			List<object> candles, MergePolicy mergePolicy)
+			List<object> candles, MergePolicy mergePolicy, string contract)
 		{
 			var payload = new Dictionary<string, object>
 			{
@@ -1638,6 +1639,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "dataSource", ClassifyDataSource() },
 				{ "priceBasis",  PriceBasisOf(mergePolicy) },
 				{ "mergePolicy", mergePolicy.ToString() },
+				// Cross-check only: a merged request spans contracts, so this
+				// names the bound instrument, not a per-bar attestation.
+				{ "contract",    contract },
 			};
 			SendFireAndForget(Json.Serialize(payload),
 				"candles_response id=" + id + " count=" + candles.Count);

@@ -20,9 +20,7 @@
     "test:watch": "vitest",
     "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js",
     "dump-bars": "tsc && node build/scripts/dump-bars.js",
-    "audit-bars": "tsc && node build/scripts/audit-bars.js",
-    "import-databento": "tsc && node build/scripts/import-databento.js",
-    "verify-import": "tsc && node build/scripts/verify-import.js"
+    "audit-bars": "tsc && node build/scripts/audit-bars.js"
   },
   "files": [
     "build",
