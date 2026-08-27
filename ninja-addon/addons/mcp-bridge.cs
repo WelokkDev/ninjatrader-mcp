@@ -101,6 +101,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 		// filter on ClientResponse.Id (the value SendClientRequest returned) or
 		// on Kind, exactly as the draw events filter on Symbol.
 		public  static event Action<ClientResponse>   ClientResponseReceived;
+		// Server-connection edges for companion NinjaScripts: true once the
+		// server acknowledged our hello (token accepted, round trip proven),
+		// false the moment the socket tears down. Read IsServerConnected for
+		// the current state, subscribe here for changes. Like the events above,
+		// deliberately vocabulary-free — one bool, no protocol detail leaks.
+		public  static event Action<bool>             ServerConnectionChanged;
+
+		private volatile bool serverConnected;
+		public  bool IsServerConnected { get { return serverConnected; } }
 
 		// MaxJsonLength defaults to 2 MB and throws past it; a dense 1s session-day
 		// (up to ~8 MB) blows through that. Raised well clear of the 100 MB ws cap.
@@ -252,6 +261,20 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return null;
 			}
 			return id;
+		}
+
+		// Single writer for the connected flag so subscribers only ever see
+		// edges. Called from the socket read thread (hello_ack) and the run
+		// loop's teardown. Subscriber exceptions are swallowed here: a throwing
+		// companion must not tear down the connection or stall the reconnect.
+		private void SetServerConnected(bool value)
+		{
+			if (serverConnected == value) return;
+			serverConnected = value;
+			var handler = ServerConnectionChanged;
+			if (handler == null) return;
+			try { handler(value); }
+			catch (Exception ex) { Log("ServerConnectionChanged subscriber failed: " + ex.Message); }
 		}
 
 		// draw persistence store — retained on the AddOn (which outlives chart
@@ -517,6 +540,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				finally
 				{
 					socket = null;
+					SetServerConnected(false);
 				}
 
 				if (ct.IsCancellationRequested) break;
@@ -744,6 +768,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				case "hello_ack":
 					Log("hello_ack: serverVersion=" + GetString(obj, "serverVersion"));
+					// Connected means ACKNOWLEDGED, not just socket-open: this is
+					// the same moment SETUP.md calls the one that matters.
+					SetServerConnected(true);
 					break;
 
 				case "draw_zone":
