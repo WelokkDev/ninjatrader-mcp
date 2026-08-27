@@ -102,6 +102,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 		// on Kind, exactly as the draw events filter on Symbol.
 		public  static event Action<ClientResponse>   ClientResponseReceived;
 
+		// Server-connection edges for companion NinjaScripts
+		public  static event Action<bool>             ServerConnectionChanged;
+
+		private volatile bool serverConnected;
+		public  bool IsServerConnected { get { return serverConnected; } }
+
 		// MaxJsonLength defaults to 2 MB and throws past it; a dense 1s session-day
 		// (up to ~8 MB) blows through that. Raised well clear of the 100 MB ws cap.
 		private static readonly JavaScriptSerializer Json =
@@ -252,6 +258,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return null;
 			}
 			return id;
+		}
+
+		// Single writer for the connected flag so subscribers only ever see edges.
+		private void SetServerConnected(bool value)
+		{
+			if (serverConnected == value) return;
+			serverConnected = value;
+			var handler = ServerConnectionChanged;
+			if (handler == null) return;
+			try { handler(value); }
+			catch (Exception ex) { Log("ServerConnectionChanged subscriber failed: " + ex.Message); }
 		}
 
 		// draw persistence store — retained on the AddOn (which outlives chart
@@ -517,6 +534,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				finally
 				{
 					socket = null;
+					SetServerConnected(false);
 				}
 
 				if (ct.IsCancellationRequested) break;
@@ -744,6 +762,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				case "hello_ack":
 					Log("hello_ack: serverVersion=" + GetString(obj, "serverVersion"));
+					SetServerConnected(true);
 					break;
 
 				case "draw_zone":
