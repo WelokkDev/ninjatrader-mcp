@@ -298,7 +298,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 			catch (Exception ex) { Log("draw(generic) failed: " + ex.Message); }
 		}
 
-		// Apply one clear command.
 		private void ApplyClear(ClearZonesCommand clr)
 		{
 			try

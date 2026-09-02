@@ -54,7 +54,6 @@ export interface Funnel {
   yes: number;
   /** "no" decisions grouped by the short reason code that killed them. */
   byReason: Record<string, number>;
-  /** Optional per-step reached/passed/failed breakdown. */
   byStep?: Record<string, { reached: number; passed: number; failed: number }>;
 }
 

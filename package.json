@@ -12,7 +12,7 @@
     "init-private": "node scripts/init-private.mjs",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "typecheck:private": "tsc -p tsconfig.private.json --noEmit",
+    "typecheck:private": "node scripts/build-private.mjs --typecheck",
     "inspect": "npx @modelcontextprotocol/inspector build/index.js",
     "seed": "node build/scripts/seed.js",
     "start": "node build/index.js",
