@@ -52,6 +52,55 @@ export function contractName(symbol: string, contractMonth: string): string {
   return `${symbol} ${m[2]}-${m[1].slice(2)}`;
 }
 
+const MMM = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** Delivery month behind an NT8 contract name. Installs render `FullName` as
+ *  either "NQ 09-26" or "NQ SEP26", so comparing raw strings silently breaks
+ *  every cross-check between a mirror-built name and a wire-reported one. */
+export function parseContractName(
+  name: string,
+): { symbol: string; year: number; month: number } | null {
+  const m = /^(\S+)\s+(?:(\d{2})-(\d{2})|([A-Za-z]{3})(\d{2}))$/.exec(name.trim());
+  if (!m) return null;
+  const symbol = m[1];
+  if (m[2] !== undefined) {
+    const month = Number(m[2]);
+    if (month < 1 || month > 12) return null;
+    return { symbol, year: 2000 + Number(m[3]), month };
+  }
+  const idx = MMM.indexOf(m[4].toUpperCase());
+  if (idx < 0) return null;
+  return { symbol, year: 2000 + Number(m[5]), month: idx + 1 };
+}
+
+/** Same instrument and delivery month, in either rendering. Unparseable names
+ *  fall back to exact equality rather than being treated as a match. */
+export function sameContract(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const pa = parseContractName(a);
+  const pb = parseContractName(b);
+  if (pa === null || pb === null) return a.trim() === b.trim();
+  return (
+    pa.symbol.toUpperCase() === pb.symbol.toUpperCase() &&
+    pa.year === pb.year &&
+    pa.month === pb.month
+  );
+}
+
+/** The window covering `label`. Exposed so callers can ask whether a window has
+ *  opened yet, which `contractForLabel` alone cannot answer. */
+export function windowForLabel(
+  windows: RolloverWindow[],
+  label: string,
+): RolloverWindow | null {
+  let current: RolloverWindow | null = null;
+  for (const w of windows) {
+    if (w.rolloverDate <= label) current = w;
+    else break;
+  }
+  return current;
+}
+
 /** Contract serving session-day `label`. Null when no window covers it —
  *  unattested, never guessed. */
 export function contractForLabel(
@@ -59,10 +108,6 @@ export function contractForLabel(
   symbol: string,
   label: string,
 ): string | null {
-  let current: RolloverWindow | null = null;
-  for (const w of windows) {
-    if (w.rolloverDate <= label) current = w;
-    else break;
-  }
+  const current = windowForLabel(windows, label);
   return current ? contractName(symbol, current.contractMonth) : null;
 }

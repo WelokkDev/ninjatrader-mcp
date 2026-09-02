@@ -9,6 +9,11 @@ import { registerHelloSync, runHelloSync, type HelloSyncResult } from "./hello-s
 // per connection, since NinjaTrader revises rows in place. Table doctrine lives
 // on the contract_rollovers DDL in db/schema.ts. Fail-soft throughout.
 
+// The AddOn dispatches request_rollovers inline and its first call per symbol
+// pays a full catalog resolve. runHelloSync bails on the FIRST timeout, so at
+// the 10s default one slow symbol leaves the whole mirror unwritten.
+const ROLLOVER_SYNC_TIMEOUT_MS = 30_000;
+
 export interface RolloverSyncDeps {
   db: Database;
   request: (
@@ -36,7 +41,7 @@ export async function syncContractRollovers(
     requestType: "request_rollovers",
     items: Object.keys(REGISTRY),
     syncOne: async (symbol) => {
-      const res = await deps.request("request_rollovers", { symbol });
+      const res = await deps.request("request_rollovers", { symbol }, ROLLOVER_SYNC_TIMEOUT_MS);
       if (!isInboundType(res, "rollovers_response")) {
         const t = res && typeof res === "object" ? (res as { type?: unknown }).type : res;
         throw new Error(`unexpected reply type: ${String(t)}`);

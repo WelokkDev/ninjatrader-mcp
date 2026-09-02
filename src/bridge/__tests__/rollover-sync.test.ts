@@ -113,6 +113,22 @@ describe("syncContractRollovers", () => {
     });
   });
 
+  it("allows longer than the bridge default — one slow resolve must not lose the mirror", async () => {
+    // At the 10s default the first symbol timed out and runHelloSync bailed on
+    // the rest, so the whole mirror went unwritten while NT8 answered correctly.
+    const request = vi.fn(
+      async (_type: string, payload: Record<string, unknown>, _timeoutMs?: number) =>
+        rolloversResponse(payload.symbol, NQ_ROLLOVERS),
+    );
+
+    await syncContractRollovers({ db, request, nowUnix: 1_700_000_000 });
+
+    expect(request).toHaveBeenCalled();
+    for (const call of request.mock.calls) {
+      expect(call[2]).toBeGreaterThan(10_000);
+    }
+  });
+
   it("surfaces the effective merge policy on every sync — the silent-flip alarm", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     const request = vi.fn(async (_t: string, payload: Record<string, unknown>) =>

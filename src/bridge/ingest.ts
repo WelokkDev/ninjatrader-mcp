@@ -23,7 +23,13 @@ import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import { isSimulatedFeed } from "./data-source.js";
-import { contractForLabel, loadRolloverWindows } from "./contract-windows.js";
+import {
+  contractForLabel,
+  contractName,
+  loadRolloverWindows,
+  sameContract,
+} from "./contract-windows.js";
+import { tzParts } from "../core/time.js";
 import type { BarCloseMessage, CandlesResponseMessage } from "./protocol.js";
 
 // Exported: the live runtime applies the same gate before /feed publish.
@@ -271,8 +277,12 @@ export function ingestCandles(
  * response still lands in the cache, so the next query sees those days
  * complete instead of refetching from zero.
  */
-export function createCandlesResponseHandler(database: Database = db) {
+export function createCandlesResponseHandler(
+  database: Database = db,
+  now: () => number = () => Math.floor(Date.now() / 1000),
+) {
   return (msg: CandlesResponseMessage): void => {
+    const nowUnix = now();
     // Real-data-only cache: reject sim-feed bars before they reach SQLite.
     if (isSimulatedFeed(msg.dataSource)) {
       console.error(
@@ -280,10 +290,45 @@ export function createCandlesResponseHandler(database: Database = db) {
       );
       return;
     }
+    // One expiry's own series, not the front-month view the cache keys on.
+    if (msg.pinned === true) return;
     try {
       // The mirror is the attestation. msg.contract names only the current
       // window, so a disagreement is logged, never trusted over the mirror.
       const windows = loadRolloverWindows(database, msg.symbol);
+
+      // Refuse only what is PROVABLY wrong: a contract whose own rollover window
+      // has not opened, i.e. NT8 ran ahead of its table. Any other disagreement
+      // is more likely a stale mirror, and refusing on that would stop all
+      // caching for days after a real roll.
+      if (msg.contract !== undefined && windows.length > 0) {
+        const tz = getInstrumentConfig(msg.symbol).session.timezone;
+        const p = tzParts(nowUnix, tz);
+        const todayLabel = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+        const openNow = contractForLabel(windows, msg.symbol, todayLabel);
+        if (openNow !== null && !sameContract(msg.contract, openNow)) {
+          const scheduled = windows.find((w) =>
+            sameContract(contractName(msg.symbol, w.contractMonth), msg.contract),
+          );
+          if (scheduled !== undefined && scheduled.rolloverDate > todayLabel) {
+            console.error(
+              `[ingest] REFUSED ${msg.candles.length} candle(s) for ${msg.symbol} ${msg.timeframe} — ` +
+                `NT8 bound ${msg.contract}, whose rollover window does not open until ` +
+                `${scheduled.rolloverDate}; ${openNow} is front until then. These are the wrong ` +
+                `contract's prices. Check [McpBridge] ResolveInstrument in NinjaScript Output tab 1. ` +
+                `Nothing was cached.`,
+            );
+            return;
+          }
+          console.error(
+            `[ingest] contract attestation for ${msg.symbol} ${msg.timeframe}: NT8 bound ` +
+              `${msg.contract} but the mirror calls ${openNow} front today. The mirror re-syncs ` +
+              `only on an NT8 hello, so a roll it has not seen looks exactly like this — caching ` +
+              `anyway, per-row labels still come from the mirror. Verify before trusting these bars.`,
+          );
+        }
+      }
+
       // Newest, not first: days iterate ascending and the oldest is expected
       // to mismatch, so a first-hit latch would hide a divergence on TODAY.
       let newestMismatch: { label: string; fromMirror: string } | null = null;
@@ -297,7 +342,13 @@ export function createCandlesResponseHandler(database: Database = db) {
           priceBasis: msg.priceBasis,
           contractForDay: (label) => {
             const fromMirror = contractForLabel(windows, msg.symbol, label);
-            if (fromMirror !== null && msg.contract !== undefined && msg.contract !== fromMirror) {
+            // Delivery month, not bytes: raw equality fired on every day of
+            // every fetch here, burying real divergences in the noise.
+            if (
+              fromMirror !== null &&
+              msg.contract !== undefined &&
+              !sameContract(msg.contract, fromMirror)
+            ) {
               newestMismatch = { label, fromMirror };
             }
             return fromMirror;

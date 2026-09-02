@@ -9,7 +9,13 @@ import {
 import { getInstrumentConfig } from "../../core/sessions/registry.js";
 import { loadCalendar } from "../../core/sessions/calendar.js";
 import { recomputeDerivedForSessionDay } from "../../core/cache/derived.js";
-import { contractForLabel, contractName, loadRolloverWindows } from "../contract-windows.js";
+import {
+  contractForLabel,
+  contractName,
+  loadRolloverWindows,
+  parseContractName,
+  sameContract,
+} from "../contract-windows.js";
 
 // Contract identity through the ingest write paths: mirror windows label
 // merged historical fetches, the bar_close `contract` field labels live bars.
@@ -25,6 +31,8 @@ const D11_START = dayStart(2026, 6, 11); // session 2026-06-11 (old contract)
 const D12_START = dayStart(2026, 6, 12); // session 2026-06-12 (NT8 rolls here)
 const D12_END = D12_START + 82_800;
 const AFTER = D12_END + 3_600;
+// Fixed clock: the attestation gate asks which window is open "today".
+const NOW = Date.UTC(2026, 8, 2) / 1000; // 2026-09-02
 
 function memDb() {
   const db = new Database(":memory:");
@@ -73,6 +81,25 @@ describe("contract-windows mapping", () => {
     expect(contractName("MNQ", "2027-03-01")).toBe("MNQ 03-27");
   });
 
+  it("reads a delivery month out of BOTH renderings NT8 uses", () => {
+    expect(parseContractName("NQ SEP26")).toEqual({ symbol: "NQ", year: 2026, month: 9 });
+    expect(parseContractName("NQ 09-26")).toEqual({ symbol: "NQ", year: 2026, month: 9 });
+    expect(parseContractName("MNQ dec27")).toEqual({ symbol: "MNQ", year: 2027, month: 12 });
+    expect(parseContractName("NQ")).toBeNull();
+    expect(parseContractName("NQ 13-26")).toBeNull(); // no 13th month
+    expect(parseContractName("NQ XYZ26")).toBeNull();
+  });
+
+  it("treats the two spellings as one contract, and unparseable names as literal", () => {
+    expect(sameContract("NQ SEP26", "NQ 09-26")).toBe(true);
+    expect(sameContract("NQ SEP26", "NQ DEC26")).toBe(false);
+    expect(sameContract("NQ SEP26", "MNQ SEP26")).toBe(false);
+    // Unknown format must never be assumed to match something.
+    expect(sameContract("weird", "NQ 09-26")).toBe(false);
+    expect(sameContract("weird", "weird")).toBe(true);
+    expect(sameContract(undefined, "NQ 09-26")).toBe(false);
+  });
+
   it("refuses a corrupt mirror whole — one non-canonical date labels nothing", () => {
     // Dropping just the bad row would shift attribution for its neighbours.
     const db = memDb();
@@ -110,13 +137,112 @@ describe("contract-windows mapping", () => {
     expect(loadRolloverWindows(db, "NQ")).toEqual([]);
   });
 
-  it("the cross-check warn names the NEWEST mismatching day, not the oldest", () => {
-    // Days iterate ascending, so a first-hit latch always fires on the oldest
-    // (expected) day and hides the interesting case.
+  it("never caches a pinned response — one expiry's series is not the front-month view", () => {
+    const db = memDb();
+    createCandlesResponseHandler(db, () => NOW)({
+      v: 1,
+      id: "t-pinned",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "15m",
+      candles: bars15m(D12_START, 1, 92),
+      dataSource: "My Broker Feed",
+      contract: "NQ SEP26",
+      pinned: true,
+    });
+    expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual([]);
+  });
+
+  it("caches normally when NT8 spells the SAME contract the other way round", () => {
+    // The mirror only builds "NQ 09-26"; FullName here is "NQ SEP26". Comparing
+    // those as strings refuses every correct fetch.
+    const db = memDb();
+    createCandlesResponseHandler(db, () => NOW)({
+      v: 1,
+      id: "t-spelling",
+      type: "candles_response",
+      symbol: "NQ",
+      timeframe: "15m",
+      candles: bars15m(D12_START, 1, 92),
+      dataSource: "My Broker Feed",
+      contract: "NQ SEP26", // same contract the mirror calls NQ 09-26
+    });
+    expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual(["NQ 09-26"]);
+  });
+
+  it("refuses bars from a contract whose rollover window has not opened yet", () => {
+    // NT8 ran ahead of its own table and bound December while September was
+    // still front — provably wrong, so nothing is cached.
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const db = memDb();
-      createCandlesResponseHandler(db)({
+      db.prepare(
+        `INSERT INTO contract_rollovers
+           (symbol, contract_month, rollover_date, offset_points, was_edited, fetched_at)
+         VALUES (?, ?, ?, ?, 0, 1)`,
+      ).run("NQ", "2026-12-01", "2026-09-14", 0); // opens 12 days after NOW
+      createCandlesResponseHandler(db, () => NOW)({
+        v: 1,
+        id: "t-refuse",
+        type: "candles_response",
+        symbol: "NQ",
+        timeframe: "15m",
+        candles: bars15m(D12_START, 1, 92),
+        dataSource: "My Broker Feed",
+        contract: "NQ DEC26",
+      });
+      expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual([]);
+      const refusals = log.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes("REFUSED"));
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toContain("2026-09-14");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("caches, loudly, when the mirror simply has not seen the roll yet", () => {
+    // Indistinguishable from a wrong bind except that no window names the bound
+    // contract. Refusing here would stop all caching for days after a real roll.
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const db = memDb(); // no December window: mirror predates the roll
+      const afterRoll = Date.UTC(2026, 8, 20) / 1000; // 2026-09-20
+      createCandlesResponseHandler(db, () => afterRoll)({
+        v: 1,
+        id: "t-stale",
+        type: "candles_response",
+        symbol: "NQ",
+        timeframe: "15m",
+        candles: bars15m(D12_START, 1, 92),
+        dataSource: "My Broker Feed",
+        contract: "NQ DEC26",
+      });
+      expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual(["NQ 09-26"]);
+      const warns = log.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes("contract attestation"));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain("NQ DEC26");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("the cross-check warn names the NEWEST mismatching day, not the oldest", () => {
+    // A first-hit latch always fires on the oldest (expected) day. Needs a clock
+    // past a third rollover so the bound contract is front and passes the gate.
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const db = memDb();
+      db.prepare(
+        `INSERT INTO contract_rollovers
+           (symbol, contract_month, rollover_date, offset_points, was_edited, fetched_at)
+         VALUES (?, ?, ?, ?, 0, 1)`,
+      ).run("NQ", "2026-12-01", "2026-09-14", 0);
+      const afterRoll = Date.UTC(2026, 8, 20) / 1000; // 2026-09-20, Dec is front
+      createCandlesResponseHandler(db, () => afterRoll)({
         v: 1,
         id: "t-newest",
         type: "candles_response",
@@ -124,7 +250,7 @@ describe("contract-windows mapping", () => {
         timeframe: "15m",
         candles: [...bars15m(D11_START, 1, 92), ...bars15m(D12_START, 1, 92)],
         dataSource: "My Broker Feed",
-        contract: "NQ 12-26", // mismatches BOTH days' mirror labels
+        contract: "NQ DEC26",
       });
       const warns = log.mock.calls
         .map((c) => String(c[0]))

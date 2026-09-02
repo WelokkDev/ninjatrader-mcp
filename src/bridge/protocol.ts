@@ -144,6 +144,9 @@ export const requestCandlesMessageSchema = reqMsg("request_candles", {
   to: z.number(),
   // Session-template name; AddOn fails the request closed on a missing/unknown template.
   tradingHoursTemplate: z.string(),
+  // Bind ONE expiry instead of the AddOn's front-month guess. The reply comes
+  // back `pinned`, and ingest never caches a pinned reply.
+  contract: z.string().optional(),
 });
 export type RequestCandlesMessage = z.infer<typeof requestCandlesMessageSchema>;
 
@@ -171,6 +174,9 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   // Cross-check only — a merged request spans contracts, so per-row labels
   // come from contract-windows.ts instead.
   contract: z.string().optional(),
+  // Pinned: `contract` IS the per-bar truth, and these bars are not cached.
+  // Older AddOns omit it.
+  pinned: z.boolean().optional(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 

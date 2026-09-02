@@ -20,6 +20,7 @@ export {
 } from "./bridge/client-requests.js";
 
 import { registerGetCandles } from "./tools/get-candles.js";
+import { registerGetContractCandles } from "./tools/get-contract-candles.js";
 import { registerResolveSessionDays } from "./tools/resolve-session-days.js";
 import { registerPrefetchTools } from "./tools/prefetch-candles.js";
 import { registerDraw } from "./tools/draw.js";
@@ -82,6 +83,7 @@ export function registerGenericTools(
     register();
   };
   unless(["get_candles"], () => registerGetCandles(server));
+  unless(["get_contract_candles"], () => registerGetContractCandles(server));
   unless(["resolve_session_days"], () => registerResolveSessionDays(server));
   unless(["prefetch_candles", "prefetch_status", "prefetch_cancel"], () =>
     registerPrefetchTools(server),
