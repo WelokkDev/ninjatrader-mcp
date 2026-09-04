@@ -15,7 +15,8 @@ import {
 import { expectedRawGrid } from "../core/cache/purge.js";
 import { ensureCached } from "../core/cache/fill.js";
 import { isValidCandle } from "../bridge/ingest.js";
-import type { EnsureBarsSummary } from "../bridge/consumer.js";
+import type { EnsureBarsSummary, ResolutionSummary } from "../bridge/consumer.js";
+import { isInboundType } from "../bridge/protocol.js";
 import type {
   BarCloseMessage,
   HelloMessage,
@@ -325,6 +326,7 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
       list: () => runtime!.registry.list(),
       ensureBars: (symbol, tf, fromUnix, toUnix) =>
         runtime!.ensureBars(symbol, tf, fromUnix, toUnix),
+      resolveInstrument: (symbol) => resolveInstrumentViaBridge(bridgeRequest, symbol),
     },
     runtime.bus,
   );
@@ -337,6 +339,29 @@ export function startLiveFeedRuntime(): LiveFeedRuntime {
     pull: () => runtime!.positions.pull(),
   });
   return runtime;
+}
+
+const RESOLVE_TIMEOUT_MS = 20_000; // a cold miss scans NT8's instrument catalog
+
+async function resolveInstrumentViaBridge(
+  request: (
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => Promise<unknown>,
+  symbol: string,
+): Promise<ResolutionSummary> {
+  const reply = await request("resolve_instrument", { symbol }, RESOLVE_TIMEOUT_MS);
+  if (!isInboundType(reply, "resolve_instrument_result")) {
+    const t = reply && typeof reply === "object" ? (reply as { type?: unknown }).type : reply;
+    throw new Error(`unexpected reply type: ${String(t)}`);
+  }
+  return {
+    contract: reply.contract,
+    source: reply.source,
+    attested: reply.attested,
+    tradable: reply.tradable,
+  };
 }
 
 export function getLiveFeedRuntime(): LiveFeedRuntime | null {

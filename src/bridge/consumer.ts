@@ -109,6 +109,8 @@ export interface ConsumerHubBinding {
   ) => Promise<{ removedUpstream: boolean; pendingUpstreamRelease?: boolean }>;
   releaseAllForSource: (source: string) => Promise<void>;
   list: () => LiveSubState[];
+  /** Arming preflight: what a bare symbol binds now, and on whose authority. */
+  resolveInstrument: (symbol: string) => Promise<ResolutionSummary>;
   /** Fill cache gaps for (fromUnix, toUnix] at a raw TF via the get_candles
    *  fill path — a bot's self-serve warm-up. Read-path only. */
   ensureBars: (
@@ -117,6 +119,13 @@ export interface ConsumerHubBinding {
     fromUnix: number,
     toUnix: number,
   ) => Promise<EnsureBarsSummary>;
+}
+
+export interface ResolutionSummary {
+  contract: string | null;
+  source: string;
+  attested: boolean;
+  tradable: boolean;
 }
 
 interface ConsumerConn {
@@ -420,6 +429,38 @@ export class ConsumerHub {
           fail(err instanceof Error ? err.message : String(err));
         } finally {
           conn.ensureInFlight = false;
+        }
+        return;
+      }
+      case "resolve_instrument": {
+        const reqId = typeof msg.reqId === "string" ? msg.reqId : null;
+        const fail = (message: string): void =>
+          this.send(conn, {
+            type: "resolve_instrument_result",
+            ...(reqId !== null ? { reqId } : {}),
+            ok: false,
+            error: message,
+          });
+        const symbol = fStr(msg, "symbol");
+        if (symbol === undefined || symbol.length === 0) {
+          fail("resolve_instrument: missing symbol");
+          return;
+        }
+        if (!this.binding) {
+          fail("live feed runtime not started");
+          return;
+        }
+        try {
+          const r = await this.binding.resolveInstrument(symbol);
+          this.send(conn, {
+            type: "resolve_instrument_result",
+            ...(reqId !== null ? { reqId } : {}),
+            ok: true,
+            symbol,
+            ...r,
+          });
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
         }
         return;
       }

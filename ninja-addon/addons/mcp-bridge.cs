@@ -135,11 +135,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private readonly ConcurrentDictionary<string, byte> registeredSymbols
 			= new ConcurrentDictionary<string, byte>();
 
-		// Keyed "<symbol>|<yyyy-MM-dd ET>". Concurrent rather than lock-guarded:
-		// HandleSubscribeBars resolves immediately before taking liveLock, and a
-		// new lock there would add an ordering.
-		private readonly ConcurrentDictionary<string, Instrument> instrumentCache
-			= new ConcurrentDictionary<string, Instrument>();
+		// Concurrent, not lock-guarded: a lock here would add an ordering under liveLock.
+		private readonly ConcurrentDictionary<string, Resolution> instrumentCache
+			= new ConcurrentDictionary<string, Resolution>();
+		private string lastRebindSessionDate;
 
 		// Authoritative store of active drawings, keyed by symbol.
 		private readonly Dictionary<string, List<StoredDraw>> drawStore
@@ -164,6 +163,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 			public string      TradingHoursTemplate; // internal key, for reconnect re-resolution
 			public int         TfSeconds;
 			public Instrument  Instrument;
+			public string      Source;     // how Instrument was chosen — see Resolution
+			public bool        Attested;
 			public BarsRequest Request;
 			// Per-sub closure (no reliance on Update's undocumented sender);
 			// kept for detach.
@@ -523,6 +524,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 						backoffMs = ReconnectMinMs;
 
 						await SendHelloAsync(socket, ct);
+						instrumentCache.Clear();
+						lastRebindSessionDate = null;
+						MaybeRebindOnSessionChange("hello");
 
 						var heartbeatTask = Task.Run(() => HeartbeatLoopAsync(socket, ct));
 						await ReadLoopAsync(socket, ct);
@@ -629,6 +633,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				await DelayOrCancel(HeartbeatIntervalMs, ct);
 				if (ct.IsCancellationRequested || ws.State != WebSocketState.Open) break;
+				MaybeRebindOnSessionChange("session");
 				try { await SendJsonAsync(ws, hb, ct); }
 				catch (Exception ex) { Log("heartbeat send failed: " + ex.Message); break; }
 			}
@@ -918,12 +923,12 @@ namespace NinjaTrader.NinjaScript.AddOns
 					break;
 				}
 
-				case "request_session_calendar":
-					HandleRequestSessionCalendar(obj);
+				case "resolve_instrument":
+					HandleResolveInstrument(obj);
 					break;
 
-				case "request_rollovers":
-					HandleRequestRollovers(obj);
+				case "request_session_calendar":
+					HandleRequestSessionCalendar(obj);
 					break;
 
 				case "request_open_charts":
@@ -1060,9 +1065,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 
-		private static DateTime TodayEastern()
+		// NT8's session, and its roll, begin at 18:00 ET: from then on the date
+		// that matters is tomorrow's.
+		private static DateTime SessionDateEastern()
 		{
-			return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, EasternTz).Date;
+			return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, EasternTz).AddHours(6).Date;
 		}
 
 		// Rejects NT8's non-contract records: the template (MinValue/1900) and the
@@ -1079,17 +1086,30 @@ namespace NinjaTrader.NinjaScript.AddOns
 			catch { return false; }
 		}
 
+		// Stop trading on the third Friday of the delivery month. Mirrors REGISTRY.
+		private static readonly HashSet<string> QuarterlyIndexRoots =
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+			{ "ES", "NQ", "YM", "RTY", "MES", "MNQ", "MYM", "M2K" };
+
 		// NT8's Expiry is the FIRST of the delivery month, not the last trading day
-		// (NQ DEC26 reads 2026-12-01). Comparing it against today would mark the
-		// front month expired from the 2nd onward; compare against the month end.
+		// (NQ DEC26 reads 2026-12-01); there is no other date member.
+		private static DateTime LastTradeDay(Instrument inst)
+		{
+			var e    = inst.Expiry;
+			var root = inst.MasterInstrument != null ? inst.MasterInstrument.Name : "";
+			if (QuarterlyIndexRoots.Contains(root))
+			{
+				var first  = new DateTime(e.Year, e.Month, 1);
+				var toFri  = ((int) DayOfWeek.Friday - (int) first.DayOfWeek + 7) % 7;
+				return first.AddDays(toFri + 14);
+			}
+			return new DateTime(e.Year, e.Month, DateTime.DaysInMonth(e.Year, e.Month));
+		}
+
 		private static bool IsUnexpired(Instrument inst, DateTime today)
 		{
 			if (!IsRealContract(inst)) return false;
-			try
-			{
-				var e = inst.Expiry;
-				return new DateTime(e.Year, e.Month, DateTime.DaysInMonth(e.Year, e.Month)) >= today;
-			}
+			try { return LastTradeDay(inst) >= today; }
 			catch { return false; }
 		}
 
@@ -1147,8 +1167,20 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return null;
 		}
 
+		// What resolved, and on whose authority. Reads take any real contract;
+		// risk-adding orders need attested + tradable; risk-reducing ops reach
+		// every exposed contract.
+		private sealed class Resolution
+		{
+			public Instrument Instrument;
+			public string     Source;    // "explicit" | "rollover-table" | "expiry-scan" | "name-probe"
+			public bool       Attested;  // explicit name, or NT8's own rollover table
+			public bool       Tradable;  // real and not past its last trading day
+			public static readonly Resolution None = new Resolution { Source = "none" };
+		}
+
 		// The authority on which contract is front: the active row is the latest
-		// whose Date has passed. Windows are [Date, next Date), matching the mirror.
+		// whose Date has passed. Windows are [Date, next Date), matching the server.
 		private Instrument FrontMonthFromRollovers(string symbol, DateTime today)
 		{
 			var inv    = System.Globalization.CultureInfo.InvariantCulture;
@@ -1176,12 +1208,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 				foreach (var r in coll)
 				{
 					if (r == null) continue;
-					// The mirror compares yyyy-MM-dd, so a time-of-day here would make
-					// the two disagree for the whole rollover day.
-					var rd = r.Date.Date;
+					if (r.ContractMonth == DateTime.MinValue || r.Date == DateTime.MinValue) continue;
+					var rd = r.Date.Date; // the server compares yyyy-MM-dd
 					if (rd > today) continue;              // window has not opened yet
 					if (found && rd < bestRoll) continue;  // keep the latest opened window
-					if (r.ContractMonth == DateTime.MinValue) continue;
 					bestRoll  = rd;
 					bestMonth = r.ContractMonth;
 					found     = true;
@@ -1231,7 +1261,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 			catch (Exception ex)
 			{
+				// A name-probe guess would carry the table's authority, which it no longer has.
 				Log("ResolveInstrument: delivery-month scan threw for '" + symbol + "': " + ex.Message);
+				return null;
 			}
 
 			// Fallback: ask NT by name, in case the month is not enumerated.
@@ -1240,7 +1272,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				Instrument inst = null;
 				try { inst = Instrument.GetInstrument(cand); }
 				catch (Exception ex) { Log("ResolveInstrument: GetInstrument('" + cand + "') threw: " + ex.Message); continue; }
-				if (IsRealContract(inst) && inst.Expiry.Year == bestMonth.Year && inst.Expiry.Month == bestMonth.Month)
+				if (IsUnexpired(inst, today) && inst.Expiry.Year == bestMonth.Year && inst.Expiry.Month == bestMonth.Month)
 				{
 					Log("ResolveInstrument: rollover table → '" + cand + "' " + wanted
 						+ " → " + DescribeInstrument(inst));
@@ -1253,32 +1285,32 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return null;
 		}
 
+		// Read-path resolution: any real contract, best authority first.
 		private Instrument ResolveInstrument(string symbol)
 		{
-			if (string.IsNullOrEmpty(symbol)) return null;
+			return Resolve(symbol).Instrument;
+		}
 
-			var today = TodayEastern();
+		private Resolution Resolve(string symbol)
+		{
+			if (string.IsNullOrEmpty(symbol)) return Resolution.None;
+
+			var today = SessionDateEastern();
 			var inv   = System.Globalization.CultureInfo.InvariantCulture;
 			var key   = symbol + "|" + today.ToString("yyyy-MM-dd", inv);
 
-			// A miss costs a full Instrument.All enumeration (32k+), and
-			// request_candles/request_rollovers dispatch inline on the read thread.
-			Instrument cached;
-			if (instrumentCache.TryGetValue(key, out cached) && cached != null) return cached;
+			// Attested answers only: a guess must stay retryable, never served as fact.
+			Resolution cached;
+			if (instrumentCache.TryGetValue(key, out cached)) return cached;
 
-			bool attested;
-			var resolved = ResolveInstrumentUncached(symbol, today, out attested);
-			// Fallback answers are never cached: one transient enumeration failure
-			// would otherwise pin a guess for the rest of the day.
-			if (resolved != null && attested) instrumentCache[key] = resolved;
-			return resolved;
+			var r = ResolveUncached(symbol, today);
+			if (r.Instrument != null && r.Attested) instrumentCache[key] = r;
+			return r;
 		}
 
-		private Instrument ResolveInstrumentUncached(string symbol, DateTime today, out bool attested)
+		private Resolution ResolveUncached(string symbol, DateTime today)
 		{
-			attested = true;
-
-			// 1) The caller picked the expiry, so gate only on "is a real contract".
+			// 1) The caller picked the expiry: honour it, never substitute.
 			if (IsFullContractName(symbol))
 			{
 				Instrument inst = null;
@@ -1287,23 +1319,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 				if (IsRealContract(inst))
 				{
 					Log("ResolveInstrument: explicit contract '" + symbol + "' → " + DescribeInstrument(inst));
-					return inst;
+					return new Resolution
+					{
+						Instrument = inst, Source = "explicit", Attested = true,
+						Tradable = IsUnexpired(inst, today),
+					};
 				}
-				// Fail closed: falling through would answer a DIFFERENT contract than
-				// the caller named.
 				Log("ResolveInstrument: explicit contract '" + symbol
 					+ "' not found; refusing to substitute the front month");
-				return null;
+				return Resolution.None;
 			}
 
-			// 2) Bare master symbol: NT8's rollover table decides the front month.
-			var byRollover = FrontMonthFromRollovers(symbol, today);
-			if (byRollover != null) return byRollover;
+			// 2) NT8's rollover table decides the front month.
+			var byTable = FrontMonthFromRollovers(symbol, today);
+			if (byTable != null)
+				return new Resolution { Instrument = byTable, Source = "rollover-table", Attested = true, Tradable = true };
 
-			attested = false;
-
-			// 3) Soonest unexpired contract. Cannot know a roll has been scheduled,
-			//    so it stays on a contract until that contract expires.
+			// 3) Soonest unexpired contract; cannot know a roll has been scheduled.
 			try
 			{
 				Instrument frontMonth = null;
@@ -1324,7 +1356,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{
 					Log("ResolveInstrument: front month from expiry scan, NOT the rollover"
 						+ " table → " + DescribeInstrument(frontMonth));
-					return frontMonth;
+					return new Resolution { Instrument = frontMonth, Source = "expiry-scan", Attested = false, Tradable = true };
 				}
 			}
 			catch (Exception ex)
@@ -1347,7 +1379,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						if (IsUnexpired(inst, today))
 						{
 							Log("ResolveInstrument: computed contract '" + cand + "' → " + DescribeInstrument(inst));
-							return inst;
+							return new Resolution { Instrument = inst, Source = "name-probe", Attested = false, Tradable = true };
 						}
 					}
 				}
@@ -1358,7 +1390,134 @@ namespace NinjaTrader.NinjaScript.AddOns
 				Log("ResolveInstrument: computed-contract fallback threw: " + ex.Message);
 			}
 
-			return null;
+			return Resolution.None;
+		}
+
+		// Risk-adding: a guess here is a fill on the wrong contract. Refuses with
+		// instrument-not-found, which the server treats as a definitive block.
+		private Instrument RequireTradable(string symbol, string id, string op)
+		{
+			var r = Resolve(symbol);
+			if (r.Instrument == null)
+			{
+				SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found");
+				return null;
+			}
+			if (!r.Attested || !r.Tradable)
+			{
+				var why = !r.Attested
+					? "resolved only by " + r.Source + " (rollover table unreadable) — not guessing a contract for a risk-adding order"
+					: "is past its last trading day";
+				SendErrorResponse(id, op + " refused: " + symbol + " → " + DescribeInstrument(r.Instrument)
+					+ " " + why, "instrument-not-found");
+				Log(op + " REFUSED symbol=" + symbol + " source=" + r.Source
+					+ " attested=" + r.Attested + " tradable=" + r.Tradable);
+				return null;
+			}
+			return r.Instrument;
+		}
+
+		// Arming preflight: what a bare symbol binds now, and on whose authority.
+		private void HandleResolveInstrument(IDictionary<string, object> obj)
+		{
+			var id     = GetString(obj, "id");
+			var symbol = GetString(obj, "symbol");
+			if (string.IsNullOrEmpty(id)) { Log("resolve_instrument missing id; dropping"); return; }
+			if (string.IsNullOrEmpty(symbol))
+			{
+				SendErrorResponse(id, "resolve_instrument missing required field: symbol");
+				return;
+			}
+			var r = Resolve(symbol);
+			string contract = null;
+			try { contract = r.Instrument != null ? r.Instrument.FullName : null; }
+			catch { /* transient — report no contract */ }
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",        1 },
+				{ "id",       id },
+				{ "type",     "resolve_instrument_result" },
+				{ "symbol",   symbol },
+				{ "contract", contract },
+				{ "source",   r.Source },
+				{ "attested", r.Attested },
+				{ "tradable", r.Tradable },
+			};
+			SendFireAndForget(Json.Serialize(payload),
+				"resolve_instrument_result " + symbol + " → " + (contract ?? "<none>") + " (" + r.Source + ")");
+		}
+
+		// Risk-reducing: a bare symbol is every contract of the master the account
+		// is exposed to, plus the front — a rolled-away position must stay reachable.
+		private static List<Instrument> ExposureOfMaster(Account account, string symbol, Instrument front)
+		{
+			var byName = new Dictionary<string, Instrument>(StringComparer.Ordinal);
+			var master = symbol;
+			try
+			{
+				if (front != null)
+				{
+					byName[front.FullName] = front;
+					if (front.MasterInstrument != null) master = front.MasterInstrument.Name;
+				}
+			}
+			catch { /* transient — keep symbol as the master name */ }
+
+			try
+			{
+				var positions = new List<Position>();
+				lock (account.Positions)
+				{
+					foreach (var p in account.Positions) if (p != null) positions.Add(p);
+				}
+				foreach (var p in positions)
+				{
+					try
+					{
+						if (p.MarketPosition == MarketPosition.Flat || p.Quantity == 0) continue;
+						var i = p.Instrument;
+						if (i == null || i.MasterInstrument == null) continue;
+						if (string.Equals(i.MasterInstrument.Name, master, StringComparison.OrdinalIgnoreCase))
+							byName[i.FullName] = i;
+					}
+					catch { /* position mid-teardown */ }
+				}
+			}
+			catch { /* fall through with what we have */ }
+
+			try
+			{
+				var orders = new List<Order>();
+				lock (account.Orders)
+				{
+					foreach (var o in account.Orders) if (o != null) orders.Add(o);
+				}
+				foreach (var o in orders)
+				{
+					try
+					{
+						if (Order.IsTerminalState(o.OrderState)) continue;
+						var i = o.Instrument;
+						if (i == null || i.MasterInstrument == null) continue;
+						if (string.Equals(i.MasterInstrument.Name, master, StringComparison.OrdinalIgnoreCase))
+							byName[i.FullName] = i;
+					}
+					catch { /* order mid-teardown */ }
+				}
+			}
+			catch { /* fall through with what we have */ }
+
+			return new List<Instrument>(byName.Values);
+		}
+
+		private static string DescribeTargets(List<Instrument> targets, string fallback)
+		{
+			var names = new List<string>();
+			foreach (var t in targets)
+			{
+				try { names.Add(t.FullName ?? fallback); } catch { names.Add(fallback); }
+			}
+			return names.Count == 0 ? fallback : string.Join(", ", names);
 		}
 
 		private static string DescribeProviderState()
@@ -1428,85 +1587,34 @@ namespace NinjaTrader.NinjaScript.AddOns
 			}
 		}
 		
-		private void HandleRequestRollovers(IDictionary<string, object> obj)
+		// The table NT8 merged across, sent with every candles_response. Null =
+		// read failed; empty = NT8 has no table and so did not merge.
+		private static List<object> RolloverWindows(Instrument instrument)
 		{
-			var id     = GetString(obj, "id");
-			var symbol = GetString(obj, "symbol");
-
-			if (string.IsNullOrEmpty(id))
-			{
-				Log("request_rollovers missing id; dropping");
-				return;
-			}
-			if (string.IsNullOrEmpty(symbol))
-			{
-				SendErrorResponse(id, "request_rollovers missing required field: symbol");
-				return;
-			}
-
-			Instrument instrument = ResolveInstrument(symbol);
-			if (instrument == null)
-			{
-				SendErrorResponse(id, "Unknown instrument: '" + symbol + "'");
-				return;
-			}
-
+			var inv  = System.Globalization.CultureInfo.InvariantCulture;
+			var rows = new List<object>();
 			try
 			{
-				var master = instrument.MasterInstrument;
-				// Re-reading the table now, so a memoized resolution predates it —
-				// without this an operator's edit does nothing until midnight ET.
-				foreach (var k in instrumentCache.Keys)
+				var master = instrument != null ? instrument.MasterInstrument : null;
+				var coll   = master != null ? master.RolloverCollection : null;
+				if (coll == null) return null;
+				foreach (var r in coll)
 				{
-					if (k.StartsWith(symbol + "|", StringComparison.OrdinalIgnoreCase))
+					if (r == null || r.ContractMonth == DateTime.MinValue || r.Date == DateTime.MinValue) continue;
+					rows.Add(new Dictionary<string, object>
 					{
-						Instrument dropped;
-						instrumentCache.TryRemove(k, out dropped);
-					}
+						{ "contractMonth", r.ContractMonth.ToString("yyyy-MM-dd", inv) },
+						{ "rolloverDate",  r.Date.ToString("yyyy-MM-dd", inv) },
+					});
 				}
-				var rows   = new List<object>();
-				var rollovers = master.RolloverCollection;
-				if (rollovers != null)
-				{
-					foreach (var r in rollovers)
-					{
-						if (r == null) continue;
-						rows.Add(new Dictionary<string, object>
-						{
-							// InvariantCulture: a non-Gregorian Windows locale (e.g. th-TH)
-							// would render a year the ISO-lexicographic splice guard can't match.
-							{ "contractMonth", r.ContractMonth.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
-							{ "rolloverDate",  r.Date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
-							// Metadata only; wasEdited flags a hand-edit NT8 may overwrite.
-							{ "offset",        r.Offset },
-							{ "wasEdited",     r.WasEdited },
-						});
-					}
-				}
-
-				var policy = master.MergePolicy;
-				if (policy == MergePolicy.UseGlobalSettings || policy == MergePolicy.UseDefault)
-					policy = Core.Globals.MarketDataOptions.GlobalMergePolicy;
-
-				var payload = new Dictionary<string, object>
-				{
-					{ "v",           1 },
-					{ "id",          id },
-					{ "type",        "rollovers_response" },
-					{ "symbol",      symbol },
-					{ "instrument",  instrument.FullName },
-					{ "mergePolicy", policy.ToString() },
-					{ "priceBasis",  PriceBasisOf(policy) },
-					{ "rollovers",   rows },
-				};
-				SendFireAndForget(Json.Serialize(payload),
-					"rollovers_response id=" + id + " count=" + rows.Count);
 			}
 			catch (Exception ex)
 			{
-				Log("request_rollovers failed for '" + symbol + "': " + ex.Message);
-				SendErrorResponse(id, "request_rollovers failed: " + ex.Message);
+				// Never a partial table.
+				Log("RolloverWindows threw: " + ex.Message);
+				return null;
 			}
+			return rows;
 		}
 
 		// UseGlobalSettings / UseDefault resolved through Tools > Options > Market
@@ -1712,9 +1820,6 @@ namespace NinjaTrader.NinjaScript.AddOns
 			var fromUnix             = GetLong(obj, "from");
 			var toUnix               = GetLong(obj, "to");
 			var tradingHoursTemplate = GetString(obj, "tradingHoursTemplate");
-			// Bypasses front-month resolution; the reply is flagged `pinned` so the
-			// server never caches it under the bare symbol.
-			var pinnedContract       = GetString(obj, "contract");
 
 			if (string.IsNullOrEmpty(id))
 			{
@@ -1758,35 +1863,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 				+ " template=" + tradingHoursTemplate
 				+ " → NT8 template='" + nt8TemplateName + "'");
 
-			var pinned = !string.IsNullOrEmpty(pinnedContract);
-			if (pinned && !IsFullContractName(pinnedContract))
-			{
-				// A bare symbol would fall into the front-month tiers and come back
-				// flagged `pinned`, which the caller reads as proof it was honoured.
-				SendErrorResponse(id, "contract must name an expiry (e.g. 'NQ SEP26'): " + pinnedContract);
-				return;
-			}
-			var instrument = ResolveInstrument(pinned ? pinnedContract : symbol);
+			var instrument = ResolveInstrument(symbol);
 			if (instrument == null)
 			{
-				SendErrorResponse(id, pinned
-					? "Could not resolve pinned contract: " + pinnedContract
-					: "Could not resolve instrument for symbol: " + symbol);
+				SendErrorResponse(id, "Could not resolve instrument for symbol: " + symbol);
 				return;
-			}
-			if (pinned)
-			{
-				var boundMaster = instrument.MasterInstrument != null ? instrument.MasterInstrument.Name : null;
-				if (!string.Equals(boundMaster, symbol, StringComparison.OrdinalIgnoreCase))
-				{
-					// Bars would be bucketed on `symbol`'s session template and
-					// returned labelled with it.
-					SendErrorResponse(id, "pinned contract '" + pinnedContract + "' belongs to "
-						+ (boundMaster ?? "<unknown>") + ", not " + symbol);
-					return;
-				}
-				Log("request_candles: pinned contract '" + pinnedContract
-					+ "' (front-month resolution bypassed) → " + DescribeInstrument(instrument));
 			}
 
 			DateTime fromDt;
@@ -1812,9 +1893,6 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Value          = barsPeriodValue,
 				};
 				barsRequest.TradingHours = nt8TradingHours;
-				// Request-level only, never the global option. A merged series would
-				// answer a different question, and back-adjusted a shifted one.
-				if (pinned) barsRequest.MergePolicy = MergePolicy.DoNotMerge;
 			}
 			catch (Exception ex)
 			{
@@ -1879,7 +1957,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 						}
 
 						SendCandlesResponse(id, symbol, resolvedTimeframe, candles,
-							EffectiveMergePolicy(barsRequest), instrument.FullName, pinned);
+							EffectiveMergePolicy(barsRequest), instrument.FullName,
+							RolloverWindows(instrument));
 					}
 					catch (Exception ex)
 					{
@@ -1900,7 +1979,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		private void SendCandlesResponse(string id, string symbol, string timeframe,
-			List<object> candles, MergePolicy mergePolicy, string contract, bool pinned)
+			List<object> candles, MergePolicy mergePolicy, string contract, List<object> rollovers)
 		{
 			var payload = new Dictionary<string, object>
 			{
@@ -1914,12 +1993,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "dataSource", ClassifyDataSource() },
 				{ "priceBasis",  PriceBasisOf(mergePolicy) },
 				{ "mergePolicy", mergePolicy.ToString() },
-				// Cross-check only: a merged request spans contracts, so this
-				// names the bound instrument, not a per-bar attestation.
+				// Bound instrument only; per-bar labels come from rollovers.
 				{ "contract",    contract },
-				// One expiry's own series, not the front-month view the cache keys on.
-				{ "pinned",      pinned },
 			};
+			if (rollovers != null) payload["rollovers"] = rollovers;
 			SendFireAndForget(Json.Serialize(payload),
 				"candles_response id=" + id + " count=" + candles.Count);
 		}
@@ -2012,7 +2089,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		private void QueueSubscribeAck(string id, string symbol, string timeframe,
-			string contract, int seedCount, long seedLastTs, bool alreadyActive)
+			string contract, string source, bool attested,
+			int seedCount, long seedLastTs, bool alreadyActive)
 		{
 			var payload = new Dictionary<string, object>
 			{
@@ -2022,6 +2100,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "symbol",        symbol },
 				{ "timeframe",     timeframe },
 				{ "contract",      contract },
+				{ "source",        source },
+				{ "attested",      attested },
 				{ "seedCount",     seedCount },
 				{ "seedLastTs",    seedLastTs },
 				{ "alreadyActive", alreadyActive },
@@ -2104,7 +2184,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return;
 			}
 
-			var instrument = ResolveInstrument(symbol);
+			var resolution = Resolve(symbol);
+			var instrument = resolution.Instrument;
 			if (instrument == null)
 			{
 				SendErrorResponse(id, "Could not resolve instrument for symbol: " + symbol);
@@ -2125,7 +2206,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					if (sub.Seeded)
 					{
 						QueueSubscribeAck(id, symbol, resolvedTf,
-							sub.Instrument.FullName, 0, 0, true);
+							sub.Instrument.FullName, sub.Source, sub.Attested, 0, 0, true);
 					}
 					else
 					{
@@ -2141,6 +2222,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					TradingHoursTemplate = tradingHoursTemplate,
 					TfSeconds            = tfSeconds,
 					Instrument           = instrument,
+					Source               = resolution.Source,
+					Attested             = resolution.Attested,
 					Seeded               = false,
 					LastMaxIndex         = -1,
 					Seq                  = 0,
@@ -2265,7 +2348,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 						if (ackPending)
 							foreach (var aid in ackIds)
 								QueueSubscribeAck(aid, sub.Symbol, sub.Timeframe,
-									sub.Instrument.FullName, seedCount, seedLastTs, false);
+									sub.Instrument.FullName, sub.Source, sub.Attested, seedCount, seedLastTs, false);
 					}
 					catch (Exception ex)
 					{
@@ -2417,6 +2500,80 @@ namespace NinjaTrader.NinjaScript.AddOns
 			lock (recreateGate)
 			{
 				RecreateAllLiveSubsLocked();
+			}
+		}
+
+		// Subs bind one instrument for life; NT8 rolls without them. Once per
+		// session date and on hello, re-create any whose attested front month
+		// moved. Never onto a guess.
+		private void MaybeRebindOnSessionChange(string why)
+		{
+			var inv = System.Globalization.CultureInfo.InvariantCulture;
+			var sd  = SessionDateEastern().ToString("yyyy-MM-dd", inv);
+			if (string.Equals(sd, lastRebindSessionDate, StringComparison.Ordinal)) return;
+			lastRebindSessionDate = sd;
+			Task.Run(() =>
+			{
+				try { RebindRolledSubs(why + " " + sd); }
+				catch (Exception ex) { Log("rebind failed: " + ex.Message); }
+			});
+		}
+
+		private void RebindRolledSubs(string why)
+		{
+			lock (recreateGate)
+			{
+				List<LiveSub> snapshot;
+				lock (liveLock) { snapshot = new List<LiveSub>(liveSubs.Values); }
+				foreach (var sub in snapshot)
+				{
+					Resolution r;
+					try { r = Resolve(sub.Symbol); }
+					catch (Exception ex) { Log("rebind " + sub.Key + ": resolve threw: " + ex.Message); continue; }
+					if (r.Instrument == null || !r.Attested) continue;
+
+					string was, now;
+					try
+					{
+						was = sub.Instrument != null ? sub.Instrument.FullName : null;
+						now = r.Instrument.FullName;
+					}
+					catch { continue; }
+					if (string.Equals(was, now, StringComparison.Ordinal)) continue;
+
+					Log("rebind " + sub.Key + " (" + why + "): " + was + " → " + now + " per NT8's rollover table");
+					DetachAndDispose(sub);
+
+					BarsPeriodType periodType;
+					int            periodValue;
+					string         resolvedTf;
+					string         tfError;
+					if (!TryResolveBarsPeriod(sub.Timeframe, out periodType, out periodValue,
+						out resolvedTf, out tfError))
+					{
+						Log("rebind " + sub.Key + " failed to re-resolve TF: " + tfError);
+						lock (liveLock) { liveSubs.Remove(sub.Key); }
+						continue;
+					}
+					TradingHours tradingHours;
+					string       nt8TemplateName;
+					string       thError;
+					if (!TryResolveTradingHours(sub.TradingHoursTemplate, out tradingHours,
+						out nt8TemplateName, out thError))
+					{
+						Log("rebind " + sub.Key + " failed to re-resolve TradingHours: " + thError);
+						lock (liveLock) { liveSubs.Remove(sub.Key); }
+						continue;
+					}
+					lock (liveLock)
+					{
+						sub.Instrument = r.Instrument;
+						sub.Source     = r.Source;
+						sub.Attested   = r.Attested;
+						sub.Seeded     = false;
+					}
+					StartLiveRequest(sub, periodType, periodValue, tradingHours, false);
+				}
 			}
 		}
 
@@ -4897,8 +5054,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var account = FindAccount(accountName);
 				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
 
-				var instrument = ResolveInstrument(symbol);
-				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
+				var instrument = RequireTradable(symbol, id, "place_order");
+				if (instrument == null) return;
 
 				// Round to tick before use; the ack echoes the effective values.
 				limitPrice = RoundToTick(instrument, limitPrice);
@@ -5102,8 +5259,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var account = FindAccount(accountName);
 				if (account == null) { SendErrorResponse(id, "account not found: " + accountName, "account-not-found"); return; }
 
-				var instrument = ResolveInstrument(symbol);
-				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
+				var instrument = RequireTradable(symbol, id, "place_oco");
+				if (instrument == null) return;
 
 				stopPrice  = RoundToTick(instrument, stopPrice);
 				limitPrice = RoundToTick(instrument, limitPrice);
@@ -5322,8 +5479,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var instrument = ResolveInstrument(symbol);
 				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
 
-				var contract = symbol;
-				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
+				// Bare symbol: every exposed contract of the master. Explicit name: exact.
+				var targets  = IsFullContractName(symbol)
+					? new List<Instrument> { instrument }
+					: ExposureOfMaster(account, symbol, instrument);
+				var contract = DescribeTargets(targets, symbol);
+				var names    = new HashSet<string>(StringComparer.Ordinal);
+				foreach (var t in targets) { try { names.Add(t.FullName); } catch { } }
 
 				// Best-effort count only; the ack is not a confirmation.
 				var working = 0;
@@ -5337,7 +5499,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 							try
 							{
 								if (Order.IsTerminalState(o.OrderState)) continue;
-								if (o.Instrument != null && string.Equals(o.Instrument.FullName, contract, StringComparison.Ordinal)) working++;
+								if (o.Instrument != null && names.Contains(o.Instrument.FullName)) working++;
 							}
 							catch { /* order mid-teardown */ }
 						}
@@ -5345,7 +5507,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				}
 				catch { /* count stays 0; still dispatch */ }
 
-				try { account.CancelAllOrders(instrument); }
+				try { foreach (var t in targets) account.CancelAllOrders(t); }
 				catch (Exception ex) { SendErrorResponse(id, "CancelAllOrders failed: " + ex.Message, "cancel-all-failed"); return; }
 
 				Log("cancel_all DISPATCHED account=" + accountName + " contract=" + contract + " working=" + working);
@@ -5390,12 +5552,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 				var instrument = ResolveInstrument(symbol);
 				if (instrument == null) { SendErrorResponse(id, "could not resolve instrument for symbol: " + symbol, "instrument-not-found"); return; }
 
-				var contract = symbol;
-				try { contract = instrument.FullName ?? symbol; } catch { /* transient — keep symbol */ }
+				// Bare symbol: every exposed contract of the master. Explicit name: exact.
+				var targets  = IsFullContractName(symbol)
+					? new List<Instrument> { instrument }
+					: ExposureOfMaster(account, symbol, instrument);
+				var contract = DescribeTargets(targets, symbol);
 
 				// Cancels every working order AND closes the position at market —
 				// including manually placed orders.
-				try { account.Flatten(new[] { instrument }); }
+				try { account.Flatten(targets.ToArray()); }
 				catch (Exception ex) { SendErrorResponse(id, "Flatten failed: " + ex.Message, "flatten-failed"); return; }
 
 				Log("flatten DISPATCHED account=" + accountName + " contract=" + contract);

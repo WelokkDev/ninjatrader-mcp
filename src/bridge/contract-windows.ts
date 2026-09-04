@@ -1,11 +1,7 @@
-import type { Database } from "better-sqlite3";
-
 /**
- * Session-day → contract mapping, derived from NT8's mirrored rollover table.
- * Windows are [rolloverDate, next rolloverDate); `label >= rolloverDate` means
- * the new contract, and the private consumer compares the same way — keep the
- * two in lockstep. A merged BarsRequest resolves ONE instrument but serves bars
- * from every contract it spans, so only the mirror can attribute a row.
+ * Session-day → contract, from the rollover table each candles_response
+ * carries. Windows are [rolloverDate, next); `label >= rolloverDate` is the new
+ * contract, and the private consumer compares the same way.
  */
 export interface RolloverWindow {
   rolloverDate: string; // ISO YYYY-MM-DD
@@ -19,29 +15,31 @@ function isCanonicalIsoDate(value: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
-/**
- * Mirrored windows for a symbol, ascending. Returns empty on ANY non-canonical
- * row: one bad date mis-attributes its neighbours, and this path can't throw
- * (a corrupt mirror must not break the candle path), so refusing = label nothing.
- */
-export function loadRolloverWindows(db: Database, symbol: string): RolloverWindow[] {
-  const rows = db
-    .prepare(
-      `SELECT contract_month AS contractMonth, rollover_date AS rolloverDate
-         FROM contract_rollovers WHERE symbol = ? ORDER BY rollover_date ASC`,
-    )
-    .all(symbol) as RolloverWindow[];
+/** Windows off the wire, ascending. One non-canonical row refuses the whole
+ *  table: a bad date mis-attributes its neighbours. */
+export function windowsFromResponse(
+  rows: readonly RolloverWindow[] | undefined,
+  symbol: string,
+): RolloverWindow[] {
+  if (!rows) return [];
   for (const r of rows) {
     if (!isCanonicalIsoDate(r.rolloverDate) || !isCanonicalIsoDate(r.contractMonth)) {
       console.error(
-        `[contract-windows] contract_rollovers holds a non-canonical date for ${symbol} ` +
-          `(rollover_date=${r.rolloverDate}, contract_month=${r.contractMonth}) — the mirror ` +
-          `is corrupt; labelling nothing until it is re-synced`,
+        `[contract-windows] non-canonical rollover date for ${symbol} ` +
+          `(rollover_date=${r.rolloverDate}, contract_month=${r.contractMonth}); labelling nothing`,
       );
       return [];
     }
   }
-  return rows;
+  return [...rows].sort((a, b) => a.rolloverDate.localeCompare(b.rolloverDate));
+}
+
+/** One stored spelling: "NQ SEP26" and "NQ 09-26" are the same contract. */
+export function canonicalContract(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const p = parseContractName(name);
+  if (p === null) return name;
+  return contractName(p.symbol, `${p.year}-${String(p.month).padStart(2, "0")}-01`);
 }
 
 /** ("NQ", "2026-09-01") → "NQ 09-26". Must match Instrument.FullName, which is

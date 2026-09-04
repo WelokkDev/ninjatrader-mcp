@@ -25,6 +25,9 @@ export interface LiveSubState {
   sources: string[];
   acked: boolean;
   contract: string | null;
+  // How `contract` was chosen, and whether that was NT8's table or a guess.
+  contractSource?: string | null;
+  contractAttested?: boolean | null;
   lastSeq: number | null;
   lastTs: number | null;
   lastError: string | null;
@@ -56,6 +59,8 @@ interface SubEntry {
   sources: Set<string>;
   acked: boolean;
   contract: string | null;
+  contractSource?: string | null;
+  contractAttested?: boolean | null;
   lastSeq: number | null;
   lastTs: number | null;
   lastError: string | null;
@@ -190,6 +195,8 @@ export class LiveSubscriptionRegistry {
       )) as SubscribeAckMessage;
       entry.acked = true;
       entry.contract = res.contract ?? null;
+      entry.contractSource = res.source ?? null;
+      entry.contractAttested = res.attested ?? null;
       entry.ackedAt = this.now();
       entry.lastError = null;
       return { ok: true, state: this.toState(entry) };
@@ -325,6 +332,8 @@ export class LiveSubscriptionRegistry {
       sources: [...e.sources],
       acked: e.acked,
       contract: e.contract,
+      contractSource: e.contractSource ?? null,
+      contractAttested: e.contractAttested ?? null,
       lastSeq: e.lastSeq,
       lastTs: e.lastTs,
       lastError: e.lastError,
@@ -340,6 +349,8 @@ export class LiveSubscriptionRegistry {
       sources: [],
       acked: false,
       contract: null,
+      contractSource: null,
+      contractAttested: null,
       lastSeq: null,
       lastTs: null,
       lastError: null,
