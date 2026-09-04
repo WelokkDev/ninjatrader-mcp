@@ -23,7 +23,12 @@ import type { SessionDay } from "../core/sessions/types.js";
 import type { Candle, Timeframe } from "../core/types.js";
 import { onMessage } from "./index.js";
 import { isSimulatedFeed } from "./data-source.js";
-import { contractForLabel, loadRolloverWindows } from "./contract-windows.js";
+import {
+  canonicalContract,
+  contractForLabel,
+  sameContract,
+  windowsFromResponse,
+} from "./contract-windows.js";
 import type { BarCloseMessage, CandlesResponseMessage } from "./protocol.js";
 
 // Exported: the live runtime applies the same gate before /feed publish.
@@ -165,6 +170,27 @@ export function ingestCandles(
     contractByDay.set(label, opts.contractForDay?.(label) ?? null);
   }
 
+  // Rows are the record: a refill that cannot attest never downgrades a day's
+  // label to NULL (a live bar stays NULL — its provenance is its own), and a
+  // contract that differs from the day's stored rows is stored but called out.
+  for (const [label, incoming] of contractByDay) {
+    const existing = existingContracts(
+      database, symbol, timeframe, sessionDayRange(label, config.session, calendar),
+    );
+    if (incoming === null) {
+      if (mode === "day-refill" && existing.length === 1) contractByDay.set(label, existing[0]);
+      continue;
+    }
+    const other = existing.find((e) => !sameContract(e, incoming));
+    if (other !== undefined) {
+      console.error(
+        `[ingest] contract mismatch for ${symbol} ${timeframe} ${label}: incoming bars are ${incoming}, ` +
+          `the day's stored rows are ${other} — a subscription still bound to the old contract, ` +
+          `or a fetch labelled off a stale table. Both are stored; derived rows go NULL until it converges.`,
+      );
+    }
+  }
+
   let inserted = 0;
   // Doubles as a screen on incoming bars, so a mis-stamped bar the provider
   // keeps re-sending can't be re-planted after each purge.
@@ -265,6 +291,23 @@ export function ingestCandles(
   };
 }
 
+function existingContracts(
+  database: Database,
+  symbol: string,
+  timeframe: Timeframe,
+  range: { startUnix: number; endUnix: number },
+): string[] {
+  return (
+    database
+      .prepare(
+        `SELECT DISTINCT contract AS c FROM candles
+          WHERE symbol = ? AND timeframe = ? AND contract IS NOT NULL
+            AND timestamp > ? AND timestamp <= ?`,
+      )
+      .all(symbol, timeframe, range.startUnix, range.endUnix) as Array<{ c: string }>
+  ).map((r) => r.c);
+}
+
 /**
  * The single owner of historical-candle persistence. Runs on every
  * candles_response, including ones whose request already timed out — a late
@@ -281,12 +324,18 @@ export function createCandlesResponseHandler(database: Database = db) {
       return;
     }
     try {
-      // The mirror is the attestation. msg.contract names only the current
-      // window, so a disagreement is logged, never trusted over the mirror.
-      const windows = loadRolloverWindows(database, msg.symbol);
+      // DoNotMerge or no table: NT8 did not merge, every bar is msg.contract's.
+      // Otherwise the roll dates it merged across attribute each session-day.
+      // Table unreadable (null/absent): unattested; the day keeps its label.
+      const table = msg.rollovers ?? undefined;
+      const notMerged =
+        msg.mergePolicy === "DoNotMerge" || (table !== undefined && table.length === 0);
+      const windows = notMerged ? [] : windowsFromResponse(table, msg.symbol);
+      const bound = canonicalContract(msg.contract);
+
       // Newest, not first: days iterate ascending and the oldest is expected
       // to mismatch, so a first-hit latch would hide a divergence on TODAY.
-      let newestMismatch: { label: string; fromMirror: string } | null = null;
+      let newestMismatch: { label: string; fromTable: string } | null = null;
       const result = ingestCandles(
         msg.symbol,
         msg.timeframe as Timeframe,
@@ -296,18 +345,24 @@ export function createCandlesResponseHandler(database: Database = db) {
           mode: "day-refill",
           priceBasis: msg.priceBasis,
           contractForDay: (label) => {
-            const fromMirror = contractForLabel(windows, msg.symbol, label);
-            if (fromMirror !== null && msg.contract !== undefined && msg.contract !== fromMirror) {
-              newestMismatch = { label, fromMirror };
+            if (notMerged) return bound;
+            const fromTable = contractForLabel(windows, msg.symbol, label);
+            // Delivery month, not bytes: renderings differ per install.
+            if (
+              fromTable !== null &&
+              msg.contract !== undefined &&
+              !sameContract(msg.contract, fromTable)
+            ) {
+              newestMismatch = { label, fromTable };
             }
-            return fromMirror;
+            return fromTable;
           },
         },
       );
       if (newestMismatch !== null) {
-        const { label, fromMirror } = newestMismatch;
+        const { label, fromTable } = newestMismatch;
         console.error(
-          `[ingest] contract cross-check for ${msg.symbol} ${label}: mirror says ${fromMirror}, AddOn resolved ${msg.contract} — expected for days outside the current window; investigate if this names TODAY`,
+          `[ingest] contract cross-check for ${msg.symbol} ${label}: rollover table says ${fromTable}, AddOn bound ${msg.contract} — expected for days outside the current window; investigate if this names TODAY`,
         );
       }
       console.error(
@@ -337,31 +392,15 @@ export function createBarCloseHandler(database: Database = db) {
       return;
     }
     try {
-      const windows = loadRolloverWindows(database, msg.symbol);
+      // A bar_close is the subscribed instrument's own trade (even a `backfill`
+      // catch-up): its own report labels it, never a window.
+      const contract = canonicalContract(msg.contract);
       const result = ingestCandles(
         msg.symbol,
         msg.timeframe as Timeframe,
         [msg.candle],
         database,
-        // Shares the candles table with historical fetches, so it must carry
-        // the same basis label the AddOn computed per batch.
-        {
-          priceBasis: msg.priceBasis,
-          // msg.contract only, never the mirror: every bar_close is a trade of
-          // the subscribed instrument (even a stale `backfill` catch-up), so a
-          // mirror label would launder old-contract bars into the new era
-          // across a roll. Mismatches log; the splice enforces, not ingest.
-          contractForDay: (label) => {
-            const fromMirror = contractForLabel(windows, msg.symbol, label);
-            const fromSub = msg.contract ?? null;
-            if (fromSub !== null && fromMirror !== null && fromSub !== fromMirror) {
-              console.error(
-                `[ingest] bar_close contract mismatch for ${msg.symbol} ${label}: subscription serves ${fromSub}, mirror window says ${fromMirror} — NT8's continuous series has rolled but this subscription has not; its bars are the OLD contract until resubscribe`,
-              );
-            }
-            return fromSub;
-          },
-        },
+        { priceBasis: msg.priceBasis, contractForDay: () => contract },
       );
       console.error(
         `[ingest] bar_close ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} agg=${JSON.stringify(result.aggregated)}`,

@@ -47,21 +47,6 @@ export function initializeSchema(db: Database.Database): void {
       PRIMARY KEY (template, date)
     );
 
-    -- NT8's rollover table, mirrored per instrument: which contract a bar
-    -- belongs to, the thing a merged series discards. Windows are exactly
-    -- [rollover_date, next rollover_date). offset_points is metadata only,
-    -- never baked into stored bars; was_edited flags a hand-edit NT8 may
-    -- overwrite.
-    CREATE TABLE IF NOT EXISTS contract_rollovers (
-      symbol         TEXT    NOT NULL,
-      contract_month TEXT    NOT NULL,  -- YYYY-MM-DD
-      rollover_date  TEXT    NOT NULL,  -- YYYY-MM-DD; roll INTO contract_month
-      offset_points  REAL    NOT NULL,
-      was_edited     INTEGER NOT NULL DEFAULT 0,
-      fetched_at     INTEGER NOT NULL,
-      PRIMARY KEY (symbol, contract_month)
-    );
-
     -- One row per completed one-shot migration. Separate from the schema shape
     -- because gating on "did I just create the column" strands a database whose
     -- process died between ADD COLUMN and backfill.
@@ -237,10 +222,20 @@ export function initializeSchema(db: Database.Database): void {
       Math.floor(Date.now() / 1000),
     );
   })();
-  // NT8 FullName; NULL = unattested. NO backfill ever — different write paths
-  // can genuinely disagree on the contract for one session, indistinguishable
-  // after the fact. The splice refuses to cross a roll on unattested rows, so
-  // NULL is fail-closed rather than a default.
+  // The rollover mirror is gone; the table rides on every candles_response.
+  db.transaction(() => {
+    const done = db
+      .prepare("SELECT 1 FROM schema_migrations WHERE name = ?")
+      .get("contract_rollovers_dropped");
+    if (done) return;
+    db.exec("DROP TABLE IF EXISTS contract_rollovers");
+    db.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(
+      "contract_rollovers_dropped",
+      Math.floor(Date.now() / 1000),
+    );
+  })();
+  // NT8 FullName; NULL = unattested, never guessed. Written by ingest from
+  // NT8's rollover table, and by the live feed from its subscription's contract.
   ensureColumn(db, "candles", "contract", "TEXT");
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");

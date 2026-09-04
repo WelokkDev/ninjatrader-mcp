@@ -79,8 +79,6 @@ function expectNoPartial(bars: readonly Candle[]): void {
   for (const b of bars) expect(b.partial).toBeUndefined();
 }
 
-// Boundary: asOf exactly on a 4h close
-
 describe("buildFrozenView — asOf exactly on a 4h close", () => {
   it("the boundary bar is in completed, not duplicated into a forming slot", () => {
     const bars = eth5mFlat("2026-04-21");
@@ -101,8 +99,6 @@ describe("buildFrozenView — asOf exactly on a 4h close", () => {
     expect(fv.asOfView.get("4h")).toEqual(completed);
   });
 });
-
-// asOf at close −1s / +1s flips forming↔completed
 
 describe("buildFrozenView — forming/completed flips at a 4h boundary ±1s", () => {
   const bars = eth5mFlat("2026-04-21");
@@ -140,8 +136,6 @@ describe("buildFrozenView — forming/completed flips at a 4h boundary ±1s", ()
     expect(fv.asOfView.get("4h")).toEqual(completed);
   });
 });
-
-// Leak probe
 
 describe("buildFrozenView — leak probe (no future data reaches the frozen view)", () => {
   it("a forming bar reflects only bars ≤ asOf; future spikes never appear", () => {
@@ -181,8 +175,6 @@ describe("buildFrozenView — leak probe (no future data reaches the frozen view
     }
   });
 });
-
-// Empty forming bucket (asOf on a boundary) → asOfView == completed
 
 describe("buildFrozenView — empty forming bucket", () => {
   it("asOf on an HTF boundary yields asOfView identical to completed across all TFs", () => {
@@ -252,8 +244,6 @@ describe("buildFrozenView — consistency with aggregateCandles (everything clos
   });
 });
 
-// DST session-days
-
 describe("buildFrozenView — DST-correct session boundaries", () => {
   it("EST-week session (Jan) produces the standard 4h close-stamps", () => {
     const bars = eth5mFlat("2026-01-06"); // Tue, EST (UTC−5)
@@ -279,8 +269,6 @@ describe("buildFrozenView — DST-correct session boundaries", () => {
     expect(at.completed.get("4h")![3].timestamp).toBe(close);
   });
 });
-
-// Invariants
 
 describe("buildFrozenView — invariants", () => {
   it("never emits a partial-flagged bar, in either cut", () => {

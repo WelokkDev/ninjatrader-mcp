@@ -7,7 +7,6 @@
 // this file. The one crossover: the persisted Trade row carries the engine's zone/decision payloads as 
 // OPAQUE JSON (typed `unknown`); the ledger serializes whatever it is given and never introspects it.
 
-// Trade direction.
 export type TradeDirection = "long" | "short";
 
 // Which execution surface produced a trade. 'backtest' rows carry a run_id; 'paper'/'live' rows do not (run_id is null).

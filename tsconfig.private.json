@@ -1,5 +1,6 @@
 {
   "//": "Build YOUR private bin. Re-includes src/private/ (which the root tsconfig excludes) so `npm run build:private` emits build/private/index.js. Public `npm run build` stays private-free.",
+  "//exclude": "src/worktrees/ holds git worktrees of the private repo — each is a separate checkout whose relative imports only resolve from ITS own root, so type-checking them from here is meaningless. src/private/dashboard-ui/ is a standalone Vite/React app with its own tsconfig (JSX, DOM libs, own node_modules) — it type-checks via its own build.",
   "extends": "./tsconfig.json",
-  "exclude": ["node_modules"]
+  "exclude": ["**/node_modules", "src/worktrees", "src/private/dashboard-ui"]
 }

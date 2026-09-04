@@ -8,7 +8,6 @@ import {
   registerLiveIngestHandler,
 } from "./bridge/ingest.js";
 import { registerCalendarSyncOnHello } from "./bridge/calendar-sync.js";
-import { registerRolloverSyncOnHello } from "./bridge/rollover-sync.js";
 import { startClientRequestDispatch } from "./bridge/client-requests.js";
 
 // The companion-NinjaScript request seam. Public registers no kinds; a private
@@ -161,7 +160,6 @@ export async function startRuntime(): Promise<void> {
   registerLiveIngestHandler();
   registerCandlesResponseHandler();
   registerCalendarSyncOnHello();
-  registerRolloverSyncOnHello();
   // Registered unconditionally: the dispatcher owns no kinds of its own, so on
   // a stock public build it simply answers every client_request with ok:false
   // instead of leaving a companion indicator waiting out its timeout.

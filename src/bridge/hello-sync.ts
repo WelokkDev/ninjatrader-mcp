@@ -12,7 +12,7 @@ export interface HelloSyncResult {
 }
 
 export async function runHelloSync(opts: {
-  /** Log prefix, e.g. "rollover-sync". */
+  /** Log prefix, e.g. "calendar-sync". */
   label: string;
   /** Named in the deploy-skew diagnosis when the AddOn never replies. */
   requestType: string;

@@ -6,11 +6,9 @@
 // stream observability to ANY backend via Sink. See README.md for extraction.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Core orchestrator
 export { Lab } from "./lab.js";
 export type { LabOptions, StartResult, StatusView, LabSummary } from "./lab.js";
 
-// Domain types
 export type {
   ExperimentSpec,
   ExperimentRecord,
@@ -29,19 +27,10 @@ export type {
 // Observability (the extractable core)
 export * from "./obs/index.js";
 
-// Storage
 export * from "./store/index.js";
-
-// Runner seam
 export * from "./runner/index.js";
-
-// ETA
 export * from "./eta/index.js";
-
-// Integrity
 export * from "./integrity/index.js";
-
-// Diff
 export { diffResults, type ResultDiff, type MetricDelta } from "./diff.js";
 
 // Clock + ids (handy for tests / custom wiring)

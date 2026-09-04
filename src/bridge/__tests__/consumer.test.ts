@@ -54,6 +54,12 @@ function stubBinding(over: Partial<ConsumerHubBinding> = {}): ConsumerHubBinding
       simFeedRejected: false,
       errors: [],
     })),
+    resolveInstrument: vi.fn(async () => ({
+      contract: "MNQ 09-26",
+      source: "rollover-table",
+      attested: true,
+      tradable: true,
+    })),
     ...over,
   };
 }
@@ -428,6 +434,39 @@ describe("/feed channel", () => {
       ...over,
     };
   }
+
+  it("resolve_instrument answers the arming preflight with provenance", async () => {
+    const binding = stubBinding();
+    const { port } = await boot(binding);
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(JSON.stringify({ type: "resolve_instrument", reqId: "r-9", symbol: "MNQ" }));
+    const reply = await client.next();
+    expect(reply.type).toBe("resolve_instrument_result");
+    expect(reply.reqId).toBe("r-9");
+    expect(reply.ok).toBe(true);
+    expect(reply).toMatchObject({
+      symbol: "MNQ",
+      contract: "MNQ 09-26",
+      source: "rollover-table",
+      attested: true,
+      tradable: true,
+    });
+    expect(binding.resolveInstrument).toHaveBeenCalledWith("MNQ");
+    client.ws.close();
+  });
+
+  it("resolve_instrument without a symbol is a typed failure", async () => {
+    const { port } = await boot(stubBinding());
+    const client = await connect(port, "/feed");
+    await client.next();
+    client.ws.send(JSON.stringify({ type: "resolve_instrument", reqId: "r-10" }));
+    const reply = await client.next();
+    expect(reply.type).toBe("resolve_instrument_result");
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toMatch(/missing symbol/);
+    client.ws.close();
+  });
 
   it("sync_positions without a bound feed is a typed failure", async () => {
     const { port } = await boot();

@@ -145,6 +145,14 @@ gitignored skills load exactly like tracked ones, and edits are picked up live
   `registerGenericTools(server, { except: ["get_candles"] })` followed by your
   `registerMyGetCandles(server)`. No fork. (The three `prefetch_*` tools share
   one registration — excluding any of them excludes all three.)
+- **Your own compiler settings**: drop a `tsconfig.json` in `src/private/` and
+  `npm run build:private` / `npm run typecheck:private` compile with it instead
+  of the public `tsconfig.private.json`. Extend the root config so the two agree
+  on target, module, `rootDir` and `outDir`, then add what the public repo has no
+  business knowing — most often excluding a nested app directory that builds
+  under its own toolchain:
+  `{ "extends": "../../tsconfig.json", "exclude": ["**/node_modules", "my-ui"] }`.
+  Paths inside it resolve relative to `src/private/`, not the repo root.
 - **Look-ahead-safe logic**: when a tool reasons "as of" a historical moment,
   query with `timestamp <= asOf` cutoffs so nothing from the future leaks into
   the decision. Build frozen views once, pass them down.

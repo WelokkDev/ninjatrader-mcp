@@ -167,10 +167,15 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   // 'as_traded' | 'back_adjusted' | 'unknown'. Older AddOns omit it; absent is
   // stored as NULL and read as unknown, never assumed safe.
   priceBasis: z.string().optional(),
+  // "DoNotMerge": one contract's own bars, labelled from `contract`.
   mergePolicy: z.string().optional(),
-  // Cross-check only — a merged request spans contracts, so per-row labels
-  // come from contract-windows.ts instead.
+  // The bound instrument; per-row labels come from `rollovers`.
   contract: z.string().optional(),
+  // The roll dates NT8 merged across. Omitted/null = could not read; empty =
+  // no table, so every bar is `contract`'s own.
+  rollovers: z
+    .array(z.object({ contractMonth: z.string(), rolloverDate: z.string() }))
+    .nullish(),
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
@@ -207,6 +212,8 @@ export const subscribeAckMessageSchema = reqMsg("subscribe_ack", {
   symbol: z.string(),
   timeframe: z.string(),
   contract: z.string(), // resolved NT8 contract FullName the stream is bound to
+  source: z.string().optional(), // how it was chosen; older AddOns omit
+  attested: z.boolean().optional(), // NT8's table or an explicit name, not a guess
   seedCount: z.number(), // bars in the C# seed request; 0 on an alreadyActive re-subscribe
   seedLastTs: z.number(), // unix seconds of the last seeded bar; 0 when none
   alreadyActive: z.boolean(),
@@ -219,6 +226,21 @@ export const unsubscribeAckMessageSchema = reqMsg("unsubscribe_ack", {
   removed: z.boolean(),
 });
 export type UnsubscribeAckMessage = z.infer<typeof unsubscribeAckMessageSchema>;
+
+// What a bare symbol binds right now, and on whose authority (arming preflight).
+export const resolveInstrumentMessageSchema = reqMsg("resolve_instrument", {
+  symbol: z.string(),
+});
+export type ResolveInstrumentMessage = z.infer<typeof resolveInstrumentMessageSchema>;
+
+export const resolveInstrumentResultMessageSchema = reqMsg("resolve_instrument_result", {
+  symbol: z.string(),
+  contract: z.string().nullable(), // null: nothing resolved
+  source: z.string(), // explicit | rollover-table | expiry-scan | name-probe | none
+  attested: z.boolean(), // explicit name, or NT8's own rollover table — never a guess
+  tradable: z.boolean(), // real and not past its last trading day
+});
+export type ResolveInstrumentResultMessage = z.infer<typeof resolveInstrumentResultMessageSchema>;
 
 export const requestSessionCalendarMessageSchema = reqMsg("request_session_calendar", {
   tradingHoursTemplate: z.string(),
@@ -239,31 +261,6 @@ export const sessionCalendarResponseMessageSchema = reqMsg("session_calendar_res
   ),
 });
 export type SessionCalendarResponseMessage = z.infer<typeof sessionCalendarResponseMessageSchema>;
-
-export const requestRolloversMessageSchema = reqMsg("request_rollovers", {
-  symbol: z.string(),
-});
-export type RequestRolloversMessage = z.infer<typeof requestRolloversMessageSchema>;
-
-/** NT8's rollover table as the AddOn reports it. Doctrine lives on the
- *  contract_rollovers DDL in db/schema.ts. */
-export const rolloversResponseMessageSchema = reqMsg("rollovers_response", {
-  symbol: z.string(),
-  instrument: z.string().optional(),
-  // Effective policy, with UseGlobalSettings already resolved by the AddOn.
-  mergePolicy: z.string().optional(),
-  priceBasis: z.string().optional(),
-  rollovers: z.array(
-    z.object({
-      // Calendar dates (YYYY-MM-DD) — no timezone to get wrong.
-      contractMonth: z.string(),
-      rolloverDate: z.string(),
-      offset: z.number(), // NT8's back-adjustment offset; metadata only
-      wasEdited: z.boolean().optional(), // NT8 may overwrite a hand-edit
-    }),
-  ),
-});
-export type RolloversResponseMessage = z.infer<typeof rolloversResponseMessageSchema>;
 
 export const requestOpenChartsMessageSchema = reqMsg("request_open_charts", {});
 export type RequestOpenChartsMessage = z.infer<typeof requestOpenChartsMessageSchema>;
@@ -811,7 +808,7 @@ const INBOUND_SCHEMAS = {
   candles_response: candlesResponseMessageSchema,
   bar_close: barCloseMessageSchema,
   session_calendar_response: sessionCalendarResponseMessageSchema,
-  rollovers_response: rolloversResponseMessageSchema,
+  resolve_instrument_result: resolveInstrumentResultMessageSchema,
   open_charts_response: openChartsResponseMessageSchema,
   navigate_chart_ack: navigateChartAckMessageSchema,
   drawings_response: drawingsResponseMessageSchema,
@@ -842,7 +839,7 @@ export type OutboundMessage =
   | ClearZonesMessage
   | RequestCandlesMessage
   | RequestSessionCalendarMessage
-  | RequestRolloversMessage
+  | ResolveInstrumentMessage
   | RequestOpenChartsMessage
   | NavigateChartMessage
   | RequestDrawingsMessage
