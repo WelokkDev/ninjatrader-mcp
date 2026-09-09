@@ -418,11 +418,26 @@ it.
 `get_trades` and `sync_trades` read NinjaTrader's own database directly — no
 bridge involved. The config is loaded **lazily**, only when one of those two
 tools is actually called. Both tools appear in the tool list without it and
-simply return `loadNinjaTraderConfig: cannot read ...` when called. That error is
-expected on a candles-only setup, not a sign of a broken install.
+simply return `loadNinjaTraderConfig: cannot read ..., and NT_TRADES_DB_PATH is
+not set` when called. That error is expected on a candles-only setup, not a sign
+of a broken install.
 
-Copy the tracked example to create your config in the **repo root** (override the
-location with `NT_TRADES_CONFIG`):
+There are two ways to point it at your database. **Prefer `.env.local`** — the
+path is per-machine, and that file is already the gitignored home for such
+values, so one checkout can serve several machines with nothing machine-specific
+in the tracked tree:
+
+```
+NT_TRADES_DB_PATH=/Users/YOUR_NAME/Documents/NinjaTrader 8/db/NinjaTrader.sqlite
+```
+
+Add `NT_TRADES_ACCOUNT=Sim101` beside it to restrict the import to one account.
+No quoting is needed around a path with spaces, and no JSON config file is
+required at all.
+
+The older route still works and is unchanged — copy the tracked example to
+create a config in the **repo root** (override the location with
+`NT_TRADES_CONFIG`):
 
 ```
 cp ninjatrader.config.example.json ninjatrader.config.json
@@ -435,6 +450,8 @@ Then edit `dbPath` to your real path:
   "dbPath": "C:/Users/YOUR_NAME/Documents/NinjaTrader 8/db/NinjaTrader.sqlite"
 }
 ```
+
+`NT_TRADES_DB_PATH` wins when both are present.
 
 **Use forward slashes.** They work fine on Windows and dodge the most common
 mistake here — a Windows path pasted into JSON with unescaped backslashes, which
@@ -510,19 +527,118 @@ Then read them back with `get_trades` or `list_trades`.
 **A bridge failure is never fatal.** Every failure path warns and continues; the
 MCP server runs cache-only against whatever is already in `candles.db`.
 
-**`.env.local` is not a dotenv file.** There's no `dotenv` in this repo — the
-hand-rolled reader looks for `NT_BRIDGE_TOKEN` and nothing else. Putting
-`NT_BRIDGE_PORT` (or any other variable) in `.env.local` is **silently ignored**;
-it has to be a real process environment variable.
+**`.env.local` is not a dotenv file.** There's no `dotenv` in this repo and
+nothing is injected into `process.env`. The hand-rolled reader consults exactly
+five keys — `NT_BRIDGE_TOKEN`, `NT_BRIDGE_HOST`, `NT_BRIDGE_PORT`,
+`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT` — and ignores everything else, so putting any *other* variable there does nothing. Real
+process env always wins over the file.
+
+Because it's gitignored, `.env.local` is the right home for anything
+machine-specific: one checkout can serve a Windows box running NT8 locally
+(no host line, loopback default) and a Mac running NT8 in a VM
+(`NT_BRIDGE_HOST=10.211.55.2`) with **no difference in the tracked tree** — do
+not put these in `.mcp.json`, which is tracked and shared between your
+machines.
 
 ### Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
 | `NT_BRIDGE_TOKEN` | generated into `.env.local` on first run | Shared secret with the AddOn. Set in the real env to override the file. |
-| `NT_BRIDGE_PORT` | `9472` | Loopback bridge port. Invalid value disables the bridge, not the server. |
+| `NT_BRIDGE_PORT` | `9472` | Bridge port. Read from process env or `.env.local`. Invalid value disables the bridge, not the server. |
+| `NT_BRIDGE_HOST` | `127.0.0.1` | Interface the bridge binds. Read from process env or `.env.local`. Only override to reach NT8 in a VM — see below. An unbindable address disables the bridge, not the server. |
 | `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/` or `backtest-results/`, which stay repo-relative. |
-| `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. |
+| `NT_TRADES_DB_PATH` | unset | Path to NT8's `NinjaTrader.sqlite`. Read from process env or `.env.local`. **Takes priority over the config file** — set this and no JSON config is needed. |
+| `NT_TRADES_ACCOUNT` | unset | Optional account filter to pair with `NT_TRADES_DB_PATH`. Leave unset to import all accounts. |
+| `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. Only consulted when `NT_TRADES_DB_PATH` is unset. |
+
+### Running NT8 in a VM (Parallels / VMware) with the server on the host
+
+The server is cross-platform; only NT8 needs Windows. Running the server on a
+macOS or Linux host with NT8 in a VM works, with two adjustments.
+
+**1. The bridge has to bind an address the guest can reach.** By default it
+binds `127.0.0.1`, which inside the guest means the *guest's* own loopback — the
+AddOn will log `connecting to ws://127.0.0.1:9472` and back off forever. Bind the
+hypervisor's host address instead, by adding a line to `.env.local` next to your
+token:
+
+```
+NT_BRIDGE_HOST=10.211.55.2
+```
+
+That file is gitignored, so this stays local to the VM machine and a checkout on
+a normal Windows box is untouched. It applies however the server is started —
+your MCP client, `npm start`, anything — so there is nothing to configure in
+`.mcp.json`.
+
+Find the address on the host, not by guessing — on macOS with Parallels'
+default **Shared** networking it's the `bridge100` inet address:
+
+```
+ifconfig | grep -A3 '^bridge1' | grep 'inet '
+```
+
+Typically `10.211.55.2` (Shared) and `10.37.129.2` (Host-Only). Both exist only
+on the VM networks and are **not** routable from your LAN, so the bridge stays
+off the network.
+
+> Do **not** bind `0.0.0.0`. That publishes the bridge — and the `/feed`
+> channel — to every network the host is on. If your VM uses **Bridged**
+> networking there is no host-only address to bind; switch the VM to Shared
+> rather than exposing the port to the LAN.
+
+Then point the guest's `bridge.config.json` at it (step 3's file, same token):
+
+```json
+{ "token": "<NT_BRIDGE_TOKEN>", "url": "ws://10.211.55.2:9472" }
+```
+
+The host firewall will ask to allow incoming connections for `node` the first
+time — allow it. Everything else on the NT8 side (step 4's copy + compile, the
+renderer, Trading Hours templates) is unchanged. The bridge now crosses a
+virtual NIC instead of loopback; latency stays sub-millisecond, well inside the
+10s heartbeat / 30s timeout budget.
+
+**2. Find out where NT8's user data dir really is before writing any path.**
+This decides both `bridge.config.json` (step 3) and `dbPath` (step 10), and the
+obvious guess is often wrong. Parallels' default **maps the guest's user folders
+onto the Mac's** — so the guest's `Documents` is the host's `~/Documents`, and
+`Globals.UserDataDir` resolves to a path that lives on the *host* disk:
+
+```
+guest:  C:\Mac\Home\Documents\NinjaTrader 8
+host:   ~/Documents/NinjaTrader 8          # the same bytes
+```
+
+When that mapping is on, this is the easy case: `bridge.config.json` is written
+with a normal host-side editor, and `dbPath` is a plain local path — no share,
+no snapshot over SMB:
+
+```json
+{ "dbPath": "/Users/YOUR_NAME/Documents/NinjaTrader 8/db/NinjaTrader.sqlite" }
+```
+
+Confirm it in the guest rather than assuming, by reading the redirect target:
+
+```
+reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" /v Personal
+```
+
+`C:\Mac\Home\Documents` means mapping is on. A plain
+`C:\Users\<you>\Documents` means it's off, and the data dir genuinely lives
+inside the guest — then you need the reverse share (Parallels: **Share Windows
+→ Access Windows folders from Mac**) and a `dbPath` under that mount. The
+importer's snapshot-copy does work over a share (it copies the `.sqlite` plus
+its `-wal`/`-shm` siblings and integrity-checks the copy), just slower.
+
+> **Agent:** run that query as the *logged-in user*. Tooling that executes in
+> the guest as SYSTEM (e.g. `prlctl exec`) cannot traverse `C:\Mac` — the
+> Parallels share is a per-user session mount — and will report an empty
+> `C:\Users\<you>\Documents` placeholder, which reads as "NT8 was never
+> launched" when in fact the real data dir is on the host and full.
+
+---
 
 ## 12. Next steps
 

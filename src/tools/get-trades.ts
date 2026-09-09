@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ledger as defaultLedger, type Ledger } from "../db/ledger.js";
 import { ingestTrades } from "../trade-source/ingest.js";
 import { NinjaTraderSource } from "../trade-source/ninjatrader.js";
+import { envSetting, ENV_FILE } from "../core/env-local.js";
 import type { TradeSource } from "../trade-source/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
@@ -21,17 +22,29 @@ interface NinjaTraderConfig {
 }
 
 /**
- * Reads ninjatrader.config.json and returns { dbPath, account? }.
+ * Resolves NT8's trade database location and returns { dbPath, account? }.
  *
- * Path resolution (in priority order):
- *   1. NT_TRADES_CONFIG env var (absolute path to a custom config file)
- *   2. <repo-root>/ninjatrader.config.json (default)
+ * Resolution (in priority order):
+ *   1. NT_TRADES_DB_PATH — process env, else .env.local. Optionally paired
+ *      with NT_TRADES_ACCOUNT. No JSON file needed at all.
+ *   2. NT_TRADES_CONFIG env var (absolute path to a custom config file)
+ *   3. <repo-root>/ninjatrader.config.json (default)
+ *
  *
  * This function is LAZY — only called inside the ingest branch of the handlers,
  * never at module load or registration time. Throws a descriptive Error if the
  * file is missing, malformed JSON, or lacks the required `dbPath` field.
+ *
+ * `envFile` exists so tests can isolate from the developer's own `.env.local`;
+ * production callers use the default.
  */
-export function loadNinjaTraderConfig(): NinjaTraderConfig {
+export function loadNinjaTraderConfig(envFile: string = ENV_FILE): NinjaTraderConfig {
+  const dbPathFromEnv = envSetting("NT_TRADES_DB_PATH", envFile);
+  if (dbPathFromEnv) {
+    const account = envSetting("NT_TRADES_ACCOUNT", envFile);
+    return account ? { dbPath: dbPathFromEnv, account } : { dbPath: dbPathFromEnv };
+  }
+
   const configPath = process.env.NT_TRADES_CONFIG
     ? path.resolve(process.env.NT_TRADES_CONFIG)
     : path.join(__dirname, "..", "..", "ninjatrader.config.json");
@@ -41,8 +54,9 @@ export function loadNinjaTraderConfig(): NinjaTraderConfig {
     raw = readFileSync(configPath, "utf8");
   } catch {
     throw new Error(
-      `loadNinjaTraderConfig: cannot read "${configPath}". ` +
-        `Create the file with shape { "dbPath": "<path to NinjaTrader.sqlite>", "account"?: "<account name>" }.`,
+      `loadNinjaTraderConfig: cannot read "${configPath}", and NT_TRADES_DB_PATH is not set. ` +
+        `Either set NT_TRADES_DB_PATH=<path to NinjaTrader.sqlite> in .env.local, ` +
+        `or create the file with shape { "dbPath": "<path to NinjaTrader.sqlite>", "account"?: "<account name>" }.`,
     );
   }
 

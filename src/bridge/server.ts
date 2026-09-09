@@ -6,6 +6,7 @@ import { consumerHub } from "./consumer.js";
 import { encode } from "./protocol.js";
 
 export const DEFAULT_PORT = 9472;
+export const DEFAULT_HOST = "127.0.0.1";
 export const SERVER_VERSION = "0.1.0";
 
 export interface BridgeServer {
@@ -22,10 +23,12 @@ function extractBearer(req: IncomingMessage): string | null {
 
 export async function startServer(opts: {
   port: number;
+  host?: string;
   token: string;
   connections: ConnectionManager;
 }): Promise<BridgeServer> {
   const { port, token, connections } = opts;
+  const host = opts.host ?? DEFAULT_HOST;
 
   const http: HttpServer = createServer((_req, res) => {
     res.writeHead(404);
@@ -76,7 +79,7 @@ export async function startServer(opts: {
   await new Promise<void>((resolve, reject) => {
     const onError = (err: Error) => reject(err);
     http.once("error", onError);
-    http.listen(port, "127.0.0.1", () => {
+    http.listen(port, host, () => {
       http.off("error", onError);
       resolve();
     });
@@ -85,7 +88,7 @@ export async function startServer(opts: {
   // The ACTUAL bound port — with {port: 0} the OS assigns one, and callers
   // (ephemeral-port tests) must be able to dial back.
   const boundPort = (http.address() as AddressInfo).port;
-  console.error(`[bridge] listening on 127.0.0.1:${boundPort}`);
+  console.error(`[bridge] listening on ${host}:${boundPort}`);
 
   return {
     port: boundPort,

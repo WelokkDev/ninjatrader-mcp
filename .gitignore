@@ -180,3 +180,5 @@ vite.config.ts.timestamp-*
 
 # Personal trade exports
 Last_Trades.xlsx
+
+.DS_Store

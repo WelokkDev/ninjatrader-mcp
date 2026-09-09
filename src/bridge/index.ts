@@ -1,6 +1,7 @@
 import { loadOrCreateToken } from "./auth.js";
 import { ConnectionManager, type ConnectionStatus } from "./connection.js";
-import { startServer, DEFAULT_PORT, type BridgeServer } from "./server.js";
+import { startServer, DEFAULT_PORT, DEFAULT_HOST, type BridgeServer } from "./server.js";
+import { envSetting } from "../core/env-local.js";
 import type { InboundMessage, OutboundMessage } from "./protocol.js";
 
 export { BridgeRequestError, type BridgeErrorKind } from "./connection.js";
@@ -11,14 +12,16 @@ const connections = new ConnectionManager();
 export async function startBridge(): Promise<void> {
   if (server) return;
 
-  const port = process.env.NT_BRIDGE_PORT
-    ? parseInt(process.env.NT_BRIDGE_PORT, 10)
-    : DEFAULT_PORT;
+
+  const rawPort = envSetting("NT_BRIDGE_PORT");
+  const port = rawPort ? parseInt(rawPort, 10) : DEFAULT_PORT;
 
   if (isNaN(port) || port <= 0 || port > 65535) {
-    console.error(`[bridge] WARNING: invalid NT_BRIDGE_PORT (${process.env.NT_BRIDGE_PORT}); bridge disabled`);
+    console.error(`[bridge] WARNING: invalid NT_BRIDGE_PORT (${rawPort}); bridge disabled`);
     return;
   }
+
+  const host = envSetting("NT_BRIDGE_HOST") ?? DEFAULT_HOST;
 
   let token: string;
   try {
@@ -37,10 +40,10 @@ export async function startBridge(): Promise<void> {
   }
 
   try {
-    server = await startServer({ port, token, connections });
+    server = await startServer({ port, host, token, connections });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[bridge] WARNING: failed to start on port ${port} (${msg}); bridge disabled, MCP continuing`);
+    console.error(`[bridge] WARNING: failed to start on ${host}:${port} (${msg}); bridge disabled, MCP continuing`);
     server = null;
   }
 }
