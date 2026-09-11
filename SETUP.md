@@ -143,6 +143,9 @@ prints the exact path it looked at (see step 5).
 SMA parity snapshots for offline comparison). **Skip it** — it's not part of a
 working setup.
 
+`ninja-addon/addons/feed-watchdog.cs` is optional and standalone, connection
+alerts that keep working when everything else here is down. See step 11.
+
 **Then, in NinjaTrader:**
 
 1. Open the NinjaScript Editor (**New → NinjaScript Editor**).
@@ -505,7 +508,86 @@ surfaces errors directly instead of swallowing them. Reading the result:
 
 Then read them back with `get_trades` or `list_trades`.
 
-## 11. Troubleshooting
+## 11. Optional — connection alerts
+
+Skip this if you never leave anything running unattended. It watches the Control
+Center connection light and tells you when it leaves green — in the Output
+window, and optionally on Discord.
+
+It is **standalone on purpose**: it shares no state with `McpBridge`, so it keeps
+reporting when the MCP server, the `/feed` socket, or your runner are down, which
+is exactly when you want to hear from it. It never touches orders.
+
+"Green" is not one flag. NT8 carries two independent statuses per connection —
+`Status` (orders/brokerage) and `PriceStatus` (market data) — and the light is
+green only when **both** are Connected — though a half that has never connected
+at all does not count against it, see the table below. The asymmetric case,
+orders fine but data dead, is the one that runs a strategy on a feed that
+stopped; nothing else in this repo reads `PriceStatus`.
+
+**Copy and compile** — the developer's own hands, exactly as in step 4:
+
+| From (this repo) | To |
+|---|---|
+| `ninja-addon/addons/feed-watchdog.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
+
+Compile with **F5**. It loads automatically — there is no enable checkbox.
+
+### Write the watchdog config
+
+Optional. Without it the AddOn logs to the Output window only, and says so at
+startup. Same directory as `bridge.config.json` — the **root** of the NT8 user
+data directory, not `bin/Custom/`:
+
+```
+C:\Users\<you>\Documents\NinjaTrader 8\feed-watchdog.config.json
+```
+
+```json
+{
+  "webhook": "https://discord.com/api/webhooks/...",
+  "ignore": ["Playback Connection", "Simulated Data Feed"]
+}
+```
+
+| Key | Required | Purpose |
+|---|---|---|
+| `webhook` | no | Discord webhook URL. Omit for Output-window-only. |
+| `ignore` | no | Connection names to skip entirely, case-insensitive. Rarely needed — a connection that has never come up reads as IDLE on its own, so Playback and unused providers stay quiet without being listed. Use it for anything you want out of the picture regardless. |
+
+Unlike `bridge.config.json`, this file is read **once at startup** — changing it
+needs an NT8 restart.
+
+### What you should see
+
+About 16 seconds after NT8 starts, one baseline line per connection and **no
+Discord message**:
+
+```
+[FeedWatchdog] started — alerts to Discord + this window
+[FeedWatchdog] baseline — Rithmic — data:Connected orders:Connected
+```
+
+After that it speaks only on change:
+
+| Light | Meaning | When it alerts |
+|---|---|---|
+| 🟢 GREEN | every half that has ever been up is Connected | on recovery from a reported outage — never at startup |
+| ⚪ IDLE | no half has ever connected this session — Playback, an unused provider | never; logged once and that is all |
+| 🟠 ORANGE | a half still negotiating | only if it holds ~45s, so a slow connect or a blip stays quiet |
+| 🔴 RED | `ConnectionLost` on either half, **or** `Disconnected` on a half that had been up | immediately, every time, first pass included |
+
+NT8 reports `Disconnected` both for "this dropped" and for "you never used
+this", so the AddOn tracks, per half, whether it has ever been Connected in this
+session. That flag is sticky: the moment a half has been up, a later
+`Disconnected` on it is a drop and reads RED. An order-only connection whose
+price half never connects therefore reads GREEN rather than nagging, without
+blinding the watchdog to that same half dying later.
+
+A connection already down when NT8 starts alerts on that first pass: the startup
+quiet window suppresses baselines and unsettled states, never RED.
+
+## 12. Troubleshooting
 
 | What you see | What it means |
 |---|---|
@@ -640,7 +722,7 @@ its `-wal`/`-shm` siblings and integrity-checks the copy), just slower.
 
 ---
 
-## 12. Next steps
+## 13. Next steps
 
 You now have the public tool surface: `get_candles`, `resolve_session_days`,
 `prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`,

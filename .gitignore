@@ -18,6 +18,7 @@ data/*.db-shm
 data/*.db-wal
 .test-data/
 src/private/
+src/worktrees/
 build/
 
 # Trade-import config — holds a local filesystem path and account name.
