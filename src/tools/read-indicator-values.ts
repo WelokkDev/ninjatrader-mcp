@@ -4,12 +4,13 @@ import { isConnected as defaultIsConnected, request as defaultRequest } from "..
 import type { InboundMessage } from "../bridge/protocol.js";
 import { formatExchangeTime } from "../core/time.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import {
+  indicatorSelectorError,
+  indicatorSelectorPayload,
+  type IndicatorSelectorArgs,
+} from "./indicator-selector.js";
 
-export interface ReadIndicatorValuesArgs {
-  symbol: string;
-  timeframe?: string;
-  id?: number;
-  match?: { name: string; params?: Record<string, string | number | boolean> };
+export interface ReadIndicatorValuesArgs extends IndicatorSelectorArgs {
   from?: number;
   to?: number;
   bars?: number;
@@ -38,15 +39,8 @@ export function createReadIndicatorValuesHandler(deps: ReadIndicatorValuesDeps) 
     }
     // Cross-field rules live here, not in the wire schema (placeOrderFields
     // convention): a bad call gets an actionable message, not a schema reject.
-    const hasId = args.id !== undefined;
-    const hasMatch = args.match !== undefined;
-    if (hasId === hasMatch) {
-      return errorResult(
-        hasId
-          ? "read_indicator_values takes either id or match, not both — id wins when you have it (call list_chart_indicators for one)."
-          : "read_indicator_values needs an indicator selector: id (from list_chart_indicators) or match:{name, params}.",
-      );
-    }
+    const selectorError = indicatorSelectorError("read_indicator_values", args);
+    if (selectorError !== null) return errorResult(selectorError);
     const hasRange = args.from !== undefined || args.to !== undefined;
     if (args.bars !== undefined && hasRange) {
       return errorResult(
@@ -59,12 +53,7 @@ export function createReadIndicatorValuesHandler(deps: ReadIndicatorValuesDeps) 
       );
     }
 
-    const payload: Record<string, unknown> = { symbol: args.symbol };
-    if (args.timeframe !== undefined) payload.timeframe = args.timeframe;
-    // `indicatorId` on the wire, `id` in the tool API: a payload `id` would
-    // clobber the envelope's correlation uuid.
-    if (args.id !== undefined) payload.indicatorId = args.id;
-    if (args.match !== undefined) payload.match = args.match;
+    const payload = indicatorSelectorPayload(args);
     if (args.from !== undefined) payload.from = args.from;
     if (args.to !== undefined) payload.to = args.to;
     // No range means "the current value" — sent explicitly so the AddOn never
@@ -96,7 +85,7 @@ export function createReadIndicatorValuesHandler(deps: ReadIndicatorValuesDeps) 
         symbol: args.symbol,
         ...(args.timeframe !== undefined ? { timeframe: args.timeframe } : {}),
         ...(res.reason !== undefined ? { reason: res.reason } : {}),
-        hint: "No matching indicator on that chart — call list_chart_indicators to refresh the id handles (a chart reload or timeframe switch recreates indicators and invalidates ids).",
+        hint: "`reason` says whether the chart or the indicator is missing — list_chart_indicators shows what is open and refreshes id handles.",
       });
     }
 
@@ -139,7 +128,7 @@ export function registerReadIndicatorValues(server: McpServer): void {
   });
   server.tool(
     "read_indicator_values",
-    "Read the computed values of ONE indicator on an open NinjaTrader 8 chart — step 2 of the two-step indicator read. Call list_chart_indicators first to get the indicator's `id`, then poll here; this call is lean (values only, no reflection) and is the one to repeat. SELECTOR: pass id (preferred) OR match:{name, params} — name accepts 'SMA' or the full 'NinjaTrader.NinjaScript.Indicators.SMA', params disambiguates between several instances ({Period: 20}); exactly one of the two. RANGE: either bars:N (the last N points, the default is 1 = the current value) or from/to in unix seconds (either end may be omitted); not both. RESULT: one entry per plot — {name, values:[{t, v}], availableFrom, availableTo, truncated}. `t` is unix seconds on the same convention as get_candles, so points line up 1:1 with candles. availableFrom/To are what the indicator could actually serve: when they are narrower than what you asked for, you hit the instance's value-retention wall (readableDepth from list_chart_indicators), NOT a gap in the chart — compare them with barsFrom/barsTo, the chart's loaded window. found:false is normal and means the handle went stale (chart reload / timeframe switch); re-run list_chart_indicators. CAVEAT: values are NOT compensated for the indicator's Displacement — the response reports it so you can shift them yourself. Read-only: this cannot change an indicator.",
+    "Read the computed values of ONE indicator on an open NinjaTrader 8 chart — step 2 of the two-step indicator read. Call list_chart_indicators first to get the indicator's `id`, then poll here; this call is lean (values only, no reflection) and is the one to repeat. SELECTOR: pass id (preferred) OR match:{name, params} — name accepts 'SMA' or the full 'NinjaTrader.NinjaScript.Indicators.SMA', params disambiguates between several instances ({Period: 20}); exactly one of the two. RANGE: either bars:N (the last N points, the default is 1 = the current value) or from/to in unix seconds (either end may be omitted); not both. RESULT: one entry per plot — {name, values:[{t, v}], availableFrom, availableTo, truncated}. `t` is unix seconds on the same convention as get_candles, so points line up 1:1 with candles. availableFrom/To are what the indicator could actually serve: when they are narrower than what you asked for, you hit the instance's value-retention wall (readableDepth from list_chart_indicators), NOT a gap in the chart — compare them with barsFrom/barsTo, the chart's loaded window. found:false is normal and means the handle went stale (chart reload / timeframe switch); re-run list_chart_indicators. CAVEAT: values are NOT compensated for the indicator's Displacement — the response reports it so you can shift them yourself. Read-only: set_indicator_params is the tool that changes an indicator's settings.",
     {
       symbol: z.string().min(1),
       timeframe: z.string().min(1).optional(),

@@ -3,6 +3,7 @@ import {
   isConnected as bridgeIsConnected,
   request as bridgeRequest,
   getAddonCaps as bridgeGetAddonCaps,
+  capsError as bridgeCapsError,
   BridgeRequestError,
 } from "../bridge/index.js";
 import type {
@@ -497,16 +498,9 @@ export class ExecutionService {
     return undefined;
   }
 
-  /** null when the AddOn supports `op`; else a fast-fail (certainly-not-
-   *  dispatched) error naming the fix. Caps absent = pre-caps AddOn (place_order
-   *  only). */
+  /** Certainly-not-dispatched, so a caller can retry safely. */
   private capsError(op: string): string | null {
-    const caps = this.deps.getAddonCaps() ?? ["place_order"];
-    if (caps.includes(op)) return null;
-    return (
-      `the connected AddOn does not support ${op} — recompile ` +
-      `ninja-addon/addons/mcp-bridge.cs in the NinjaScript Editor (F5) and reconnect`
-    );
+    return bridgeCapsError(op, this.deps.getAddonCaps());
   }
 
   async submit(intent: OrderIntent): Promise<OrderResult> {

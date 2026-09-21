@@ -22,9 +22,20 @@ export function readEnvFile(file: string = ENV_FILE): Map<string, string> {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eq = trimmed.indexOf("=");
     if (eq === -1) continue;
-    map.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim());
+    map.set(trimmed.slice(0, eq).trim(), unquote(trimmed.slice(eq + 1).trim()));
   }
   return map;
+}
+
+/** Strips one pair of matching surrounding quotes: a path with a space has to be
+ *  quoted for a shell `source` of the same file. */
+function unquote(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' || first === "'") && last === first) return value.slice(1, -1);
+  }
+  return value;
 }
 
 /** Process env first, then .env.local. Empty values count as unset. */

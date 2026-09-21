@@ -570,8 +570,8 @@ describe("/feed channel", () => {
         orderType: "Market",
         quantity: 1,
         tif: "Day",
-        clientOrderId: "zd-1E",
-        reason: "zone_dip entry",
+        clientOrderId: "coid-1E",
+        reason: "strategy entry",
       }),
     );
     const reply = await client.next();
@@ -585,8 +585,8 @@ describe("/feed channel", () => {
         symbol: "MNQ",
         action: "Buy",
         quantity: 1,
-        clientOrderId: "zd-1E",
-        reason: "zone_dip entry",
+        clientOrderId: "coid-1E",
+        reason: "strategy entry",
         source: expect.stringMatching(/^feed:consumer:\d+$/),
       }),
     );

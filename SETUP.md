@@ -435,8 +435,9 @@ NT_TRADES_DB_PATH=/Users/YOUR_NAME/Documents/NinjaTrader 8/db/NinjaTrader.sqlite
 ```
 
 Add `NT_TRADES_ACCOUNT=Sim101` beside it to restrict the import to one account.
-No quoting is needed around a path with spaces, and no JSON config file is
-required at all.
+A path with spaces works as written; quotes are optional and stripped, so quote
+it if you also `source` this file from a shell. No JSON config file is required
+at all.
 
 The older route still works and is unchanged — copy the tracked example to
 create a config in the **repo root** (override the location with

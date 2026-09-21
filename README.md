@@ -42,7 +42,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   ┌──────────────────────────────────────────────────────────────────┐
   │  ninjatrader-mcp (Node.js process)                               │
   │                                                                  │
-  │   MCP tools (src/tools/) — 19 generic tools, plus:               │
+  │   MCP tools (src/tools/) — 23 generic tools, plus:               │
   │     6 write tools (place/oco/change when trading is enabled;     │
   │     cancel/cancel_all/flatten when accounts are allow-listed)    │
   │     5 experiment-lab tools (registered by private bins           │
@@ -132,10 +132,13 @@ The public server (`build/index.js`) registers 23 tools. The write tools appear 
 | `navigate_chart` | Programmatic Go To: scroll a chart to a date/time (centered or right-aligned) and/or zoom to a bar count; selects the tab, focuses the window, and reports the resulting visible range. Only reaches what the chart has loaded — `clamped: true` in the response means increase the chart's Days To Load. |
 | `list_chart_indicators` | Discover the indicators on your open charts: identity, the indicator's own configured parameters, plot styling, readable depth, and an `id` handle. Step 1 of the two-step indicator read. |
 | `read_indicator_values` | Read one indicator's computed plot values — by `id` (preferred) or a `name` + params selector — as the last N points or a `from`/`to` unix range. |
+| `set_indicator_params` | Change one indicator's settings — the same names `list_chart_indicators` reports — then rebuild it through the chart's own reload command so the change reaches history. |
 
 Drawings survive chart reloads: the AddOn retains every draw command per symbol and the renderer replays them when a chart's data series reloads. All drawing tools fail closed with a clear message when NT8 is not connected.
 
-**Reading indicators is discover-then-poll:** call `list_chart_indicators` once for an `id`, then poll `read_indicator_values` with it — the poll is lean (values only, no reflection). An `id` is stable within a session but a chart reload or timeframe switch recreates indicators and invalidates it; the read then answers `found: false` (a normal outcome, not an error) and you re-discover. Value timestamps use the same unix-seconds convention as `get_candles`, so points line up 1:1 with candles. When a plot's `availableFrom`/`availableTo` are narrower than the range you asked for, you hit that indicator instance's value-retention wall (`readableDepth`, usually NT8's default 256 bars) rather than a gap in the chart — the response reports the chart's own loaded window alongside, so the two are distinguishable. Both tools are strictly read-only: they cannot add, remove, or reconfigure an indicator.
+**Reading indicators is discover-then-poll:** call `list_chart_indicators` once for an `id`, then poll `read_indicator_values` with it — the poll is lean (values only, no reflection). An `id` is stable within a session but a chart reload or timeframe switch recreates indicators and invalidates it; the read then answers `found: false` (a normal outcome, not an error) and you re-discover. Value timestamps use the same unix-seconds convention as `get_candles`, so points line up 1:1 with candles. When a plot's `availableFrom`/`availableTo` are narrower than the range you asked for, you hit that indicator instance's value-retention wall (`readableDepth`, usually NT8's default 256 bars) rather than a gap in the chart — the response reports the chart's own loaded window alongside, so the two are distinguishable. Both tools are strictly read-only; `set_indicator_params` is the only write, and neither tool can add or remove an indicator.
+
+**Writing a setting takes a rebuild.** NT8 only applies a changed setting by re-running the indicator over history — what the Indicators dialog's Apply does — and exposes no API for it, so the tool drives whatever reload command the chart itself binds, and reports a rebuild it cannot confirm rather than claiming success.
 
 ### Ledger reads
 

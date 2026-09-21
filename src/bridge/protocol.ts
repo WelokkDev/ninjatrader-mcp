@@ -503,6 +503,54 @@ export const indicatorValuesResponseMessageSchema = reqMsg("indicator_values_res
 });
 export type IndicatorValuesResponseMessage = z.infer<typeof indicatorValuesResponseMessageSchema>;
 
+/** Exactly one of indicatorId/match. `params` keys are the names
+ *  list_chart_indicators reports. */
+export const requestSetIndicatorParamsMessageSchema = reqMsg("request_set_indicator_params", {
+  symbol: z.string(),
+  timeframe: z.string().optional(),
+  indicatorId: z.number().int().optional(),
+  match: indicatorMatchSchema.optional(),
+  params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+  reload: z.boolean().optional(),
+});
+export type RequestSetIndicatorParamsMessage = z.infer<
+  typeof requestSetIndicatorParamsMessageSchema
+>;
+
+export const indicatorParamChangeSchema = z.object({
+  name: z.string(),
+  from: z.union([z.string(), z.number(), z.boolean()]),
+  to: z.union([z.string(), z.number(), z.boolean()]),
+});
+export type IndicatorParamChange = z.infer<typeof indicatorParamChangeSchema>;
+
+export const indicatorParamErrorSchema = z.object({
+  name: z.string(),
+  reason: z.string(),
+});
+export type IndicatorParamError = z.infer<typeof indicatorParamErrorSchema>;
+
+/** found:true with applied:false is a refusal; `reason` says why. */
+export const setIndicatorParamsResponseMessageSchema = reqMsg("set_indicator_params_response", {
+  found: z.boolean(),
+  applied: z.boolean(),
+  reloaded: z.boolean().default(false),
+  reason: z.string().optional(),
+  symbol: z.string().optional(),
+  timeframe: z.string().optional(),
+  window: z.string().optional(),
+  name: z.string().optional(), // full NT8 type name
+  displayName: z.string().optional(),
+  indicatorId: z.number().int().optional(),
+  changed: z.array(indicatorParamChangeSchema).default([]),
+  unchanged: z.array(z.string()).default([]),
+  errors: z.array(indicatorParamErrorSchema).default([]),
+  params: z.array(indicatorParamSchema).default([]),
+});
+export type SetIndicatorParamsResponseMessage = z.infer<
+  typeof setIndicatorParamsResponseMessageSchema
+>;
+
 // Live position tracking (read-only). Enum-ish fields carry NT8's own
 // ToString() values so new values pass through.
 
@@ -814,6 +862,7 @@ const INBOUND_SCHEMAS = {
   drawings_response: drawingsResponseMessageSchema,
   chart_indicators_response: chartIndicatorsResponseMessageSchema,
   indicator_values_response: indicatorValuesResponseMessageSchema,
+  set_indicator_params_response: setIndicatorParamsResponseMessageSchema,
   subscribe_ack: subscribeAckMessageSchema,
   unsubscribe_ack: unsubscribeAckMessageSchema,
   positions_response: positionsResponseMessageSchema,
@@ -845,6 +894,7 @@ export type OutboundMessage =
   | RequestDrawingsMessage
   | RequestChartIndicatorsMessage
   | RequestIndicatorValuesMessage
+  | RequestSetIndicatorParamsMessage
   | SubscribeBarsMessage
   | UnsubscribeBarsMessage
   | RequestPositionsMessage

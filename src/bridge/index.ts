@@ -5,6 +5,7 @@ import { envSetting } from "../core/env-local.js";
 import type { InboundMessage, OutboundMessage } from "./protocol.js";
 
 export { BridgeRequestError, type BridgeErrorKind } from "./connection.js";
+export { capsError, PRE_CAPS_ADDON_CAPS } from "./caps.js";
 
 let server: BridgeServer | null = null;
 const connections = new ConnectionManager();

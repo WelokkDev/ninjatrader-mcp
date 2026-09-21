@@ -1,14 +1,8 @@
-import { existsSync, readFileSync } from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import { readEnvFile } from "../core/env-local.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Shared with the bridge token (src/bridge/auth.ts). Read fresh every call (no
-// cache) so NT_TRADING_ENABLED=0 disables the write path live. process.env wins
-// over the file, so a launch-env master switch overrides an on-disk one.
-const ENV_FILE = path.join(__dirname, "..", "..", ".env.local");
+// Read fresh every call (no cache) so NT_TRADING_ENABLED=0 disables the write
+// path live. process.env wins over the file, so a launch-env master switch
+// overrides an on-disk one.
 
 const ENABLED_KEY = "NT_TRADING_ENABLED";
 const ACCOUNTS_KEY = "NT_TRADING_ALLOW_ACCOUNTS";
@@ -27,25 +21,6 @@ export interface TradingConfig {
   maxQty: number;
   /** Orders dispatched to NT8 per rolling 60s. 0 = unlimited. */
   maxOrdersPerMin: number;
-}
-
-function readEnvFile(): Map<string, string> {
-  const map = new Map<string, string>();
-  if (!existsSync(ENV_FILE)) return map;
-  let content: string;
-  try {
-    content = readFileSync(ENV_FILE, "utf-8");
-  } catch {
-    return map;
-  }
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    map.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim());
-  }
-  return map;
 }
 
 function isTruthy(v: string | undefined): boolean {
@@ -75,7 +50,13 @@ function parseNonNegInt(v: string | undefined, fallback: number): number {
  * independent gate of its own.
  */
 export function loadTradingConfig(env: NodeJS.ProcessEnv = process.env): TradingConfig {
-  const file = readEnvFile();
+  // Unreadable reads as empty, so the gate stays shut.
+  let file: Map<string, string>;
+  try {
+    file = readEnvFile();
+  } catch {
+    file = new Map();
+  }
   const get = (key: string): string | undefined => env[key] ?? file.get(key);
 
   return {

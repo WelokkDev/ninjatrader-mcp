@@ -49,4 +49,19 @@ describe("env-local", () => {
     expect(map.get("NT_BRIDGE_TOKEN")).toBe("ab=cd");
     expect(map.has("# a comment")).toBe(false);
   });
+
+  it("strips one pair of surrounding quotes, so a path with a space can be shell-sourced", () => {
+    // Inner quotes and an unmatched quote are kept.
+    const file = envFile(
+      'NT_TRADES_DB_PATH="/Users/x/NinjaTrader 8/db/NinjaTrader.sqlite"\n' +
+        "NT_BRIDGE_HOST='10.211.55.2'\n" +
+        "NT_A=\"unbalanced\n" +
+        "NT_B=say \"hi\" there\n",
+    );
+    const map = readEnvFile(file);
+    expect(map.get("NT_TRADES_DB_PATH")).toBe("/Users/x/NinjaTrader 8/db/NinjaTrader.sqlite");
+    expect(map.get("NT_BRIDGE_HOST")).toBe("10.211.55.2");
+    expect(map.get("NT_A")).toBe('"unbalanced');
+    expect(map.get("NT_B")).toBe('say "hi" there');
+  });
 });

@@ -568,6 +568,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private static readonly string[] WriteCaps = new[]
 		{
 			"place_order", "place_oco", "cancel_order", "cancel_all", "flatten", "change_order",
+			"set_indicator_params",
 		};
 
 		private async Task SendHelloAsync(ClientWebSocket ws, CancellationToken ct)
@@ -949,6 +950,10 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 				case "request_indicator_values":
 					HandleRequestIndicatorValues(obj);
+					break;
+
+				case "request_set_indicator_params":
+					HandleRequestSetIndicatorParams(obj);
 					break;
 
 				// Off the read thread: snapshots enumerate NT collections and
@@ -1586,7 +1591,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return "";
 			}
 		}
-		
+
 		// The table NT8 merged across, sent with every candles_response. Null =
 		// read failed; empty = NT8 has no table and so did not merge.
 		private static List<object> RolloverWindows(Instrument instrument)
@@ -3466,13 +3471,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		// Built once off the WS thread, then read (never mutated) on every dispatcher.
-		private class IndicatorValueQuery
+		private class IndicatorSelector
 		{
 			public string SymbolFilter;
 			public string TimeframeFilter;
 			public int?   IndicatorId;
 			public string MatchName;
 			public IDictionary<string, object> MatchParams;
+		}
+
+		private class IndicatorValueQuery : IndicatorSelector
+		{
 			public long?  FromTs;
 			public long?  ToTs;
 			public int?   LastBars;
@@ -3533,23 +3542,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 						try { title = chart.Title; } catch { /* label only */ }
 
 						var tabControl = chart.MainTabControl;
-						if (tabControl != null)
+						var selected   = tabControl != null ? tabControl.SelectedItem : null;
+						foreach (var entry in ChartTabsOf(chart))
 						{
-							var selected = tabControl.SelectedItem;
-							foreach (var item in tabControl.Items)
-							{
-								try
-								{
-									var tabItem  = item as System.Windows.Controls.TabItem;
-									var chartTab = tabItem != null
-										? tabItem.Content as NinjaTrader.Gui.Chart.ChartTab
-										: null;
-									if (chartTab == null) continue;
-									readTab(title, chartTab,
-										object.ReferenceEquals(item, selected), outList);
-								}
-								catch (Exception ex) { Log(logTag + " tab read failed: " + ex.Message); }
-							}
+							try { readTab(title, entry.Value, object.ReferenceEquals(entry.Key, selected), outList); }
+							catch (Exception ex) { Log(logTag + " tab read failed: " + ex.Message); }
 						}
 					}
 					catch (Exception ex) { Log(logTag + " window read failed: " + ex.Message); }
@@ -3752,6 +3749,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 				|| pt == typeof(float) || pt == typeof(double) || pt == typeof(decimal);
 		}
 
+		private static bool IsIndicatorParam(System.Reflection.PropertyInfo p)
+		{
+			if (!p.CanRead || p.GetIndexParameters().Length > 0) return false;
+			if (IsNinjaScriptBaseDeclared(p)) return false;
+
+			bool hasDisplay = p.GetCustomAttributes(
+				typeof(System.ComponentModel.DataAnnotations.DisplayAttribute), false).Length > 0;
+			bool isNsp = p.GetCustomAttributes(
+				typeof(NinjaTrader.NinjaScript.NinjaScriptPropertyAttribute), false).Length > 0;
+			if (!hasDisplay && !isNsp) return false;
+
+			var pt = p.PropertyType;
+			// A plot output is a value, not configuration — tool 2 serves those.
+			if (typeof(NinjaTrader.NinjaScript.ISeries<double>).IsAssignableFrom(pt)) return false;
+			return IsWireScalar(pt);
+		}
+
 		private static List<object> ReadIndicatorParams(object ind)
 		{
 			var prms = new List<object>();
@@ -3768,8 +3782,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				try
 				{
-					if (!p.CanRead || p.GetIndexParameters().Length > 0) continue;
-					if (IsNinjaScriptBaseDeclared(p)) continue;
+					if (!IsIndicatorParam(p)) continue;
 
 					// Non-generic form: no `using System.Reflection` here, so the
 					// GetCustomAttribute<T>() extension method isn't in scope.
@@ -3778,15 +3791,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					var disp = dispAttrs.Length > 0
 						? (System.ComponentModel.DataAnnotations.DisplayAttribute) dispAttrs[0]
 						: null;
-					bool isNsp = p.GetCustomAttributes(
-						typeof(NinjaTrader.NinjaScript.NinjaScriptPropertyAttribute), false).Length > 0;
-					if (disp == null && !isNsp) continue;
 
 					var pt = p.PropertyType;
-					// A plot output is a value, not configuration — tool 2 serves those.
-					if (typeof(NinjaTrader.NinjaScript.ISeries<double>).IsAssignableFrom(pt)) continue;
-					if (!IsWireScalar(pt)) continue;
-
 					object raw = p.GetValue(ind, null);
 					object val;
 					if (raw == null)    val = "";
@@ -3881,34 +3887,19 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		private async Task BuildAndSendIndicatorValuesAsync(string id, IDictionary<string, object> obj)
 		{
-			var symbol = GetString(obj, "symbol");
-			if (string.IsNullOrEmpty(symbol))
-			{
-				SendErrorResponse(id, "request_indicator_values requires symbol");
-				return;
-			}
-
 			var q = new IndicatorValueQuery
 			{
-				SymbolFilter    = symbol,
-				TimeframeFilter = GetString(obj, "timeframe"),
-				// indicatorId, not id: the envelope's id is the correlation uuid.
-				IndicatorId     = GetInt(obj, "indicatorId"),
-				FromTs          = GetLong(obj, "from"),
-				ToTs            = GetLong(obj, "to"),
-				LastBars        = GetInt(obj, "bars"),
+				FromTs   = GetLong(obj, "from"),
+				ToTs     = GetLong(obj, "to"),
+				LastBars = GetInt(obj, "bars"),
 			};
-			var match = GetDict(obj, "match");
-			if (match != null)
+			var selectorError = TryParseIndicatorSelector(obj, q, "request_indicator_values");
+			if (selectorError != null)
 			{
-				q.MatchName   = GetString(match, "name");
-				q.MatchParams = GetDict(match, "params");
-			}
-			if (!q.IndicatorId.HasValue && string.IsNullOrEmpty(q.MatchName))
-			{
-				SendErrorResponse(id, "request_indicator_values requires indicatorId or match.name");
+				SendErrorResponse(id, selectorError);
 				return;
 			}
+			var symbol = q.SymbolFilter;
 			// No range at all means "the current value".
 			if (!q.LastBars.HasValue && !q.FromTs.HasValue && !q.ToTs.HasValue) q.LastBars = 1;
 
@@ -3944,11 +3935,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				payload["found"]  = false;
 				payload["symbol"] = symbol;
 				if (!string.IsNullOrEmpty(q.TimeframeFilter)) payload["timeframe"] = q.TimeframeFilter;
-				if (reason == null)
-					reason = walk.Entries.Count > 0
-						? "no indicator on the matching chart(s) answers that selector"
-						: "no open chart matches symbol=" + symbol
-							+ (string.IsNullOrEmpty(q.TimeframeFilter) ? "" : " timeframe=" + q.TimeframeFilter);
+				if (reason == null) reason = NoMatchReason(walk, q);
 				if (walk.Skipped > 0)
 					reason += " (" + walk.Skipped + " chart window(s) missed the read budget)";
 				payload["reason"] = reason;
@@ -4138,10 +4125,38 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return plots;
 		}
 
+		// Returns the error to send, or null.
+		private static string TryParseIndicatorSelector(
+			IDictionary<string, object> obj, IndicatorSelector q, string request)
+		{
+			q.SymbolFilter = GetString(obj, "symbol");
+			if (string.IsNullOrEmpty(q.SymbolFilter)) return request + " requires symbol";
+			q.TimeframeFilter = GetString(obj, "timeframe");
+			// indicatorId, not id: the envelope's id is the correlation uuid.
+			q.IndicatorId = GetInt(obj, "indicatorId");
+			var match = GetDict(obj, "match");
+			if (match != null)
+			{
+				q.MatchName   = GetString(match, "name");
+				q.MatchParams = GetDict(match, "params");
+			}
+			if (!q.IndicatorId.HasValue && string.IsNullOrEmpty(q.MatchName))
+				return request + " requires indicatorId or match.name";
+			return null;
+		}
+
+		private static string NoMatchReason(ChartWalkResult walk, IndicatorSelector q)
+		{
+			return walk.Entries.Count > 0
+				? "no indicator on the matching chart(s) answers that selector"
+				: "no open chart matches symbol=" + q.SymbolFilter
+					+ (string.IsNullOrEmpty(q.TimeframeFilter) ? "" : " timeframe=" + q.TimeframeFilter);
+		}
+
 		// id wins when present: a cheap int compare, no reflection. Otherwise the NT8
 		// type name — short ("SMA") or full — plus every param the caller pinned.
 		private static bool IndicatorMatches(
-			NinjaTrader.Gui.NinjaScript.IndicatorRenderBase ind, IndicatorValueQuery q)
+			NinjaTrader.Gui.NinjaScript.IndicatorRenderBase ind, IndicatorSelector q)
 		{
 			if (q.IndicatorId.HasValue)
 				return TryGet(() => ind.IndicatorId, -1) == q.IndicatorId.Value;
@@ -4205,6 +4220,820 @@ namespace NinjaTrader.NinjaScript.AddOns
 				catch { /* fall through */ }
 			}
 			return v.ToString();
+		}
+
+		// request_set_indicator_params. NT8 applies a changed setting only by rebuilding
+		// the indicator, as the Indicators dialog's Apply does, and has no API for that,
+		// so the rebuild runs the chart's own reload command.
+
+		private const int SetIndicatorParamsBudgetMs = 4_000;
+		private const int IndicatorReloadWaitMs      = 10_000;
+		private const int IndicatorReloadPollMs      = 200;
+		private const int ReloadPhaseBudgetMs        = 15_000;
+		private const int DispatcherReadBudgetMs     = 8_000;
+
+		private class ReloadCandidate
+		{
+			public string Name;
+			public System.Windows.Input.RoutedCommand Command;
+			public System.Windows.IInputElement       Target;
+		}
+
+		private class IndicatorHit
+		{
+			public NinjaTrader.Gui.Chart.ChartTab                  Tab;
+			public NinjaTrader.Gui.NinjaScript.IndicatorRenderBase Indicator;
+			public string Window;
+			public string Symbol;
+			public string Timeframe;
+			public int    IndicatorId;
+		}
+
+		private class ApplyOutcome
+		{
+			public bool         Applied;
+			public string       Reason;
+			public string       ReloadVia;   // null = never triggered
+			public string       TypeName;
+			public string       DisplayName;
+			public List<object> Changed   = new List<object>();
+			public List<object> Unchanged = new List<object>();
+			public List<object> Errors    = new List<object>();
+			public List<object> Params;
+			public Dictionary<string, object> Coerced = new Dictionary<string, object>();
+			public List<object> PreRefs = new List<object>();
+		}
+
+		private void HandleRequestSetIndicatorParams(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id))
+			{
+				Log("request_set_indicator_params missing id; dropping");
+				return;
+			}
+			Task.Run(async () =>
+			{
+				try { await BuildAndSendSetIndicatorParamsAsync(id, obj); }
+				catch (Exception ex)
+				{
+					SendErrorResponse(id, "request_set_indicator_params failed: " + ex.Message);
+				}
+			});
+		}
+
+		private async Task BuildAndSendSetIndicatorParamsAsync(string id, IDictionary<string, object> obj)
+		{
+			var q = new IndicatorSelector();
+			var selectorError = TryParseIndicatorSelector(obj, q, "request_set_indicator_params");
+			if (selectorError != null)
+			{
+				SendErrorResponse(id, selectorError);
+				return;
+			}
+			var wanted = GetDict(obj, "params");
+			if (wanted == null || wanted.Count == 0)
+			{
+				SendErrorResponse(id, "request_set_indicator_params requires a non-empty params object");
+				return;
+			}
+
+			var hits = new List<IndicatorHit>();
+			var walk = await WalkChartTabsAsync(SetIndicatorParamsBudgetMs, "set_indicator_params",
+				(title, tab, isActive, outList) => CollectIndicatorHits(title, tab, isActive, q, hits, outList));
+
+			if (walk.Skipped > 0)
+			{
+				SendSetParamsRefusal(id, q, hits.Count > 0,
+					walk.Skipped + " chart window(s) missed the " + SetIndicatorParamsBudgetMs
+					+ "ms budget; refusing to write against a partial view of the open charts");
+				return;
+			}
+			if (hits.Count == 0)
+			{
+				SendSetParamsRefusal(id, q, false, NoMatchReason(walk, q));
+				return;
+			}
+			if (hits.Count > 1)
+			{
+				var where = new List<string>();
+				foreach (var h in hits)
+					where.Add(h.Symbol + " " + h.Timeframe + " id=" + h.IndicatorId);
+				SendSetParamsRefusal(id, q, true,
+					"selector matched " + hits.Count + " indicators (" + string.Join(", ", where.ToArray())
+					+ "); pass indicatorId to name exactly one");
+				return;
+			}
+
+			var hit = hits[0];
+			var cc  = hit.Tab.ChartControl;
+			var dispatcher = cc == null ? null : DispatcherOf(cc);
+			if (dispatcher == null)
+			{
+				SendSetParamsRefusal(id, q, true,
+					"the chart went away between locating the indicator and writing it");
+				return;
+			}
+
+			var outcome = await ReadOnDispatcherAsync(dispatcher, () => ApplyIndicatorParams(cc, hit, wanted));
+			if (outcome == null)
+			{
+				SendErrorResponse(id, "request_set_indicator_params: the chart's dispatcher never answered");
+				return;
+			}
+
+			// reload: the retry after an unconfirmed rebuild, when nothing changed.
+			Dictionary<string, object> rebuilt = null;
+			bool forceReload = GetBool(obj, "reload") ?? false;
+			if (outcome.Applied && (outcome.Changed.Count > 0 || forceReload))
+				rebuilt = await RebuildAsync(dispatcher, cc, hit, outcome);
+
+			string reason = outcome.Reason;
+			if (reason == null && outcome.Applied && outcome.Changed.Count > 0 && rebuilt == null)
+				reason = outcome.ReloadVia == null
+					? "the values are set on the running instance, but no reload command on that chart would take them — press Apply in the indicator dialog"
+					: "the values are set and " + outcome.ReloadVia
+					  + " ran, but no rebuilt instance appeared — retry with reload:true, or press Apply in the indicator dialog";
+
+			SendSetParamsResponse(id, q, hit, outcome, rebuilt, true, reason);
+		}
+
+		// Separate dispatcher turns, because NT8 re-runs every script inside the reload
+		// call. One execution only: the same command is bound on several elements.
+		private static async Task<Dictionary<string, object>> RebuildAsync(
+			System.Windows.Threading.Dispatcher dispatcher, NinjaTrader.Gui.Chart.ChartControl cc,
+			IndicatorHit hit, ApplyOutcome outcome)
+		{
+			var switched = await ReadOnDispatcherAsync(dispatcher, () => EnsureTabSelected(hit.Tab));
+			if (switched) Log("set_indicator_params selected the indicator's tab before reloading");
+
+			var candidates = await ReadOnDispatcherAsync(dispatcher, () => CollectReloadCandidates(cc));
+			Dictionary<string, object> rebuilt = null;
+			var deadline = DateTime.UtcNow.AddMilliseconds(ReloadPhaseBudgetMs);
+			foreach (var candidate in candidates ?? new List<ReloadCandidate>())
+			{
+				if (DateTime.UtcNow >= deadline) break;
+				var via = await ReadOnDispatcherAsync(dispatcher, () => TryExecuteReloadCandidate(candidate));
+				if (via == null) continue;
+				outcome.ReloadVia = via;
+				rebuilt = await AwaitReloadedIndicatorAsync(
+					dispatcher, cc, outcome.PreRefs, outcome.TypeName, outcome.Coerced,
+					RemainingWait(deadline, IndicatorReloadWaitMs));
+				break;
+			}
+			Log("set_indicator_params reload " + (outcome.ReloadVia ?? "not triggered")
+				+ (rebuilt != null ? " CONFIRMED" : " UNCONFIRMED"));
+			return rebuilt;
+		}
+
+		// Dispatcher-thread only. Adds each matching chart to outList for NoMatchReason.
+		private static void CollectIndicatorHits(
+			string windowTitle, NinjaTrader.Gui.Chart.ChartTab chartTab, bool isActive,
+			IndicatorSelector q, List<IndicatorHit> hits, List<Dictionary<string, object>> outList)
+		{
+			var desc      = DescribeChartTab(windowTitle, chartTab, isActive);
+			var symbol    = (desc["symbol"] as string) ?? "";
+			var timeframe = (desc["timeframe"] as string) ?? "";
+			if (!MatchesChartFilter(symbol, timeframe, q.SymbolFilter, q.TimeframeFilter)) return;
+
+			var cc = chartTab.ChartControl;
+			if (cc == null) return;
+			outList.Add(desc);
+
+			foreach (var ind in SnapshotIndicators(cc))
+			{
+				if (!IndicatorMatches(ind, q)) continue;
+				var hit = new IndicatorHit
+				{
+					Tab         = chartTab,
+					Indicator   = ind,
+					Window      = (desc["window"] as string) ?? "Chart",
+					Symbol      = symbol,
+					Timeframe   = timeframe,
+					IndicatorId = TryGet(() => ind.IndicatorId, -1),
+				};
+				// Windows are walked concurrently, one dispatcher each.
+				lock (hits) hits.Add(hit);
+			}
+		}
+
+		private void SendSetParamsRefusal(string id, IndicatorSelector q, bool found, string reason)
+		{
+			SendSetParamsResponse(id, q, null, new ApplyOutcome(), null, found, reason);
+		}
+
+		// Mirrored by setIndicatorParamsResponseMessageSchema.
+		private void SendSetParamsResponse(string id, IndicatorSelector q, IndicatorHit hit,
+			ApplyOutcome outcome, Dictionary<string, object> rebuilt, bool found, string reason)
+		{
+			var payload = new Dictionary<string, object>
+			{
+				{ "v",         1 },
+				{ "id",        id },
+				{ "type",      "set_indicator_params_response" },
+				{ "found",     found },
+				{ "applied",   outcome.Applied },
+				{ "reloaded",  rebuilt != null },
+				{ "symbol",    hit != null ? hit.Symbol : q.SymbolFilter },
+				{ "changed",   outcome.Changed },
+				{ "unchanged", outcome.Unchanged },
+				{ "errors",    outcome.Errors },
+				{ "params",    rebuilt != null ? rebuilt["params"] : (object) (outcome.Params ?? new List<object>()) },
+			};
+			var timeframe = hit != null ? hit.Timeframe : q.TimeframeFilter;
+			if (!string.IsNullOrEmpty(timeframe)) payload["timeframe"] = timeframe;
+			if (hit != null)
+			{
+				payload["window"] = hit.Window;
+				payload["indicatorId"] = rebuilt != null ? rebuilt["indicatorId"] : (object) hit.IndicatorId;
+			}
+			if (outcome.TypeName != null) payload["name"] = outcome.TypeName;
+			var displayName = rebuilt != null ? rebuilt["displayName"] : outcome.DisplayName;
+			if (displayName != null) payload["displayName"] = displayName;
+			if (reason != null) payload["reason"] = reason;
+
+			SendFireAndForget(Json.Serialize(payload),
+				"set_indicator_params_response id=" + id + " applied=" + outcome.Applied
+				+ " changed=" + outcome.Changed.Count + " reloaded=" + (rebuilt != null)
+				+ (outcome.ReloadVia != null ? " via=" + outcome.ReloadVia : "")
+				+ (outcome.Applied || reason == null ? "" : " (" + reason + ")"));
+		}
+
+		// Dispatcher-thread only.
+		private static ApplyOutcome ApplyIndicatorParams(
+			NinjaTrader.Gui.Chart.ChartControl cc, IndicatorHit hit, IDictionary<string, object> wanted)
+		{
+			var outcome = new ApplyOutcome();
+			var ind     = hit.Indicator;
+			var t       = ind.GetType();
+			outcome.TypeName    = t.FullName ?? t.Name;
+			outcome.DisplayName = TryGet(() => ind.DisplayName, (string) null) ?? outcome.TypeName;
+
+			bool present = false;
+			foreach (var other in SnapshotIndicators(cc))
+				if (object.ReferenceEquals(other, ind)) { present = true; break; }
+			if (!present)
+			{
+				outcome.Reason = "the indicator left the chart between locating it and writing it (reload or close); re-run list_chart_indicators for a fresh id";
+				return outcome;
+			}
+
+			bool strategyCheckRan;
+			if (WindowHostsStrategy(cc, out strategyCheckRan))
+			{
+				outcome.Reason = "a chart tab in that window hosts a NinjaScript strategy, and the rebuild this write depends on stops and restarts running strategies; move the indicator to a window without one";
+				return outcome;
+			}
+			if (!strategyCheckRan)
+			{
+				outcome.Reason = "could not determine whether that window hosts a NinjaScript strategy, and this refuses to drive a rebuild it cannot clear";
+				return outcome;
+			}
+
+			// Validate everything before writing anything.
+			var plan = PlanWrites(ind, wanted, outcome);
+			if (plan == null) return outcome;
+			if (outcome.Errors.Count > 0)
+			{
+				outcome.Coerced.Clear();
+				outcome.Reason = "nothing was written: " + outcome.Errors.Count + " of "
+					+ wanted.Count + " requested setting(s) did not validate";
+				return outcome;
+			}
+			if (plan.Count == 0)
+			{
+				outcome.Applied = true;
+				outcome.Params  = ReadIndicatorParams(ind);
+				outcome.Reason  = "every requested value already matched; nothing written and no reload";
+				return outcome;
+			}
+
+			foreach (var step in plan)
+			{
+				var prop = step.Item1;
+				try
+				{
+					prop.SetValue(ind, step.Item2, null);
+					outcome.Changed.Add(new Dictionary<string, object>
+					{
+						{ "name", prop.Name },
+						{ "from", step.Item3 },
+						{ "to",   WireScalar(step.Item2) },
+					});
+				}
+				catch (Exception ex)
+				{
+					outcome.Errors.Add(new Dictionary<string, object>
+					{
+						{ "name",   prop.Name },
+						{ "reason", "setter threw: " + ex.Message },
+					});
+					// Not written, so not waited on.
+					outcome.Coerced.Remove(prop.Name);
+				}
+			}
+			outcome.Applied = outcome.Changed.Count > 0;
+			outcome.Params  = ReadIndicatorParams(ind);
+			if (!outcome.Applied)
+			{
+				outcome.Reason = "nothing was written: every setter threw";
+				return outcome;
+			}
+
+			// A rebuild is proved by an instance outside this set.
+			outcome.PreRefs = new List<object>();
+			foreach (var other in SnapshotIndicators(cc))
+			{
+				var ot = other.GetType();
+				if ((ot.FullName ?? ot.Name) == outcome.TypeName) outcome.PreRefs.Add(other);
+			}
+
+			Log("set_indicator_params " + hit.Symbol + " " + hit.Timeframe + " " + outcome.DisplayName
+				+ ": " + outcome.Changed.Count + " setting(s) written");
+			return outcome;
+		}
+
+		// (property, new value, current value) per change; null if the property scan fails.
+		private static List<Tuple<System.Reflection.PropertyInfo, object, object>> PlanWrites(
+			object ind, IDictionary<string, object> wanted, ApplyOutcome outcome)
+		{
+			var settable = new Dictionary<string, System.Reflection.PropertyInfo>(
+				StringComparer.OrdinalIgnoreCase);
+			try
+			{
+				var props = ind.GetType().GetProperties(System.Reflection.BindingFlags.Public
+					| System.Reflection.BindingFlags.Instance);
+				foreach (var p in props)
+				{
+					if (!IsIndicatorParam(p)) continue;
+					if (!p.CanWrite || p.GetSetMethod() == null) continue;
+					if (!settable.ContainsKey(p.Name)) settable[p.Name] = p;
+				}
+			}
+			catch (Exception ex)
+			{
+				outcome.Reason = "property scan failed: " + ex.Message;
+				return null;
+			}
+
+			var plan = new List<Tuple<System.Reflection.PropertyInfo, object, object>>();
+			foreach (var kv in wanted)
+			{
+				System.Reflection.PropertyInfo p;
+				if (!settable.TryGetValue(kv.Key, out p))
+				{
+					outcome.Errors.Add(new Dictionary<string, object>
+					{
+						{ "name",   kv.Key },
+						{ "reason", "not a settable setting on " + outcome.DisplayName
+							+ "; list_chart_indicators names the ones that are" },
+					});
+					continue;
+				}
+				object coerced;
+				string error;
+				if (!TryCoerceParam(p, kv.Value, out coerced, out error))
+				{
+					outcome.Errors.Add(new Dictionary<string, object>
+					{
+						{ "name",   p.Name },
+						{ "reason", error },
+					});
+					continue;
+				}
+				object current = null;
+				try { current = p.GetValue(ind, null); } catch { /* unreadable: treat as a change */ }
+
+				outcome.Coerced[p.Name] = coerced;
+				if (ValueEquals(current, coerced, p.PropertyType)) outcome.Unchanged.Add(p.Name);
+				else plan.Add(Tuple.Create(p, coerced, WireScalar(current)));
+			}
+			return plan;
+		}
+
+		// Runtime cast, so nothing compiles against NT8's class hierarchy.
+		private static System.Windows.Window WindowOf(object o)
+		{
+			var node = o as System.Windows.DependencyObject;
+			if (node == null) return null;
+			try { return System.Windows.Window.GetWindow(node); }
+			catch { return null; }
+		}
+
+		private static List<KeyValuePair<System.Windows.Controls.TabItem,
+			NinjaTrader.Gui.Chart.ChartTab>> ChartTabsOf(NinjaTrader.Gui.Chart.Chart chart)
+		{
+			var tabs = new List<KeyValuePair<System.Windows.Controls.TabItem,
+				NinjaTrader.Gui.Chart.ChartTab>>();
+			if (chart == null) return tabs;
+			try
+			{
+				var tabControl = chart.MainTabControl;
+				if (tabControl == null) return tabs;
+				foreach (var item in tabControl.Items)
+				{
+					var tabItem  = item as System.Windows.Controls.TabItem;
+					var chartTab = tabItem != null
+						? tabItem.Content as NinjaTrader.Gui.Chart.ChartTab
+						: null;
+					if (chartTab != null)
+						tabs.Add(new KeyValuePair<System.Windows.Controls.TabItem,
+							NinjaTrader.Gui.Chart.ChartTab>(tabItem, chartTab));
+				}
+			}
+			catch (Exception ex) { Log("chart tab walk failed: " + ex.Message); }
+			return tabs;
+		}
+
+		// Reloading restarts running strategies, so every tab is checked. checkRan false
+		// means the scan could not run.
+		private static bool WindowHostsStrategy(
+			NinjaTrader.Gui.Chart.ChartControl cc, out bool checkRan)
+		{
+			checkRan = false;
+			bool ran;
+			if (ChartHostsStrategy(cc, out ran)) { checkRan = true; return true; }
+			checkRan = ran;
+
+			foreach (var entry in ChartTabsOf(WindowOf(cc) as NinjaTrader.Gui.Chart.Chart))
+			{
+				var other = entry.Value.ChartControl;
+				if (other == null || object.ReferenceEquals(other, cc)) continue;
+				bool tabRan;
+				if (ChartHostsStrategy(other, out tabRan)) { checkRan = true; return true; }
+				checkRan = checkRan || tabRan;
+			}
+			return false;
+		}
+
+		// Matched by type name, so nothing compiles against NT8's strategy types.
+		private static bool ChartHostsStrategy(
+			NinjaTrader.Gui.Chart.ChartControl cc, out bool checkRan)
+		{
+			checkRan = false;
+			try
+			{
+				var panels = cc.ChartPanels;
+				if (panels == null) return false;
+				foreach (var panel in panels)
+				{
+					if (panel == null || panel.ChartObjects == null) continue;
+					checkRan = true;
+					foreach (var co in panel.ChartObjects)
+					{
+						if (co == null) continue;
+						for (var t = co.GetType(); t != null; t = t.BaseType)
+						{
+							var n = t.FullName ?? "";
+							if (n.StartsWith("NinjaTrader.NinjaScript.Strategies.")
+								|| n.EndsWith("StrategyRenderBase")) return true;
+						}
+					}
+				}
+			}
+			catch (Exception ex) { Log("strategy scan failed: " + ex.Message); }
+			return false;
+		}
+
+		// In case the reload rebuilds only the visible tab. True when it switched.
+		private static bool EnsureTabSelected(NinjaTrader.Gui.Chart.ChartTab tab)
+		{
+			if (tab == null) return false;
+			var chart = WindowOf(tab) as NinjaTrader.Gui.Chart.Chart;
+			if (chart == null) return false;
+			try
+			{
+				var tabControl = chart.MainTabControl;
+				foreach (var entry in ChartTabsOf(chart))
+				{
+					if (!object.ReferenceEquals(entry.Value, tab)) continue;
+					if (object.ReferenceEquals(tabControl.SelectedItem, entry.Key)) return false;
+					tabControl.SelectedItem = entry.Key;
+					return true;
+				}
+			}
+			catch (Exception ex) { Log("tab select failed: " + ex.Message); }
+			return false;
+		}
+
+		// Dispatcher-thread only.
+		private static List<ReloadCandidate> CollectReloadCandidates(
+			NinjaTrader.Gui.Chart.ChartControl cc)
+		{
+			var found = new List<ReloadCandidate>();
+			object ccObj = cc;
+			var d = ccObj as System.Windows.DependencyObject;
+			while (d != null)
+			{
+				var el = d as System.Windows.UIElement;
+				if (el != null) CollectFromCommandBindings(el, found);
+				System.Windows.DependencyObject next = null;
+				try { next = System.Windows.Media.VisualTreeHelper.GetParent(d); }
+				catch { /* non-visual ancestor */ }
+				if (next == null)
+				{
+					try { next = System.Windows.LogicalTreeHelper.GetParent(d); }
+					catch { /* detached */ }
+				}
+				d = next;
+			}
+			return found;
+		}
+
+		// Matched on RoutedCommand.Name, which is not localized.
+		private static void CollectFromCommandBindings(
+			System.Windows.UIElement el, List<ReloadCandidate> found)
+		{
+			System.Windows.Input.CommandBindingCollection bindings = null;
+			try { bindings = el.CommandBindings; } catch { return; }
+			if (bindings == null) return;
+
+			foreach (System.Windows.Input.CommandBinding cb in bindings)
+			{
+				try
+				{
+					var rc = cb.Command as System.Windows.Input.RoutedCommand;
+					if (rc == null) continue;
+					if (!NameLooksLikeReload(rc.Name)) continue;
+					found.Add(new ReloadCandidate { Name = rc.Name, Command = rc, Target = el });
+				}
+				catch (Exception ex) { Log("command binding scan failed: " + ex.Message); }
+			}
+		}
+
+		// Excludes "reload historical data", which re-downloads bars.
+		private static bool NameLooksLikeReload(string n)
+		{
+			if (string.IsNullOrEmpty(n)) return false;
+			var s = n.ToLowerInvariant().Replace(" ", "").Replace("_", "");
+			if (s.Contains("historical") || s.Contains("data")) return false;
+			return s.Contains("reloadninjascript") || s.Contains("reloadscript")
+				|| s.Contains("reloadindicator") || s == "reload" || s.Contains("reloadall");
+		}
+
+		// Dispatcher-thread only. Null when the command declines.
+		private static string TryExecuteReloadCandidate(ReloadCandidate c)
+		{
+			if (c == null || c.Command == null || c.Target == null) return null;
+			try
+			{
+				if (!c.Command.CanExecute(null, c.Target)) return null;
+				c.Command.Execute(null, c.Target);
+				return c.Name;
+			}
+			catch (Exception ex) { Log("reload via " + c.Name + " failed: " + ex.Message); }
+			return null;
+		}
+
+		// Polls because NT8 signals nothing when a rebuild finishes.
+		private static async Task<Dictionary<string, object>> AwaitReloadedIndicatorAsync(
+			System.Windows.Threading.Dispatcher dispatcher, NinjaTrader.Gui.Chart.ChartControl cc,
+			List<object> preRefs, string typeName, IDictionary<string, object> coerced, int timeoutMs)
+		{
+			var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+			while (true)
+			{
+				var found = await ReadOnDispatcherAsync(dispatcher, () =>
+				{
+					foreach (var ind in SnapshotIndicators(cc))
+					{
+						if (IsKnownInstance(preRefs, ind)) continue;
+						var t = ind.GetType();
+						if ((t.FullName ?? t.Name) != typeName) continue;
+						if (!ParamsMatch(ind, coerced)) continue;
+						return new Dictionary<string, object>
+						{
+							{ "indicatorId", TryGet(() => ind.IndicatorId, -1) },
+							{ "displayName", TryGet(() => ind.DisplayName, (string) null) ?? typeName },
+							{ "params",      ReadIndicatorParams(ind) },
+						};
+					}
+					return null;
+				});
+				if (found != null) return found;
+				if (DateTime.UtcNow >= deadline) return null;
+				await Task.Delay(IndicatorReloadPollMs);
+			}
+		}
+
+		private static int RemainingWait(DateTime deadline, int preferredMs)
+		{
+			var left = (int) (deadline - DateTime.UtcNow).TotalMilliseconds;
+			return left <= 0 ? 0 : Math.Min(preferredMs, left);
+		}
+
+		private static bool IsKnownInstance(List<object> refs, object candidate)
+		{
+			if (refs == null) return false;
+			for (int i = 0; i < refs.Count; i++)
+				if (object.ReferenceEquals(refs[i], candidate)) return true;
+			return false;
+		}
+
+		private static bool ParamsMatch(object ind, IDictionary<string, object> coerced)
+		{
+			var t = ind.GetType();
+			foreach (var kv in coerced)
+			{
+				var p = TryGet(() => t.GetProperty(kv.Key,
+					System.Reflection.BindingFlags.Public
+					| System.Reflection.BindingFlags.Instance
+					| System.Reflection.BindingFlags.IgnoreCase),
+					(System.Reflection.PropertyInfo) null);
+				if (p == null || !p.CanRead) return false;
+				object actual;
+				try { actual = p.GetValue(ind, null); } catch { return false; }
+				if (!ValueEquals(actual, kv.Value, p.PropertyType)) return false;
+			}
+			return true;
+		}
+
+		private static bool ValueEquals(object actual, object wanted, Type pt)
+		{
+			if (actual == null || wanted == null) return actual == null && wanted == null;
+			if (pt == typeof(double) || pt == typeof(float) || pt == typeof(decimal))
+			{
+				double a, b;
+				if (!TryToDouble(actual, out a) || !TryToDouble(wanted, out b)) return false;
+				if (double.IsNaN(a) || double.IsNaN(b)) return false;
+				var scale = Math.Max(1.0, Math.Max(Math.Abs(a), Math.Abs(b)));
+				return Math.Abs(a - b) <= 1e-9 * scale;
+			}
+			// Ordinal: a case-only edit is a change.
+			if (pt == typeof(string))
+				return string.Equals(actual as string, wanted as string, StringComparison.Ordinal);
+			return object.Equals(actual, wanted);
+		}
+
+		private static bool TryCoerceParam(
+			System.Reflection.PropertyInfo prop, object raw, out object value, out string error)
+		{
+			value = null;
+			error = null;
+			var pt = prop.PropertyType;
+			try
+			{
+				if (pt.IsEnum)
+				{
+					// Defined names only: Enum.Parse would accept "7" as (MyEnum) 7.
+					var s = raw as string;
+					if (s != null)
+					{
+						foreach (var name in Enum.GetNames(pt))
+						{
+							if (!string.Equals(name, s.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+							value = Enum.Parse(pt, name);
+							return true;
+						}
+						error = "expects one of " + string.Join("|", Enum.GetNames(pt));
+						return false;
+					}
+					double e;
+					if (TryToDouble(raw, out e) && !double.IsNaN(e) && !double.IsInfinity(e))
+					{
+						var underlying = Convert.ChangeType((long) Math.Round(e),
+							Enum.GetUnderlyingType(pt), System.Globalization.CultureInfo.InvariantCulture);
+						if (Enum.IsDefined(pt, underlying)) { value = Enum.ToObject(pt, underlying); return true; }
+					}
+					error = "expects one of " + string.Join("|", Enum.GetNames(pt));
+					return false;
+				}
+				if (pt == typeof(bool))
+				{
+					if (raw is bool) { value = raw; return true; }
+					bool b;
+					var s = raw as string;
+					if (s != null && bool.TryParse(s, out b)) { value = b; return true; }
+					error = "expects true or false";
+					return false;
+				}
+				if (pt == typeof(string))
+				{
+					value = raw == null ? "" : ToInvariantString(raw);
+					return true;
+				}
+				if (pt == typeof(char))
+				{
+					var s = raw == null ? "" : ToInvariantString(raw);
+					if (s.Length != 1) { error = "expects a single character"; return false; }
+					value = s[0];
+					return true;
+				}
+
+				double num;
+				if (raw is bool || !TryToDouble(raw, out num))
+				{
+					error = "expects a number";
+					return false;
+				}
+				// "NaN" and "Infinity" parse as doubles.
+				if (double.IsNaN(num) || double.IsInfinity(num))
+				{
+					error = "expects a finite number";
+					return false;
+				}
+				if (!WithinDeclaredRange(prop, num, out error)) return false;
+
+				if (pt == typeof(double) || pt == typeof(float) || pt == typeof(decimal))
+				{
+					value = Convert.ChangeType(num, pt, System.Globalization.CultureInfo.InvariantCulture);
+					return true;
+				}
+				if (Math.Abs(num - Math.Round(num)) > 1e-9)
+				{
+					error = "expects a whole number";
+					return false;
+				}
+				// ChangeType throws on an out-of-range value instead of wrapping silently.
+				value = Convert.ChangeType(Math.Round(num), pt,
+					System.Globalization.CultureInfo.InvariantCulture);
+				return true;
+			}
+			catch (Exception ex)
+			{
+				value = null;
+				error = "not a valid " + pt.Name + " (" + ex.Message + ")";
+				return false;
+			}
+		}
+
+		// An out-of-range value can make NT8 disable the indicator at load.
+		private static bool WithinDeclaredRange(
+			System.Reflection.PropertyInfo prop, double num, out string error)
+		{
+			error = null;
+			try
+			{
+				var attrs = prop.GetCustomAttributes(
+					typeof(System.ComponentModel.DataAnnotations.RangeAttribute), true);
+				if (attrs.Length == 0) return true;
+				var range = (System.ComponentModel.DataAnnotations.RangeAttribute) attrs[0];
+
+				double min, max;
+				if (!TryToDouble(range.Minimum, out min) || !TryToDouble(range.Maximum, out max))
+					return true; // unreadable range: not enforced
+				if (num >= min && num <= max) return true;
+
+				error = "outside the setting's range "
+					+ min.ToString(System.Globalization.CultureInfo.InvariantCulture) + " to "
+					+ max.ToString(System.Globalization.CultureInfo.InvariantCulture);
+				return false;
+			}
+			catch { return true; }
+		}
+
+		// Same value rules as ReadIndicatorParams.
+		private static object WireScalar(object raw)
+		{
+			if (raw == null) return "";
+			if (raw is Enum || raw is char) return raw.ToString();
+			if (raw is double && !IsFinite((double) raw)) return "";
+			if (raw is float  && !IsFinite((double)(float) raw)) return "";
+			return raw;
+		}
+
+		private static System.Windows.Threading.Dispatcher DispatcherOf(object o)
+		{
+			var d = o as System.Windows.Threading.DispatcherObject;
+			return d == null ? null : d.Dispatcher;
+		}
+
+		// InvokeAsync, never Invoke (deadlock risk). Budgeted, because a window closing
+		// mid-request never runs the callback.
+		private static async Task<T> ReadOnDispatcherAsync<T>(
+			System.Windows.Threading.Dispatcher dispatcher, Func<T> read)
+		{
+			var task = DispatchReadAsync(dispatcher, read);
+			var done = await Task.WhenAny(task, Task.Delay(DispatcherReadBudgetMs));
+			if (!object.ReferenceEquals(done, task))
+			{
+				Log("dispatcher read exceeded " + DispatcherReadBudgetMs + "ms; treating as no answer");
+				return default(T);
+			}
+			return await task;
+		}
+
+		private static Task<T> DispatchReadAsync<T>(
+			System.Windows.Threading.Dispatcher dispatcher, Func<T> read)
+		{
+			var tcs = new TaskCompletionSource<T>();
+			try
+			{
+				dispatcher.InvokeAsync(() =>
+				{
+					T value = default(T);
+					try { value = read(); }
+					catch (Exception ex) { Log("dispatcher read failed: " + ex.Message); }
+					tcs.TrySetResult(value);
+				});
+			}
+			catch (Exception ex)
+			{
+				// Window mid-close: its dispatcher is already shutting down.
+				Log("dispatcher dispatch failed: " + ex.Message);
+				tcs.TrySetResult(default(T));
+			}
+			return tcs.Task;
 		}
 
 		// Bar times ascend, so both bounds binary-search; both return `count` when
