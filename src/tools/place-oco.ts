@@ -4,6 +4,7 @@ import { placeOcoFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { OcoIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 // Drop server-derived ids (ocoId + both leg names derive from one base clientOrderId).
 const {
@@ -51,7 +52,7 @@ const DESCRIPTION =
   "the live position feed. Use change_order to trail the stop. Leave clientOrderId unset except to retry an ambiguous " +
   "result with the exact id you got back.";
 
-export function createPlaceOcoHandler(service: () => ExecutionService) {
+export function createPlaceOcoHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: PlaceOcoArgs): Promise<ToolResult> => {
     const intent: OcoIntent = {
       account: args.account,
@@ -62,7 +63,7 @@ export function createPlaceOcoHandler(service: () => ExecutionService) {
       limitPrice: args.limitPrice,
       tif: args.tif,
       ...(args.clientOrderId !== undefined ? { clientOrderId: args.clientOrderId } : {}),
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -79,6 +80,6 @@ export function createPlaceOcoHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerPlaceOco(server: McpServer): void {
-  server.tool("place_oco", DESCRIPTION, placeOcoParams, createPlaceOcoHandler(getExecutionService));
+export function registerPlaceOco(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("place_oco", DESCRIPTION, placeOcoParams, createPlaceOcoHandler(getExecutionService, session.source));
 }

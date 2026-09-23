@@ -4,6 +4,7 @@ import { flattenFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { FlattenIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 const flattenParams = {
   ...flattenFields,
@@ -24,12 +25,12 @@ const DESCRIPTION =
   "actually flat (position zero, no working orders) via get_positions. Retrying is safe — flattening a flat instrument " +
   "is a no-op.";
 
-export function createFlattenHandler(service: () => ExecutionService) {
+export function createFlattenHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: FlattenArgs): Promise<ToolResult> => {
     const intent: FlattenIntent = {
       account: args.account,
       symbol: args.symbol,
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -46,6 +47,6 @@ export function createFlattenHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerFlatten(server: McpServer): void {
-  server.tool("flatten", DESCRIPTION, flattenParams, createFlattenHandler(getExecutionService));
+export function registerFlatten(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("flatten", DESCRIPTION, flattenParams, createFlattenHandler(getExecutionService, session.source));
 }

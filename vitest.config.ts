@@ -14,6 +14,7 @@ export default defineConfig({
       "src/db/**/*.test.ts",
       "src/live/**/*.test.ts",
       "src/execution/**/*.test.ts",
+      "src/hub/**/*.test.ts",
     ],
     // Default DB path used by importing src/db/connection.ts at module load.
     // Tests inject in-memory DBs into handler factories where they actually

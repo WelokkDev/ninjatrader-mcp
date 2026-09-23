@@ -3,9 +3,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getBridgeStatus } from "../bridge/index.js";
 import { consumerHub } from "../bridge/consumer.js";
 import { getLiveFeedRuntime, type LiveFeedRuntime } from "../live/runtime.js";
-import { MCP_SOURCE, type LiveTimeframe } from "../live/registry.js";
+import type { LiveTimeframe } from "../live/registry.js";
 import { LIVE_TIMEFRAMES } from "../core/constants.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 const LIVE_TF = z.enum(LIVE_TIMEFRAMES as unknown as [LiveTimeframe, ...LiveTimeframe[]]);
 
@@ -16,13 +17,17 @@ export interface LiveFeedToolsDeps {
   runtime: () => LiveFeedRuntime | null;
   bridgeStatus: () => ReturnType<typeof getBridgeStatus>;
   consumerCount: () => number;
+  source: string;
 }
 
-const defaultDeps: LiveFeedToolsDeps = {
-  runtime: getLiveFeedRuntime,
-  bridgeStatus: getBridgeStatus,
-  consumerCount: () => consumerHub.count(),
-};
+function defaultDeps(session: SessionContext): LiveFeedToolsDeps {
+  return {
+    runtime: getLiveFeedRuntime,
+    bridgeStatus: getBridgeStatus,
+    consumerCount: () => consumerHub.count(),
+    source: session.source,
+  };
+}
 
 export function createSubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
   return async ({
@@ -34,7 +39,7 @@ export function createSubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
     if (!runtime) return errorResult(NOT_STARTED, { ok: false });
-    const res = await runtime.registry.ensure(symbol, timeframe, MCP_SOURCE);
+    const res = await runtime.registry.ensure(symbol, timeframe, deps.source);
     const view = {
       ok: res.ok,
       symbol,
@@ -58,7 +63,7 @@ export function createUnsubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
   }): Promise<ToolResult> => {
     const runtime = deps.runtime();
     if (!runtime) return errorResult(NOT_STARTED, { ok: false });
-    const res = await runtime.registry.release(symbol, timeframe, MCP_SOURCE);
+    const res = await runtime.registry.release(symbol, timeframe, deps.source);
     return jsonResult({
       ok: true,
       symbol,
@@ -111,7 +116,10 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
   };
 }
 
-export function registerSubscribeLiveBars(server: McpServer): void {
+export function registerSubscribeLiveBars(
+  server: McpServer,
+  session: SessionContext = STDIO_SESSION,
+): void {
   server.tool(
     "subscribe_live_bars",
     "Start streaming live CLOSED bars for a futures symbol from NinjaTrader into the local candle cache — the same store get_candles reads, so live questions (latest close, current session bars) are answered by get_candles moments after each bar boundary. Returns the TRUTHFUL NT8-side result: ok/acked only when the AddOn confirmed the stream (with the resolved contract). Raw TFs only (5m default; 15m; 15s/5s/1s on demand — seconds history is shallow and the sub-minute streams are heavy, so use them deliberately and unsubscribe when done); 30m-4h derive automatically on 15m closes and are served by get_candles with forming bars marked partial. Subscriptions persist across server restarts and replay on every NT8 reconnect. Local bots can consume the same stream over ws://127.0.0.1:9472/feed.",
@@ -121,11 +129,14 @@ export function registerSubscribeLiveBars(server: McpServer): void {
         "Raw timeframe to stream: 5m (default), 15m, or 15s/5s/1s (on-demand only — dense, and a bar arrives only for buckets that traded)",
       ),
     },
-    createSubscribeLiveBarsHandler(defaultDeps),
+    createSubscribeLiveBarsHandler(defaultDeps(session)),
   );
 }
 
-export function registerUnsubscribeLiveBars(server: McpServer): void {
+export function registerUnsubscribeLiveBars(
+  server: McpServer,
+  session: SessionContext = STDIO_SESSION,
+): void {
   server.tool(
     "unsubscribe_live_bars",
     "Stop streaming live bars for a symbol+timeframe started by subscribe_live_bars. removedUpstream:false with pendingUpstreamRelease:true means the NT8-side release could not be confirmed yet (bridge down or request failed) — it retries automatically on the next NT8 reconnect; any other removedUpstream:false means another consumer (e.g. a /feed bot) still holds the stream.",
@@ -133,7 +144,7 @@ export function registerUnsubscribeLiveBars(server: McpServer): void {
       symbol: z.string().min(1).describe("Futures symbol to stop streaming"),
       timeframe: LIVE_TF.default("5m").describe("Timeframe to stop: 1s, 5s, 15s, 5m or 15m"),
     },
-    createUnsubscribeLiveBarsHandler(defaultDeps),
+    createUnsubscribeLiveBarsHandler(defaultDeps(session)),
   );
 }
 
@@ -142,6 +153,6 @@ export function registerLiveFeedStatus(server: McpServer): void {
     "live_feed_status",
     "Health of the live feeds. Bars: per-subscription truth (acked by NT8, resolved contract, last seq/timestamp, lag, bars received, duplicate/out-of-order/gap counters, last error) plus bridge connection state, connected /feed consumer count, and heals in flight. gapCount > 0 with healsInFlight 0 means a gap was detected and repaired, OR exceeded the heal window (check get_candles for that range), OR — on the sparse sub-minute TFs (1s/5s) — was deliberately never healed because the longest contiguous run of missing buckets fell under that TF's floor: NT8 emits no bar for a tickless bucket, so a short quiet stretch is counted as a gap for visibility but is not an outage. Expect a non-zero, slowly-climbing gapCount to be NORMAL on 1s/5s. Positions: the live position feed's health (desired vs NT8-acked, accounts tracked, open positions/trades, event/sync counters, seq gaps, last event/sync times, last error).",
     {},
-    createLiveFeedStatusHandler(defaultDeps),
+    createLiveFeedStatusHandler(defaultDeps(STDIO_SESSION)),
   );
 }

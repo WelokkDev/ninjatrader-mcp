@@ -71,15 +71,19 @@ The server is registered in `.mcp.json` already:
 }
 ```
 
-`scripts/mcp-entry.mjs` boots `build/private/index.js` when a private module has
+`scripts/mcp-entry.mjs` picks `build/private/index.js` when a private module has
 been built, otherwise `build/index.js` — so this needs no per-user editing.
 
-**Run exactly one server process.** Whichever process starts first owns the
-bridge port and the candle cache; a second one finds the port taken and runs
-bridge-disabled. If your MCP client is already running the server, don't also
-run `npm start`.
+**One hub, any number of conversations.** The process the MCP client starts is
+a thin *shim*: it attaches to the one **hub** on this machine over loopback
+HTTP (`127.0.0.1:9474`) and starts the hub itself if none is running. The hub
+owns the bridge port, the candle cache and the live feeds; every conversation
+gets its own session inside it, so a second (or fifth) conversation sees NT8
+exactly like the first. A hub the shims started exits about 90s after the last
+conversation leaves; `npm start` runs one that stays up all day. `npm run
+status` shows the hub and its sessions, `npm stop` stops it.
 
-To create the database and token before wiring up the client, run the server
+To create the database and token before wiring up the client, start the hub
 once and stop it:
 
 ```
@@ -95,15 +99,17 @@ On the very first run it prints to **stderr**:
 
 Those two lines appear **once, ever**. Every later run prints
 `[bridge] using token from <repo>\.env.local` instead. Don't rely on catching
-them — MCP clients usually swallow the server's stderr. The token is persisted,
-so read it from the file instead:
+them — a hub the shim started logs to `data/hub.log`, not to the MCP client.
+The token is persisted, so read it from the file instead:
 
 ```
 <repo>/.env.local     →     NT_BRIDGE_TOKEN=<64 hex chars>
 ```
 
-You should also see `[bridge] listening on 127.0.0.1:9472`. The bridge binds
-**loopback only** — nothing reaches it from the network.
+You should also see `[hub] … listening on 127.0.0.1:9474` and
+`[bridge] listening on 127.0.0.1:9472`. Both bind **loopback only** — nothing
+reaches them from the network — and both require a token from `.env.local`
+(`NT_HUB_TOKEN` is minted alongside the bridge token).
 
 > **Agent:** `.env.local` is the source of truth for the token. Read
 > `NT_BRIDGE_TOKEN` from it rather than asking the user to copy a value out of a
@@ -138,10 +144,6 @@ prints the exact path it looked at (see step 5).
 |---|---|
 | `ninja-addon/addons/mcp-bridge.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
 | `ninja-addon/indicators/mcp-renderer.cs` | `Documents\NinjaTrader 8\bin\Custom\Indicators\` |
-
-`ninja-addon/indicators/mcp-sma-snapshot.cs` is an optional R&D tool (it writes
-SMA parity snapshots for offline comparison). **Skip it** — it's not part of a
-working setup.
 
 `ninja-addon/addons/feed-watchdog.cs` is optional and standalone, connection
 alerts that keep working when everything else here is down. See step 11.
@@ -598,23 +600,29 @@ quiet window suppresses baselines and unsettled states, never RED.
 | `[McpBridge] connection error: ...` then `reconnecting in 1000ms`, `2000ms`, `4000ms`… | Generic .NET connect failure, backing off 1s→30s. Cross-check the server's stderr for the real reason — the two rows below. |
 | `[bridge] rejected upgrade: bad or missing token` (server) | Token mismatch. Re-copy `NT_BRIDGE_TOKEN` from `.env.local` into `bridge.config.json`. |
 | `[bridge] rejected upgrade: client already connected` (server) | A second NT8/client is already on the bridge. Only one at a time. |
-| `[bridge] WARNING: failed to start on port 9472 (listen EADDRINUSE ...); bridge disabled, MCP continuing` | **Two server processes.** Classic cause: the MCP client started one and you also ran `npm start`. Kill one. The MCP server keeps running cache-only. |
+| `[bridge] WARNING: failed to start on port 9472 (listen EADDRINUSE ...); bridge disabled, MCP continuing` | **Two processes want the bridge port.** With the hub layout that means an in-process server (`--stdio` / `NT_NO_HUB=1`, or a pre-hub build) is running next to the hub. `npm run status` shows the hub; stop the stray. The loser keeps running cache-only. |
+| `[hub] another hub already owns 127.0.0.1:9474; exiting` | Two conversations started at the same instant and both spawned a hub; the loser exits at once and both attach to the winner. Harmless. |
+| `[shim] WARNING: the hub (pid …) runs a build from … but the build on disk is from …` | You rebuilt while a hub was running. **Every conversation is still on the old code** until the hub restarts: `npm stop`, then reconnect the client (`/mcp` in Claude Code). |
+| `the hub did not come up within 30s; see data/hub.log` | The spawned hub crashed or hung at startup. The log has the reason. |
+| `the hub at … rejected this process's NT_HUB_TOKEN` | The shim and the hub read different `.env.local` files, or an env override disagrees. `npm stop`, fix the token, reconnect. |
 | `[bridge] WARNING: invalid NT_BRIDGE_PORT (x); bridge disabled` | Port is NaN, ≤ 0, or > 65535. The MCP server still runs, cache-only. |
+| `something other than a hub answers on http://127.0.0.1:9474 (HTTP …)` | Another local service (a dashboard, say) owns the hub's port. Put `NT_HUB_PORT=<free port>` in `.env.local`; every shim and the hub read it. |
 | `[bridge] heartbeat timeout (30123ms) — closing socket` | 30s of silence from NT8. It'll reconnect on its own. |
 | `[McpBridge] [startup] WARNING: mapping target NOT FOUND in NT8: ...` | A Trading Hours template name doesn't match this install. Candle requests for it fail closed. See step 5. |
 | `NT8 has no TradingHours template named '...'` | Same root cause, hit at request time. |
 | `Unsupported timeframe: 'x'. Supported raw TFs: …` | Only the raw TFs (`1s`, `5s`, `15s`, `5m`, `15m`, `1d`) are fetched raw; 30m–4h are derived from 15m. The message lists the AddOn's own set — if it is missing `1s`/`5s`, the AddOn predates them and needs a recompile. |
 | `NinjaTrader is not connected — start NT8 with the McpBridge addon, then retry.` | Prefetch with no bridge client. Work back through step 5. |
-| Tool list is missing tools after a rebuild | Restart the MCP client — the tool list is read at startup. |
+| Tool list is missing tools after a rebuild | Stop the hub (`npm stop`) and reconnect the client — a running hub keeps serving the code it started with. |
 
 **A bridge failure is never fatal.** Every failure path warns and continues; the
 MCP server runs cache-only against whatever is already in `candles.db`.
 
 **`.env.local` is not a dotenv file.** There's no `dotenv` in this repo and
-nothing is injected into `process.env`. The hand-rolled reader consults exactly
-five keys — `NT_BRIDGE_TOKEN`, `NT_BRIDGE_HOST`, `NT_BRIDGE_PORT`,
-`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT` — and ignores everything else, so putting any *other* variable there does nothing. Real
-process env always wins over the file.
+nothing is injected into `process.env`. The hand-rolled reader consults a fixed
+set of keys — the bridge (`NT_BRIDGE_*`), the hub (`NT_HUB_*`), trade import
+(`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT`) and the order gate (`NT_TRADING_*`)
+— and ignores everything else, so putting any *other* variable there does
+nothing. Real process env always wins over the file.
 
 Because it's gitignored, `.env.local` is the right home for anything
 machine-specific: one checkout can serve a Windows box running NT8 locally
@@ -630,6 +638,9 @@ machines.
 | `NT_BRIDGE_TOKEN` | generated into `.env.local` on first run | Shared secret with the AddOn. Set in the real env to override the file. |
 | `NT_BRIDGE_PORT` | `9472` | Bridge port. Read from process env or `.env.local`. Invalid value disables the bridge, not the server. |
 | `NT_BRIDGE_HOST` | `127.0.0.1` | Interface the bridge binds. Read from process env or `.env.local`. Only override to reach NT8 in a VM — see below. An unbindable address disables the bridge, not the server. |
+| `NT_HUB_PORT` | `9474` | Port of the hub every conversation attaches to. Read from process env or `.env.local`. Always loopback; `NT_BRIDGE_HOST` does not apply to it. |
+| `NT_HUB_TOKEN` | generated into `.env.local` on first run | Shared secret between the per-conversation shims and the hub. |
+| `NT_NO_HUB` | unset | `1` makes the entry run the bin in-process for its one client (the pre-hub layout), same as `--stdio`. Useful with the MCP inspector. |
 | `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/` or `backtest-results/`, which stay repo-relative. |
 | `NT_TRADES_DB_PATH` | unset | Path to NT8's `NinjaTrader.sqlite`. Read from process env or `.env.local`. **Takes priority over the config file** — set this and no JSON config is needed. |
 | `NT_TRADES_ACCOUNT` | unset | Optional account filter to pair with `NT_TRADES_DB_PATH`. Leave unset to import all accounts. |

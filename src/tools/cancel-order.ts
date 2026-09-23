@@ -4,6 +4,7 @@ import { cancelOrderFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { CancelIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 const cancelOrderParams = {
   ...cancelOrderFields,
@@ -27,12 +28,12 @@ const DESCRIPTION =
   "cancelling the target leaves the position with NO protective stop. To adjust or tighten one leg while keeping the " +
   "position protected, use change_order on that leg — not cancel_order.";
 
-export function createCancelOrderHandler(service: () => ExecutionService) {
+export function createCancelOrderHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: CancelOrderArgs): Promise<ToolResult> => {
     const intent: CancelIntent = {
       account: args.account,
       clientOrderId: args.clientOrderId,
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -50,6 +51,6 @@ export function createCancelOrderHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerCancelOrder(server: McpServer): void {
-  server.tool("cancel_order", DESCRIPTION, cancelOrderParams, createCancelOrderHandler(getExecutionService));
+export function registerCancelOrder(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("cancel_order", DESCRIPTION, cancelOrderParams, createCancelOrderHandler(getExecutionService, session.source));
 }

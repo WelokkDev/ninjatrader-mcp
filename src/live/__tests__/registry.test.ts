@@ -4,6 +4,8 @@ import { initializeSchema } from "../../db/schema.js";
 import {
   LiveSubscriptionRegistry,
   MCP_SOURCE,
+  PERSISTED_SOURCE,
+  mcpSource,
   type RegistryDeps,
 } from "../registry.js";
 import type { BarCloseMessage, SubscribeAckMessage } from "../../bridge/protocol.js";
@@ -140,7 +142,9 @@ describe("LiveSubscriptionRegistry.ensure", () => {
     const res2 = await reg.ensure("MNQ", "5m", "consumer:1");
     expect(res2.ok).toBe(true);
     expect(reg.list()).toHaveLength(1);
-    expect(reg.list()[0].sources.sort()).toEqual(["consumer:1", MCP_SOURCE].sort());
+    expect(reg.list()[0].sources.sort()).toEqual(
+      ["consumer:1", MCP_SOURCE, PERSISTED_SOURCE].sort(),
+    );
     // Upstream already acked — no second subscribe_bars round-trip.
     expect(request).toHaveBeenCalledTimes(1);
     expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(1);
@@ -297,7 +301,7 @@ describe("noteBar / noteAck / persistence / replay", () => {
     reg.loadPersisted();
     expect(reg.list()).toHaveLength(2);
     expect(reg.list().every((s) => !s.acked)).toBe(true);
-    expect(reg.list().every((s) => s.sources.includes(MCP_SOURCE))).toBe(true);
+    expect(reg.list().every((s) => s.sources.includes(PERSISTED_SOURCE))).toBe(true);
   });
 
   it("replayAll re-subscribes every key and counts failures without aborting", async () => {
@@ -315,5 +319,86 @@ describe("noteBar / noteAck / persistence / replay", () => {
     expect(res.failed).toBe(1);
     const nq = reg.list().find((s) => s.symbol === "NQ")!;
     expect(nq.lastError).toMatch(/boom/);
+  });
+});
+
+describe("LiveSubscriptionRegistry persisted intent vs session holds", () => {
+  let db: Database.Database;
+  let request: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = memDb();
+    request = vi.fn(async (type: string) =>
+      type === "subscribe_bars"
+        ? ack()
+        : { v: 1, id: "y", type: "unsubscribe_ack", symbol: "MNQ", timeframe: "5m", removed: true },
+    );
+  });
+
+  function make(): LiveSubscriptionRegistry {
+    return new LiveSubscriptionRegistry(
+      makeDeps({ db, request: request as unknown as RegistryDeps["request"] }),
+    );
+  }
+
+  it("a session's implicit disconnect keeps the persisted stream alive", async () => {
+    const reg = make();
+    await reg.ensure("MNQ", "5m", mcpSource("a"));
+    await reg.releaseAllForSource(mcpSource("a"));
+    expect(reg.list()).toHaveLength(1);
+    expect(reg.list()[0].sources).toEqual([PERSISTED_SOURCE]);
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(1);
+    expect(request).not.toHaveBeenCalledWith("unsubscribe_bars", expect.anything(), expect.anything());
+  });
+
+  it("an explicit unsubscribe from any session withdraws the persisted intent and ends the stream", async () => {
+    const reg = make();
+    await reg.ensure("MNQ", "5m", mcpSource("a"));
+    await reg.ensure("MNQ", "5m", mcpSource("b"));
+    await reg.releaseAllForSource(mcpSource("a"));
+    const res = await reg.release("MNQ", "5m", mcpSource("b"));
+    expect(res.removedUpstream).toBe(true);
+    expect(reg.list()).toHaveLength(0);
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(0);
+  });
+
+  it("one session's unsubscribe does not tear down another session's hold", async () => {
+    const reg = make();
+    await reg.ensure("MNQ", "5m", mcpSource("a"));
+    await reg.ensure("MNQ", "5m", mcpSource("b"));
+    const res = await reg.release("MNQ", "5m", mcpSource("a"));
+    expect(res.removedUpstream).toBe(false);
+    expect(reg.list()[0].sources).toEqual([mcpSource("b")]);
+    // b still streams, but the intent is withdrawn.
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(0);
+  });
+
+  it("after a restart the first session adopts the persisted sub without double-counting upstream", async () => {
+    const reg1 = make();
+    await reg1.ensure("MNQ", "5m", mcpSource("a"));
+    request.mockClear();
+
+    const reg2 = make();
+    reg2.loadPersisted();
+    expect(reg2.list()[0].sources).toEqual([PERSISTED_SOURCE]);
+    const res = await reg2.ensure("MNQ", "5m", mcpSource("c"));
+    expect(res.ok).toBe(true);
+    expect(reg2.list()[0].sources.sort()).toEqual([PERSISTED_SOURCE, mcpSource("c")].sort());
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(1);
+
+    const rel = await reg2.release("MNQ", "5m", mcpSource("c"));
+    expect(rel.removedUpstream).toBe(true);
+    expect(reg2.list()).toHaveLength(0);
+  });
+
+  it("a consumer socket never persists and never withdraws persisted intent", async () => {
+    const reg = make();
+    await reg.ensure("MNQ", "5m", "consumer:1");
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(0);
+    await reg.ensure("MNQ", "5m", MCP_SOURCE);
+    await reg.release("MNQ", "5m", "consumer:1");
+    expect(reg.list()[0].sources.sort()).toEqual([MCP_SOURCE, PERSISTED_SOURCE].sort());
+    expect(db.prepare("SELECT * FROM live_subscriptions").all()).toHaveLength(1);
   });
 });

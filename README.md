@@ -79,10 +79,8 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   │  │   WS client; serves candles; streams  │
   │  │   live bars + positions; retains draw │
   │  │   commands; gated order submit        │
-  │  ├─ indicators/mcp-renderer.cs           │
-  │  │   renders bridge drawings on charts   │
-  │  └─ indicators/mcp-sma-snapshot.cs       │
-  │      optional R&D parity snapshot writer │
+  │  └─ indicators/mcp-renderer.cs           │
+  │      renders bridge drawings on charts   │
   └──────────────────────────────────────────┘
 ```
 
@@ -207,7 +205,7 @@ npm run build     # private-free: tsc, then a private-module step that no-ops wh
 npm start
 ```
 
-A fresh clone builds clean — no private module required. On first run, the server creates `data/candles.db` (SQLite, WAL; schema is idempotent — nothing to create by hand), generates a bearer token, writes it to `.env.local`, and prints it once to stderr. Paste that token into NT8's `bridge.config.json`, then start NT8 with the McpBridge AddOn compiled. **[SETUP.md](SETUP.md) is the real walkthrough** — install → bridge → verified live data, with a troubleshooting table for every failure mode.
+A fresh clone builds clean — no private module required. `npm start` runs the **hub**, the one process that owns the NT8 bridge, the candle cache and the live feeds. On first run it creates `data/candles.db` (SQLite, WAL; schema is idempotent — nothing to create by hand), generates a bearer token, writes it to `.env.local`, and prints it once to stderr. Paste that token into NT8's `bridge.config.json`, then start NT8 with the McpBridge AddOn compiled. **[SETUP.md](SETUP.md) is the real walkthrough** — install → bridge → verified live data, with a troubleshooting table for every failure mode.
 
 The repo's `.mcp.json` already wires the server into Claude Code:
 
@@ -223,7 +221,7 @@ The repo's `.mcp.json` already wires the server into Claude Code:
 }
 ```
 
-`scripts/mcp-entry.mjs` boots `build/private/index.js` when a private module has been built, otherwise `build/index.js` — no per-user editing. **Run exactly one server process**: whichever starts first owns the bridge port and the candle cache; a second finds the port taken and runs bridge-disabled (a bridge failure is never fatal — the server continues cache-only with a warning).
+`scripts/mcp-entry.mjs` picks `build/private/index.js` when a private module has been built, otherwise `build/index.js` — no per-user editing. The process it starts is a thin **shim** that proxies the conversation's stdio to the hub over loopback HTTP, starting the hub if none is running. Any number of conversations attach at once, each with its own session; a hub the shims started exits ~90s after the last one leaves, `npm start` keeps one up all day, `npm run status` / `npm stop` inspect and stop it. A rebuild takes effect when the hub restarts (the shim warns when it is serving an older build).
 
 ### Environment variables
 
@@ -231,6 +229,9 @@ The repo's `.mcp.json` already wires the server into Claude Code:
 |---|---|---|
 | `NT_BRIDGE_TOKEN` | auto-generated, persisted to `.env.local` | Shared secret between server and NT8 AddOn. |
 | `NT_BRIDGE_PORT` | `9472` | Loopback TCP port for the bridge; an invalid value disables the bridge but not the server. |
+| `NT_HUB_PORT` | `9474` | Loopback port of the hub every conversation attaches to. |
+| `NT_HUB_TOKEN` | auto-generated, persisted to `.env.local` | Shared secret between the per-conversation shims and the hub. |
+| `NT_NO_HUB` | unset | `1` runs the bin in-process for one client (the pre-hub layout). |
 | `NT_DATA_PATH` | `<repo>/data` | Directory for `candles.db`, `lab.db`, and lab calibration. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Path to the trade-import config. |
 | `NT_TRADING_*` | unset ⇒ **disabled** | Order write path enablement — see [TRADING.md](TRADING.md). |
@@ -239,7 +240,7 @@ The repo's `.mcp.json` already wires the server into Claude Code:
 
 | File | Where | Tracked? | Purpose |
 |---|---|---|---|
-| `.env.local` | repo root | no | `NT_BRIDGE_TOKEN=<64-hex>` (created on first run) and, opt-in, the `NT_TRADING_*` variables. |
+| `.env.local` | repo root | no | `NT_BRIDGE_TOKEN` and `NT_HUB_TOKEN` (created on first run) and, opt-in, the `NT_TRADING_*` variables. |
 | `ninjatrader.config.json` | repo root | no | `{ "dbPath": ..., "account"? }` for trade import; copy the tracked `.example.json`. |
 | `bridge.config.json` | NT8 user data dir | — | `{ "token", "url" }` — the AddOn's connection config; re-read every 5s while disconnected. |
 | `trading.config.json` | NT8 user data dir | — | The C#-side order gate; missing ⇒ write path disabled. See [TRADING.md](TRADING.md). |
@@ -248,7 +249,7 @@ The repo's `.mcp.json` already wires the server into Claude Code:
 
 ### NT8 side
 
-Two files to copy and compile — `ninja-addon/addons/mcp-bridge.cs` (AddOn) and `ninja-addon/indicators/mcp-renderer.cs` (renderer; attach it to every chart the server should draw on). `mcp-sma-snapshot.cs` is optional R&D — skip it. Copying and compiling in the NinjaScript Editor are **the developer's own steps** (see [SETUP.md](SETUP.md) §4–5, including the Trading Hours template mapping, which fails closed rather than silently serving RTH data).
+Two files to copy and compile — `ninja-addon/addons/mcp-bridge.cs` (AddOn) and `ninja-addon/indicators/mcp-renderer.cs` (renderer; attach it to every chart the server should draw on). Copying and compiling in the NinjaScript Editor are **the developer's own steps** (see [SETUP.md](SETUP.md) §4–5, including the Trading Hours template mapping, which fails closed rather than silently serving RTH data).
 
 ---
 
@@ -308,7 +309,7 @@ src/
 ninja-addon/
   addons/              NT8 AddOn (McpBridge — WS client, candle server, live streams,
                        draw store, gated order submit)
-  indicators/          McpBridgeRenderer, McpSmaSnapshot (optional R&D)
+  indicators/          McpBridgeRenderer
 scripts/               mcp-entry.mjs (bin auto-switch), init-private.mjs, build-private.mjs
 examples/python/       minimal /feed WebSocket consumer
 test/                  vitest suites for public infrastructure

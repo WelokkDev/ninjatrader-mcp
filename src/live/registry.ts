@@ -10,8 +10,19 @@ import type {
 import type { LiveTimeframe } from "../core/types.js";
 export type { LiveTimeframe };
 
-/** Persisted operator source; "consumer:<n>" sources die with their socket. */
+/** The stdio bin's source; hub sessions use "mcp:<id>". */
 export const MCP_SOURCE = "mcp";
+/** Holds operator intent past the session that expressed it. */
+export const PERSISTED_SOURCE = "mcp:persisted";
+
+/** Operator sources persist; "consumer:<n>" sources die with their socket. */
+export function isOperatorSource(source: string): boolean {
+  return source === MCP_SOURCE || source.startsWith("mcp:");
+}
+
+export function mcpSource(sessionId: string): string {
+  return `mcp:${sessionId}`;
+}
 
 const SUBSCRIBE_TIMEOUT_MS = 15_000;
 const UNSUBSCRIBE_TIMEOUT_MS = 10_000;
@@ -111,7 +122,7 @@ export class LiveSubscriptionRegistry {
         symbol: row.symbol,
         timeframe: row.timeframe as LiveTimeframe,
         tradingHoursTemplate: template,
-        sources: new Set([MCP_SOURCE]),
+        sources: new Set([PERSISTED_SOURCE]),
         acked: false,
         contract: null,
         lastSeq: null,
@@ -165,7 +176,10 @@ export class LiveSubscriptionRegistry {
       this.subs.set(k, entry);
     }
     entry.sources.add(source);
-    if (source === MCP_SOURCE) this.persist(entry);
+    if (isOperatorSource(source)) {
+      entry.sources.add(PERSISTED_SOURCE);
+      this.persist(entry);
+    }
 
     // Already live upstream and nothing to (re)negotiate — done.
     if (entry.acked && !isNew) {
@@ -214,11 +228,22 @@ export class LiveSubscriptionRegistry {
     timeframe: LiveTimeframe,
     source: string,
   ): Promise<{ removedUpstream: boolean; pendingUpstreamRelease?: boolean }> {
-    const k = key(symbol, timeframe);
-    const entry = this.subs.get(k);
+    const entry = this.subs.get(key(symbol, timeframe));
     if (!entry) return { removedUpstream: false };
+    if (isOperatorSource(source)) {
+      entry.sources.delete(PERSISTED_SOURCE);
+      this.unpersist(entry);
+    }
+    return this.drop(entry, source);
+  }
+
+  private async drop(
+    entry: SubEntry,
+    source: string,
+  ): Promise<{ removedUpstream: boolean; pendingUpstreamRelease?: boolean }> {
+    const { symbol, timeframe } = entry;
+    const k = key(symbol, timeframe);
     entry.sources.delete(source);
-    if (source === MCP_SOURCE) this.unpersist(entry);
     if (entry.sources.size > 0) return { removedUpstream: false };
 
     this.subs.delete(k);
@@ -247,11 +272,10 @@ export class LiveSubscriptionRegistry {
     return [...this.pendingUnsubs.keys()];
   }
 
+  /** Unlike release(), leaves persisted intent in place. */
   async releaseAllForSource(source: string): Promise<void> {
     const held = [...this.subs.values()].filter((e) => e.sources.has(source));
-    for (const e of held) {
-      await this.release(e.symbol, e.timeframe, source);
-    }
+    for (const e of held) await this.drop(e, source);
   }
 
   /** Update per-stream cursors from an incoming bar_close. Unknown key = no-op. */

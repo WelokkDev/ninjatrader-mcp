@@ -35,7 +35,7 @@ describe("place_order handler", () => {
     expect(submit).toHaveBeenCalledOnce();
     const intent = submit.mock.calls[0][0];
     expect(intent.clientOrderId).toBe("retry-1");
-    expect(intent.source).toBe("claude");
+    expect(intent.source).toBe("mcp");
   });
 
   it("omits clientOrderId from the intent when the caller doesn't pass one", async () => {
@@ -59,5 +59,14 @@ describe("place_order handler", () => {
     expect(res.isError).toBe(true);
     const body = JSON.parse(res.content[0].text);
     expect(body).toMatchObject({ blockedBy: "addon-blocked", certainlyNotSubmitted: true });
+  });
+});
+
+describe("place_order handler session source", () => {
+  it("stamps the intent with the session's source so the ledger attributes the order", async () => {
+    const { svc, submit } = fakeService();
+    const handler = createPlaceOrderHandler(() => svc, "mcp:abc");
+    await handler(baseArgs);
+    expect(submit.mock.calls[0][0].source).toBe("mcp:abc");
   });
 });

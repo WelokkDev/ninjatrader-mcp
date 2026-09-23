@@ -81,4 +81,4 @@ if (typecheckOnly) {
 const postbuild = join(privateDir, "scripts", "copy-assets.mjs");
 if (existsSync(postbuild)) run("node src/private/scripts/copy-assets.mjs");
 
-console.log("Done. Point your MCP client at build/private/index.js");
+console.log("Done. scripts/mcp-entry.mjs now picks build/private/index.js (npm stop if a hub is running).");

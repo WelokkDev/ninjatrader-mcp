@@ -4,6 +4,7 @@ import { cancelAllFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { CancelAllIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 const cancelAllParams = {
   ...cancelAllFields,
@@ -24,12 +25,12 @@ const DESCRIPTION =
   "get_positions that nothing is left working. Retrying is safe. Does NOT touch the position itself; use flatten to " +
   "also close the position.";
 
-export function createCancelAllHandler(service: () => ExecutionService) {
+export function createCancelAllHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: CancelAllArgs): Promise<ToolResult> => {
     const intent: CancelAllIntent = {
       account: args.account,
       symbol: args.symbol,
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -46,6 +47,6 @@ export function createCancelAllHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerCancelAll(server: McpServer): void {
-  server.tool("cancel_all", DESCRIPTION, cancelAllParams, createCancelAllHandler(getExecutionService));
+export function registerCancelAll(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("cancel_all", DESCRIPTION, cancelAllParams, createCancelAllHandler(getExecutionService, session.source));
 }

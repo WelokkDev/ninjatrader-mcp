@@ -39,7 +39,7 @@ import {
   registerSubscribeLivePositions,
   registerUnsubscribeLivePositions,
 } from "./tools/positions.js";
-import { startLiveFeedRuntime } from "./live/runtime.js";
+import { getLiveFeedRuntime, startLiveFeedRuntime } from "./live/runtime.js";
 import { registerListTrades } from "./tools/list-trades.js";
 import { registerListDecisions } from "./tools/list-decisions.js";
 import { registerGetTrades, registerSyncTrades } from "./tools/get-trades.js";
@@ -58,10 +58,38 @@ import {
   isTradingRegistrationEnabled,
   isRiskReducingRegistrationEnabled,
 } from "./execution/config.js";
+import { STDIO_SESSION, type SessionContext } from "./tools/session.js";
+
+export { createSession, STDIO_SESSION, type SessionContext } from "./tools/session.js";
 
 // The composition seam. A private bin (src/private/) imports these to boot the
 // whole public surface with one call each, then registers its own tools on top.
 // Public code never imports from src/private/ — the dependency is one-way.
+
+const RISK_ADDING_TOOLS = ["place_order", "place_oco", "change_order"];
+const RISK_REDUCING_TOOLS = ["cancel_order", "cancel_all", "flatten"];
+
+/** Logged once by the bin, since a hub composes per session; pass registerGenericTools' `except`. */
+export function announceToolGating(
+  except: string[] = [],
+  log: (line: string) => void = console.error,
+): void {
+  const skip = new Set(except);
+  if (!RISK_ADDING_TOOLS.some((n) => skip.has(n))) {
+    log(
+      isTradingRegistrationEnabled()
+        ? "[server] trading enabled + account allow-listed — place_order/place_oco/change_order tools registered"
+        : "[server] place_order/place_oco/change_order NOT registered (needs NT_TRADING_ENABLED=1 AND an allow-listed account)",
+    );
+  }
+  if (!RISK_REDUCING_TOOLS.some((n) => skip.has(n))) {
+    log(
+      isRiskReducingRegistrationEnabled()
+        ? "[server] accounts allow-listed — cancel_order/cancel_all/flatten tools registered"
+        : "[server] no accounts allow-listed — cancel_order/cancel_all/flatten tools NOT registered",
+    );
+  }
+}
 
 /**
  * Every generic tool — the full public surface minus anything runner-gated.
@@ -74,9 +102,10 @@ import {
  */
 export function registerGenericTools(
   server: McpServer,
-  opts: { except?: string[] } = {},
+  opts: { except?: string[]; session?: SessionContext } = {},
 ): void {
   const skip = new Set(opts.except ?? []);
+  const session = opts.session ?? STDIO_SESSION;
   const unless = (names: string[], register: () => void): void => {
     if (names.some((n) => skip.has(n))) return;
     register();
@@ -95,8 +124,8 @@ export function registerGenericTools(
   unless(["read_indicator_values"], () => registerReadIndicatorValues(server));
   // Chart configuration, not orders, so not behind the trading gate.
   unless(["set_indicator_params"], () => registerSetIndicatorParams(server));
-  unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server));
-  unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server));
+  unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server, session));
+  unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server, session));
   unless(["live_feed_status"], () => registerLiveFeedStatus(server));
   unless(["get_positions"], () => registerGetPositions(server));
   unless(["subscribe_live_positions"], () => registerSubscribeLivePositions(server));
@@ -108,35 +137,21 @@ export function registerGenericTools(
   // Risk-ADDING write tools — registered ONLY when trading is enabled at
   // startup; when off they are absent entirely (capability removal, not a
   // prompt gate). Re-enabling requires a restart.
-  unless(["place_order", "place_oco", "change_order"], () => {
+  unless(RISK_ADDING_TOOLS, () => {
     if (isTradingRegistrationEnabled()) {
-      registerPlaceOrder(server);
-      registerPlaceOco(server);
-      registerChangeOrder(server);
-      console.error(
-        "[server] trading enabled + account allow-listed — place_order/place_oco/change_order tools registered",
-      );
-    } else {
-      console.error(
-        "[server] place_order/place_oco/change_order NOT registered (needs NT_TRADING_ENABLED=1 AND an allow-listed account)",
-      );
+      registerPlaceOrder(server, session);
+      registerPlaceOco(server, session);
+      registerChangeOrder(server, session);
     }
   });
   // Risk-REDUCING write tools — registered whenever any account is allow-listed,
   // independent of the enabled switch, so orders stay manageable across a
   // kill-switch restart. Empty allow-list registers zero write tools.
-  unless(["cancel_order", "cancel_all", "flatten"], () => {
+  unless(RISK_REDUCING_TOOLS, () => {
     if (isRiskReducingRegistrationEnabled()) {
-      registerCancelOrder(server);
-      registerCancelAll(server);
-      registerFlatten(server);
-      console.error(
-        "[server] accounts allow-listed — cancel_order/cancel_all/flatten tools registered",
-      );
-    } else {
-      console.error(
-        "[server] no accounts allow-listed — cancel_order/cancel_all/flatten tools NOT registered",
-      );
+      registerCancelOrder(server, session);
+      registerCancelAll(server, session);
+      registerFlatten(server, session);
     }
   });
 }
@@ -172,4 +187,9 @@ export async function startRuntime(): Promise<void> {
 
 export async function stopRuntime(): Promise<void> {
   await stopBridge();
+}
+
+/** Never touches working orders: a stale subscription is a leak, a stale order is a position. */
+export async function endSession(session: SessionContext): Promise<void> {
+  await getLiveFeedRuntime()?.registry.releaseAllForSource(session.source);
 }

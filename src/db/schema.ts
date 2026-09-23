@@ -133,7 +133,7 @@ export function initializeSchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS order_submissions (
       id              INTEGER PRIMARY KEY,
       ts              INTEGER NOT NULL,   -- unix seconds
-      source          TEXT    NOT NULL,   -- 'claude' | 'algo' | ...
+      source          TEXT    NOT NULL,   -- 'mcp' / 'mcp:<session>' / 'consumer:<n>' / ...
       client_order_id TEXT    NOT NULL,   -- idempotency key (= NT8 order Name)
       account         TEXT    NOT NULL,
       symbol          TEXT    NOT NULL,
@@ -161,7 +161,7 @@ export function initializeSchema(db: Database.Database): void {
       id              INTEGER PRIMARY KEY,
       ts              INTEGER NOT NULL,   -- unix seconds
       op              TEXT    NOT NULL,   -- 'cancel'|'cancel-all'|'flatten'|'change'
-      source          TEXT    NOT NULL,   -- 'claude' | 'algo' | ...
+      source          TEXT    NOT NULL,   -- 'mcp' / 'mcp:<session>' / 'consumer:<n>' / ...
       account         TEXT    NOT NULL,
       symbol          TEXT,               -- cancel-all/flatten only
       client_order_id TEXT,               -- target order (cancel/change only)

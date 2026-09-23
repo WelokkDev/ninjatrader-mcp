@@ -31,9 +31,10 @@ and verify via the NinjaScript Output window (tab 1) afterward.
 ## Adding or building private tools
 
 Follow [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md): scaffold with
-`npm run init-private`, build with `npm run build:private`, point the MCP
-client at `build/private/index.js`, and run exactly one server process (it
-owns the NT8 bridge and the candle cache).
+`npm run init-private`, build with `npm run build:private`, and leave the MCP
+client on `scripts/mcp-entry.mjs` (it runs the private bin as the one shared
+hub every conversation attaches to). A running hub serves the code it started
+with: after a rebuild, `npm stop` so the next connection starts a fresh one.
 
 ## The order write path
 

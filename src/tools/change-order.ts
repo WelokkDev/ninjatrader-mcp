@@ -4,6 +4,7 @@ import { changeOrderFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { ChangeIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 const changeOrderParams = {
   ...changeOrderFields,
@@ -29,7 +30,7 @@ const DESCRIPTION =
   "get_positions / order events. An already-terminal error means the order filled or cancelled first. Retrying a " +
   "change is safe.";
 
-export function createChangeOrderHandler(service: () => ExecutionService) {
+export function createChangeOrderHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: ChangeOrderArgs): Promise<ToolResult> => {
     const intent: ChangeIntent = {
       account: args.account,
@@ -37,7 +38,7 @@ export function createChangeOrderHandler(service: () => ExecutionService) {
       ...(args.quantity !== undefined ? { quantity: args.quantity } : {}),
       ...(args.limitPrice !== undefined ? { limitPrice: args.limitPrice } : {}),
       ...(args.stopPrice !== undefined ? { stopPrice: args.stopPrice } : {}),
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -55,6 +56,6 @@ export function createChangeOrderHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerChangeOrder(server: McpServer): void {
-  server.tool("change_order", DESCRIPTION, changeOrderParams, createChangeOrderHandler(getExecutionService));
+export function registerChangeOrder(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("change_order", DESCRIPTION, changeOrderParams, createChangeOrderHandler(getExecutionService, session.source));
 }

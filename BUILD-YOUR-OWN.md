@@ -16,9 +16,13 @@ verifiable before moving on.
 - Their private module is its own MCP server bin (`src/private/index.ts`) that
   boots the **whole public tool surface with one call** and then registers
   their own tools on top.
-- Run **exactly one server process**. Whichever bin the MCP client points at
-  owns the NinjaTrader bridge (WebSocket port) and the candle cache — a second
-  process would find the port taken and run bridge-disabled.
+- One **hub** process serves every MCP client. `scripts/mcp-entry.mjs` (what
+  `.mcp.json` runs) is a thin per-conversation shim that attaches to the hub
+  over loopback HTTP and starts it if none is running. The hub owns the
+  NinjaTrader bridge, the candle cache and the live feeds; each conversation
+  gets its own session, so any number can be open at once. The bin's `compose`
+  callback runs once per session, so keep process-once work (client_request
+  handlers, singletons) in `onRuntimeReady`.
 - Public compile stays private-free: `npm run typecheck` and the `tsc` step of
   `npm run build` never compile `src/private/`. When a private module exists,
   `npm run build` finishes by rebuilding it (same guard as
@@ -34,10 +38,10 @@ npm run init-private
 
 Idempotent; never overwrites existing files. It creates:
 
-- `src/private/index.ts` — the user's MCP server bin. It calls
-  `registerGenericTools(server)` (every public tool, one line — it stays
-  current automatically as the public surface grows) and then registers their
-  tools, one line each.
+- `src/private/index.ts` — the user's MCP server bin, a `runBin({...})` spec
+  whose `compose` callback calls `registerGenericTools(server, { session })`
+  (every public tool, one line — it stays current automatically as the public
+  surface grows) and then registers their tools, one line each.
 - `src/private/tools/my-tool.ts` — a minimal example tool to copy from.
 
 Build and verify before customizing anything:
@@ -102,7 +106,7 @@ Wire it into `src/private/index.ts` (two lines):
 
 ```ts
 import { registerMyFirstScan } from "./tools/my-first-scan.js";
-// ... after registerGenericTools(server):
+// ... inside compose(), after registerGenericTools(server, { session }):
 registerMyFirstScan(server);
 ```
 
@@ -110,13 +114,20 @@ Rebuild: `npm run build:private`.
 
 ## 4. Point the MCP client at the private bin
 
-The repo's `.mcp.json` already points at `build/private/index.js`, so after
-`npm run build:private` a client restart is all it takes. (To run the plain
-public server instead — no private module — point it at `build/index.js`.)
+The repo's `.mcp.json` already runs `scripts/mcp-entry.mjs`, which picks
+`build/private/index.js` as soon as it exists (and `build/index.js`, the plain
+public server, until then). A running hub keeps serving the code it started
+with, so after any rebuild stop it and reconnect:
 
-Restart the MCP client and verify: the tool list should show every public tool
-**plus** `my_tool` and `my_first_scan`. Call `my_first_scan` with a symbol you
-have cached candles for and check the JSON comes back.
+```
+npm run build:private && npm stop
+```
+
+Reconnect the MCP client (`/mcp` in Claude Code) and verify: the tool list
+should show every public tool **plus** `my_tool` and `my_first_scan`. Call
+`my_first_scan` with a symbol you have cached candles for and check the JSON
+comes back. The shim warns on connect whenever the hub is older than the build
+on disk.
 
 ## 5. Your own Claude skills
 

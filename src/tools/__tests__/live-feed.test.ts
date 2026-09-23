@@ -51,6 +51,7 @@ function makeDeps(runtime: LiveFeedRuntime | null): LiveFeedToolsDeps {
       port: 9472,
     }),
     consumerCount: () => 2,
+    source: "mcp",
   };
 }
 
@@ -153,5 +154,21 @@ describe("live_feed_status", () => {
     expect(res.isError).toBe(true);
     expect(out.error).toMatch(/runtime not started/i);
     expect(out.bridge).toBeDefined();
+  });
+});
+
+describe("per-session sources", () => {
+  it("two sessions hold one upstream stream; one leaving does not end the other's", async () => {
+    const request = vi.fn(async () => ack());
+    const runtime = makeRuntime({ request });
+    const a = { ...makeDeps(runtime), source: "mcp:a" };
+    const b = { ...makeDeps(runtime), source: "mcp:b" };
+    await createSubscribeLiveBarsHandler(a)({ symbol: "NQ", timeframe: "5m" });
+    await createSubscribeLiveBarsHandler(b)({ symbol: "NQ", timeframe: "5m" });
+    expect(request).toHaveBeenCalledTimes(1);
+
+    const out = parse(await createUnsubscribeLiveBarsHandler(a)({ symbol: "NQ", timeframe: "5m" }));
+    expect(out.removedUpstream).toBe(false);
+    expect(runtime.registry.list()[0].sources).toEqual(["mcp:b"]);
   });
 });

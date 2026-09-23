@@ -4,6 +4,7 @@ import { placeOrderFields } from "../bridge/protocol.js";
 import { getExecutionService, type ExecutionService } from "../execution/service.js";
 import type { OrderIntent } from "../execution/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 // Tool params = the wire fields plus an optional rationale for the audit trail.
 // clientOrderId is normally server-generated; it is exposed ONLY so a caller
@@ -50,7 +51,7 @@ const DESCRIPTION =
   "pair, and change_order to trail. Leave clientOrderId unset for new orders; set it only to retry an ambiguous submit " +
   "(timeout/disconnect) with the id you got back, so the retry is deduped.";
 
-export function createPlaceOrderHandler(service: () => ExecutionService) {
+export function createPlaceOrderHandler(service: () => ExecutionService, source: string = STDIO_SESSION.source) {
   return async (args: PlaceOrderArgs): Promise<ToolResult> => {
     const intent: OrderIntent = {
       account: args.account,
@@ -62,7 +63,7 @@ export function createPlaceOrderHandler(service: () => ExecutionService) {
       ...(args.stopPrice !== undefined ? { stopPrice: args.stopPrice } : {}),
       tif: args.tif,
       ...(args.clientOrderId !== undefined ? { clientOrderId: args.clientOrderId } : {}),
-      source: "claude",
+      source,
       ...(args.reason !== undefined ? { reason: args.reason } : {}),
     };
 
@@ -79,6 +80,6 @@ export function createPlaceOrderHandler(service: () => ExecutionService) {
   };
 }
 
-export function registerPlaceOrder(server: McpServer): void {
-  server.tool("place_order", DESCRIPTION, placeOrderParams, createPlaceOrderHandler(getExecutionService));
+export function registerPlaceOrder(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  server.tool("place_order", DESCRIPTION, placeOrderParams, createPlaceOrderHandler(getExecutionService, session.source));
 }

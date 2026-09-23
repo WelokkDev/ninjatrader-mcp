@@ -47,7 +47,7 @@ describe("place_oco handler", () => {
       action: "Sell",
       stopPrice: 100,
       limitPrice: 200,
-      source: "claude",
+      source: "mcp",
       reason: "bracket",
     });
     expect(intent.clientOrderId).toBeUndefined();
@@ -99,7 +99,7 @@ describe("cancel_order handler", () => {
     expect(cancel.mock.calls[0][0]).toMatchObject({
       account: "Sim101",
       clientOrderId: "coid-1",
-      source: "claude",
+      source: "mcp",
     });
     expect(JSON.parse(res.content[0].text)).toMatchObject({ state: "CancelSubmitted" });
   });
@@ -133,7 +133,7 @@ describe("cancel_all / flatten handlers", () => {
     const svc = { cancelAll } as unknown as ExecutionService;
     const handler = createCancelAllHandler(() => svc);
     const res = await handler({ account: "Sim101", symbol: "MNQ" });
-    expect(cancelAll.mock.calls[0][0]).toMatchObject({ symbol: "MNQ", source: "claude" });
+    expect(cancelAll.mock.calls[0][0]).toMatchObject({ symbol: "MNQ", source: "mcp" });
     expect(JSON.parse(res.content[0].text)).toMatchObject({ cancelledCount: 2 });
   });
 
@@ -169,7 +169,7 @@ describe("change_order handler", () => {
     const handler = createChangeOrderHandler(() => svc);
     await handler({ account: "Sim101", clientOrderId: "coid-1", stopPrice: 101.5 });
     const intent = change.mock.calls[0][0];
-    expect(intent).toMatchObject({ clientOrderId: "coid-1", stopPrice: 101.5, source: "claude" });
+    expect(intent).toMatchObject({ clientOrderId: "coid-1", stopPrice: 101.5, source: "mcp" });
     expect(intent).not.toHaveProperty("quantity");
     expect(intent).not.toHaveProperty("limitPrice");
   });

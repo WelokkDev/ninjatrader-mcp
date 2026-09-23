@@ -20,45 +20,36 @@ const privateDir = join(root, "src", "private");
 const toolsDir = join(privateDir, "tools");
 
 const INDEX_TS = `#!/usr/bin/env node
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import "../db/connection.js";
-import { registerGenericTools, startRuntime, stopRuntime } from "../server.js";
+import { registerGenericTools } from "../server.js";
+import { runBin } from "../hub/bin.js";
 // -- your tools --------------------------------------------------------------
 import { registerMyTool } from "./tools/my-tool.js";
 // ----------------------------------------------------------------------------
 
 // Your own MCP server. This file is gitignored -- it never reaches the public
 // repo. It boots the whole public tool surface via registerGenericTools(), then
-// adds your private tools. Point your MCP client at build/private/index.js.
+// adds your private tools.
 
-const server = new McpServer({ name: "ninjatrader-private", version: "0.1.0" });
+runBin({
+  name: "ninjatrader-private",
+  version: "0.1.0",
 
-registerGenericTools(server); // every public tool, one line -- current on rebuild
+  // Runs once per conversation.
+  compose(server, session) {
+    registerGenericTools(server, { session }); // every public tool, one line -- current on rebuild
 
-// -- register your own tools below (one line per tool) -----------------------
-registerMyTool(server);
-// To REPLACE a public tool: the SDK rejects duplicate names, so skip the stock
-// registration first — registerGenericTools(server, { except: ["get_candles"] })
-// — then register your own under that name.
-// ----------------------------------------------------------------------------
+    // -- register your own tools below (one line per tool) -------------------
+    registerMyTool(server);
+    // To REPLACE a public tool: the SDK rejects duplicate names, so skip the stock
+    // registration first — registerGenericTools(server, { session, except: ["get_candles"] })
+    // — then register your own under that name.
+    // ------------------------------------------------------------------------
+  },
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("NinjaTrader private MCP server running");
-  await startRuntime();
-}
-
-const shutdown = async (signal: string) => {
-  console.error(\`Received \${signal}, shutting down\`);
-  await stopRuntime();
-  process.exit(0);
-};
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-
-main().catch((error) => {
+  // onRuntimeReady() {},   // optional: runs once per process
+  // holdOpen: () => false, // optional: true keeps an idle hub alive
+}).catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
