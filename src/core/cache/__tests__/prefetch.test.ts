@@ -431,3 +431,105 @@ describe("PrefetchManager jobs", () => {
     expect(m.status("pf-nope")).toMatchObject({ error: expect.stringMatching(/unknown/i) });
   });
 });
+
+describe("PrefetchManager fairness across owners", () => {
+  it("serves background days round-robin across owners, FIFO within one", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+
+    const a = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
+    const b = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D3], template: TEMPLATE, owner: "mcp:b" });
+    if ("error" in a || "error" in b) throw new Error("start failed");
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].payload.from).toBe(D1.startUnix);
+
+    calls[0].release(() => seed15m(db, D1));
+    await flush();
+    expect(calls[1].payload.from).toBe(D3.startUnix);
+
+    calls[1].release(() => seed15m(db, D3));
+    await flush();
+    expect(calls[2].payload.from).toBe(D2.startUnix);
+    calls[2].release(() => seed15m(db, D2));
+    await m.whenSettled(a.job.jobId);
+    await m.whenSettled(b.job.jobId);
+    expect(m.status(a.job.jobId)).toMatchObject({ job: { owner: "mcp:a", state: "completed" } });
+    expect(m.status(b.job.jobId)).toMatchObject({ job: { owner: "mcp:b", state: "completed" } });
+  });
+
+  it("serves lanes in arrival order, an owner-less lane included", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    const fg = m.scheduledRequest("request_candles", { tag: "fg" });
+    m.startJob({ symbol: "ES", rawTimeframe: "15m", days: [D1], template: TEMPLATE });
+    m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1], template: TEMPLATE, owner: "mcp:a" });
+    calls[0].release();
+    await fg;
+    await flush();
+    expect(calls[1].payload.symbol).toBe("ES");
+  });
+
+  it("passes a drained lane's turn to the next owner, not back to the oldest", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
+    m.startJob({ symbol: "ES", rawTimeframe: "15m", days: [D1], template: TEMPLATE, owner: "mcp:b" });
+    m.startJob({ symbol: "YM", rawTimeframe: "15m", days: [D1], template: TEMPLATE, owner: "mcp:c" });
+    for (let i = 0; i < 3; i++) {
+      await flush();
+      calls[i].release();
+    }
+    await flush();
+    expect(calls.map((c) => c.payload.symbol)).toEqual(["NQ", "ES", "YM", "NQ"]);
+  });
+
+  it("sends an owner that queues more while its last day is in flight to the back", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
+    m.startJob({ symbol: "ES", rawTimeframe: "15m", days: [D1], template: TEMPLATE, owner: "mcp:b" });
+    calls[0].release();
+    await flush();
+    m.startJob({ symbol: "ES", rawTimeframe: "15m", days: [D2], template: TEMPLATE, owner: "mcp:b" });
+    for (let i = 1; i < 3; i++) {
+      calls[i].release();
+      await flush();
+    }
+    expect(calls.map((c) => c.payload.symbol)).toEqual(["NQ", "ES", "NQ", "ES"]);
+  });
+
+  it("refuses to cancel another owner's job unless forced; the owner and an unlabelled caller may", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    const a = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
+    if ("error" in a) throw new Error(a.error);
+    await flush();
+
+    expect(m.cancel(a.job.jobId, { by: "mcp:b" })).toMatchObject({ error: expect.stringMatching(/another conversation \(mcp:a\)/) });
+    expect(m.status(a.job.jobId)).toMatchObject({ job: { state: "running" } });
+    expect(m.cancel(a.job.jobId, { by: "mcp:b", force: true })).toMatchObject({ job: { state: "cancelled" } });
+
+    const c = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D3], template: TEMPLATE, owner: "mcp:c" });
+    if ("error" in c) throw new Error(c.error);
+    expect(m.cancel(c.job.jobId, { by: "mcp:c" })).toMatchObject({ job: { state: "cancelled" } });
+
+    calls[0].release(() => seed15m(db, D1));
+    await m.whenSettled(a.job.jobId);
+    await m.whenSettled(c.job.jobId);
+  });
+
+  it("names the other conversation when its job already owns the days", async () => {
+    const db = memDb();
+    const { request } = deferredRequest();
+    const m = manager(db, request);
+    m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
+    const clash = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D2], template: TEMPLATE, owner: "mcp:b" });
+    expect(clash).toMatchObject({ error: expect.stringMatching(/another conversation's job/) });
+  });
+});

@@ -329,7 +329,7 @@ With `McpBridgeRenderer` attached to a chart, call `draw`:
 ```
 
 The line should appear on the chart. Then `clear_zones` with the same `id` (or no
-`id` to clear all) removes it.
+`id`, which clears what this conversation drew) removes it.
 
 Drawings survive chart reloads: the AddOn retains draw commands per symbol and
 the renderer replays them when the data series reloads. All drawing tools fail

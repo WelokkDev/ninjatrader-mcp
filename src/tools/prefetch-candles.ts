@@ -14,6 +14,7 @@ import { loadCalendar } from "../core/sessions/calendar.js";
 import type { PrefetchManager } from "../core/cache/prefetch.js";
 import { prefetchManager as defaultManager } from "../prefetch-instance.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 // prefetch_candles / prefetch_status / prefetch_cancel — background,
 // resumable batch ingestion. The tool call returns a job plan instantly;
@@ -30,6 +31,7 @@ export interface PrefetchStartArgs {
 export interface PrefetchToolDeps {
   manager: PrefetchManager;
   db: Database;
+  owner?: string;
 }
 
 export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
@@ -67,6 +69,7 @@ export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
       rawTimeframe: timeframe,
       days,
       template: config.session,
+      ...(deps.owner !== undefined ? { owner: deps.owner } : {}),
     });
     if ("error" in res) return errorResult(res.error);
     return jsonResult({
@@ -82,8 +85,8 @@ export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
     return jsonResult(res.job);
   };
 
-  const cancel = async ({ jobId }: { jobId: string }): Promise<ToolResult> => {
-    const res = deps.manager.cancel(jobId);
+  const cancel = async ({ jobId, force }: { jobId: string; force?: boolean }): Promise<ToolResult> => {
+    const res = deps.manager.cancel(jobId, { by: deps.owner, force });
     if ("error" in res) return errorResult(res.error);
     return jsonResult(res.job);
   };
@@ -91,8 +94,12 @@ export function createPrefetchToolHandlers(deps: PrefetchToolDeps) {
   return { start, status, cancel };
 }
 
-export function registerPrefetchTools(server: McpServer): void {
-  const handlers = createPrefetchToolHandlers({ manager: defaultManager, db: defaultDb });
+export function registerPrefetchTools(server: McpServer, session: SessionContext = STDIO_SESSION): void {
+  const handlers = createPrefetchToolHandlers({
+    manager: defaultManager,
+    db: defaultDb,
+    owner: session.source,
+  });
 
   server.tool(
     "prefetch_candles",
@@ -116,7 +123,7 @@ export function registerPrefetchTools(server: McpServer): void {
 
   server.tool(
     "prefetch_status",
-    "Progress and outcome of background prefetch jobs. With jobId: that job's snapshot — state (running / completed / completed_with_failures / cancelled), per-day counts, currentDay, etaSecs, and the exact per-day failures with reasons. Without jobId: all recent jobs, newest first — call this after a batch to confirm NOTHING failed silently. Jobs live in server memory; if the server restarted, re-issue prefetch_candles (already-cached days are skipped).",
+    "Progress and outcome of background prefetch jobs. With jobId: that job's snapshot — state (running / completed / completed_with_failures / cancelled), per-day counts, currentDay, etaSecs, and the exact per-day failures with reasons. Without jobId: all recent jobs, newest first, from every conversation attached to this hub (owner says whose) — call this after a batch to confirm NOTHING failed silently. Background days are served round-robin across conversations, one NT8 request at a time. Jobs live in server memory; if the server restarted, re-issue prefetch_candles (already-cached days are skipped).",
     {
       jobId: z.string().optional().describe("Job id from prefetch_candles. Omit to list recent jobs."),
     },
@@ -125,9 +132,10 @@ export function registerPrefetchTools(server: McpServer): void {
 
   server.tool(
     "prefetch_cancel",
-    "Cancel a running prefetch job. The in-flight day is allowed to finish (its data still heals the cache); remaining days are skipped and reported as cancelled in prefetch_status.",
+    "Cancel a running prefetch job. The in-flight day is allowed to finish (its data still heals the cache); remaining days are skipped and reported as cancelled in prefetch_status. Another conversation's job is refused unless force:true.",
     {
       jobId: z.string().describe("Job id from prefetch_candles."),
+      force: z.boolean().optional().describe("Also cancel a job another conversation started"),
     },
     handlers.cancel,
   );

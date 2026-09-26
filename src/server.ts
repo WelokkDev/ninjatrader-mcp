@@ -92,7 +92,8 @@ export function announceToolGating(
 }
 
 /**
- * Every generic tool — the full public surface minus anything runner-gated.
+ * Every generic tool — the full public surface minus anything runner-gated and
+ * list_sessions, which the hub registers.
  *
  * `except` skips the stock registration for the named tools so a private bin
  * can register its own replacement under the same name (the MCP SDK rejects
@@ -113,10 +114,10 @@ export function registerGenericTools(
   unless(["get_candles"], () => registerGetCandles(server));
   unless(["resolve_session_days"], () => registerResolveSessionDays(server));
   unless(["prefetch_candles", "prefetch_status", "prefetch_cancel"], () =>
-    registerPrefetchTools(server),
+    registerPrefetchTools(server, session),
   );
-  unless(["draw"], () => registerDraw(server));
-  unless(["clear_zones"], () => registerClearZones(server));
+  unless(["draw"], () => registerDraw(server, session));
+  unless(["clear_zones"], () => registerClearZones(server, session));
   unless(["list_open_charts"], () => registerListOpenCharts(server));
   unless(["navigate_chart"], () => registerNavigateChart(server));
   unless(["get_drawings"], () => registerGetDrawings(server));

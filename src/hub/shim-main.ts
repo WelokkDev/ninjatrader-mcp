@@ -57,6 +57,9 @@ export async function shimMain({ entry, args }: ShimMainOptions): Promise<void> 
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => void pipe.stop(sig));
   }
+  // The SDK's stdio transport never reports EOF; a client that died without a
+  // signal must not leave a phantom session holding the hub open.
+  process.stdin.once("end", () => void pipe.stop("client stdin closed"));
   await pipe.start();
 }
 

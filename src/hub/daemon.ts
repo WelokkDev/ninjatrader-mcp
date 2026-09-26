@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createSession, type SessionContext } from "../tools/session.js";
+import { createSession, drawingCount, type SessionContext } from "../tools/session.js";
 import {
   HEALTH_PATH,
   HUB_HOST,
@@ -52,6 +52,7 @@ export interface SessionSummary {
   connectedAtMs: number;
   lastSeenMs: number;
   attached: boolean;
+  drawings: number;
 }
 
 export interface Hub {
@@ -296,6 +297,7 @@ export async function startHub(spec: HubSpec, opts: HubOptions): Promise<Hub> {
         connectedAtMs: l.ctx.connectedAtMs,
         lastSeenMs: l.lastSeenMs,
         attached: l.streams > 0,
+        drawings: drawingCount(l.ctx.drawn),
       })),
     health,
     stop,

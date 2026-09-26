@@ -47,6 +47,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   │     cancel/cancel_all/flatten when accounts are allow-listed)    │
   │     5 experiment-lab tools (registered by private bins           │
   │     that bind a Lab to their own engine)                         │
+  │     list_sessions (registered by the hub itself)                 │
   │                                                                  │
   │   Bridge (src/bridge/)          SQLite (data/candles.db, WAL)    │
   │   - WS server on 127.0.0.1:9472 - candles (1s/5s/15s/5m/15m,     │
@@ -99,7 +100,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 ## MCP tools
 
-The public server (`build/index.js`) registers 23 tools. The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
+The public server (`build/index.js`) registers 24 tools (23 with `NT_NO_HUB=1`: `list_sessions` is hub-only). The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
 
 ### Market data
 
@@ -117,6 +118,7 @@ The public server (`build/index.js`) registers 23 tools. The write tools appear 
 | `live_feed_status` | Per-subscription health: acked state, contract, lag, dup/out-of-order/gap counters, heals in flight, `/feed` consumer count, position-feed health. |
 | `get_positions` | Read-only open positions per account (sim vs. live never merged): average entry, working stops/targets matched into dollar risk and R, unrealized P&L with its price source and age. Disconnected ⇒ `stale: true`, treated as *unknown*, never as flat. |
 | `subscribe_live_positions` / `unsubscribe_live_positions` | Sparse event feed (fills, order changes, position transitions) with full-snapshot self-heal; adds per-trade age, fill history, and MAE/MFE to `get_positions`. |
+| `list_sessions` | Every conversation attached to the hub and what each holds — bar subscriptions, running prefetch jobs, drawings, idle time — plus the hub process and whether it is serving an older build than the one on disk. |
 
 **For bots and dashboards** there is a push channel on the same port: `ws://127.0.0.1:9472/feed`, same bearer token. Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is self-sufficient. A minimal Python consumer ships at `examples/python/live_feed_client.py`. Bars tagged `backfill: true` closed well before delivery — act-on-close logic must skip them.
 
@@ -125,7 +127,7 @@ The public server (`build/index.js`) registers 23 tools. The write tools appear 
 | Tool | Summary |
 |---|---|
 | `draw` | Draw a generic primitive on the NT8 chart: `rectangle`, `hline`, `vline`, or `text`, with optional style (`color`, `opacity`, `label`). |
-| `clear_zones` | Remove drawn primitives by id, or all of them; optionally scoped to one symbol. |
+| `clear_zones` | Remove drawn primitives: by id, everything with `all: true`, or — the default — only what this conversation drew; optionally scoped to one symbol. |
 | `list_open_charts` | Enumerate open NT8 charts/tabs and their symbols. |
 | `navigate_chart` | Programmatic Go To: scroll a chart to a date/time (centered or right-aligned) and/or zoom to a bar count; selects the tab, focuses the window, and reports the resulting visible range. Only reaches what the chart has loaded — `clamped: true` in the response means increase the chart's Days To Load. |
 | `list_chart_indicators` | Discover the indicators on your open charts: identity, the indicator's own configured parameters, plot styling, readable depth, and an `id` handle. Step 1 of the two-step indicator read. |

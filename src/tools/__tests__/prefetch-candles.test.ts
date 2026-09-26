@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { initializeSchema } from "../../db/schema.js";
 import { PrefetchManager, type BridgeRequest } from "../../core/cache/prefetch.js";
@@ -146,5 +146,20 @@ describe("prefetch_candles lifecycle", () => {
     const cancelRes = JSON.parse(text(await handlers.cancel({ jobId: started.jobId })));
     expect(["cancelled", "completed", "completed_with_failures"]).toContain(cancelRes.state);
     await manager.whenSettled(started.jobId);
+  });
+});
+
+describe("prefetch tools carry the caller's identity", () => {
+  it("cancel passes the owner and force through to the manager", async () => {
+    const cancel = vi.fn(() => ({ error: "nope" }));
+    const handlers = createPrefetchToolHandlers({
+      manager: { cancel } as unknown as PrefetchManager,
+      db: memDb(),
+      owner: "mcp:a",
+    });
+    await handlers.cancel({ jobId: "pf-1" });
+    expect(cancel).toHaveBeenLastCalledWith("pf-1", { by: "mcp:a", force: undefined });
+    await handlers.cancel({ jobId: "pf-1", force: true });
+    expect(cancel).toHaveBeenLastCalledWith("pf-1", { by: "mcp:a", force: true });
   });
 });

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateToken } from "../bridge/auth.js";
 import { endSession, startRuntime, stopRuntime } from "../server.js";
+import { registerListSessions } from "../tools/list-sessions.js";
 import { STDIO_SESSION, type SessionContext } from "../tools/session.js";
 import { HUB_HOST, HUB_IDLE_EXIT_MS, HUB_TOKEN_KEY, buildFingerprint, hubPort } from "./config.js";
 import { startHub, type Hub } from "./daemon.js";
@@ -28,11 +29,14 @@ async function runStdio(spec: BinSpec): Promise<void> {
   console.error(`${spec.name} running on stdio (single client)`);
   await startRuntime();
   await spec.onRuntimeReady?.();
-  onSignal(async (signal) => {
-    console.error(`Received ${signal}, shutting down`);
+  const shutdown = async (why: string): Promise<void> => {
+    console.error(`${why}, shutting down`);
     await stopRuntime();
     process.exit(0);
-  });
+  };
+  onSignal((signal) => shutdown(`Received ${signal}`));
+  // The SDK's stdio transport never reports EOF; without this a dead client leaves the bridge port owned by a ghost.
+  process.stdin.once("end", () => void shutdown("Client stdin closed"));
 }
 
 async function runHub(spec: BinSpec, resident: boolean): Promise<void> {
@@ -51,7 +55,15 @@ async function runHub(spec: BinSpec, resident: boolean): Promise<void> {
   try {
     // Bind first: the port is the one-hub lock, so a losing twin exits before starting the bridge.
     hub = await startHub(
-      { name: spec.name, version: spec.version, compose: spec.compose, onSessionEnd: endSession },
+      {
+        name: spec.name,
+        version: spec.version,
+        compose: (server, session) => {
+          spec.compose(server, session);
+          registerListSessions(server, session, { hub, buildOnDisk: buildFingerprint });
+        },
+        onSessionEnd: endSession,
+      },
       {
         port,
         token,

@@ -5,6 +5,7 @@ import { drawShapeSchema, drawStyleSchema } from "../bridge/protocol.js";
 import type { DrawMessage, DrawShape, DrawStyle, OutboundMessage } from "../bridge/protocol.js";
 import { drawTargetWarning } from "./draw-target.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
+import { STDIO_SESSION, type SessionContext } from "./session.js";
 
 export interface DrawArgs {
   id: string;
@@ -17,6 +18,7 @@ export interface DrawDeps {
   isConnected: () => boolean;
   send: (message: OutboundMessage) => boolean;
   knownInstruments: () => string[];
+  drawn?: Map<string, Set<string>>;
 }
 
 export function createDrawHandler(deps: DrawDeps) {
@@ -35,20 +37,22 @@ export function createDrawHandler(deps: DrawDeps) {
       ...(style !== undefined ? { style } : {}),
     };
     const dispatched = deps.send(message);
+    if (dispatched && deps.drawn) deps.drawn.set(symbol, (deps.drawn.get(symbol) ?? new Set<string>()).add(id));
     const warning = drawTargetWarning(symbol, deps.knownInstruments());
     return jsonResult({ dispatched, id, symbol, shape, style, ...(warning ? { warning } : {}) });
   };
 }
 
-export function registerDraw(server: McpServer): void {
+export function registerDraw(server: McpServer, session: SessionContext = STDIO_SESSION): void {
   const handler = createDrawHandler({
     isConnected: defaultIsConnected,
     send: defaultSend,
     knownInstruments: () => getBridgeStatus().instruments,
+    drawn: session.drawn,
   });
   server.tool(
     "draw",
-    "Draw a chart primitive on the matching NinjaTrader chart. shape is one of: rectangle {proximal,distal,fromTs?,toTs?}, hline {price,fromTs?,toTs?}, vline {ts}, text {ts,price,text}, riskreward {entry,ratio,fromTs?,toTs?} + EXACTLY ONE of stop or target. For riskreward NT8 derives the leg you omit (target = entry + (entry-stop)*ratio, or stop = entry - (target-entry)/ratio) and renders entry/stop/target lines; direction is implied by the leg (stop below entry = long, above = short). Sending both legs or neither is rejected. Optional style {color '#rrggbb', opacity 0..1, label}; for riskreward, color tints the ENTRY line only (stop stays red, target green, so risk-vs-reward stays readable) and opacity applies to the line strokes, not a fill. id is the draw tag (use clear_zones to remove). TIMEZONE: interpret natural-language dates as America/New_York calendar dates (see src/core/time.ts etDayStart/etDayEnd). For zone/analysis requests ('draw the two zones', 'analyze my chart and draw supply & demand'), consult draw.md at repo root (if present) for the role->style palette and the analyze->draw recipe before drawing.",
+    "Draw a chart primitive on the matching NinjaTrader chart. shape is one of: rectangle {proximal,distal,fromTs?,toTs?}, hline {price,fromTs?,toTs?}, vline {ts}, text {ts,price,text}, riskreward {entry,ratio,fromTs?,toTs?} + EXACTLY ONE of stop or target. For riskreward NT8 derives the leg you omit (target = entry + (entry-stop)*ratio, or stop = entry - (target-entry)/ratio) and renders entry/stop/target lines; direction is implied by the leg (stop below entry = long, above = short). Sending both legs or neither is rejected. Optional style {color '#rrggbb', opacity 0..1, label}; for riskreward, color tints the ENTRY line only (stop stays red, target green, so risk-vs-reward stays readable) and opacity applies to the line strokes, not a fill. id is the draw tag (use clear_zones to remove; with no ids it removes what THIS conversation drew). TIMEZONE: interpret natural-language dates as America/New_York calendar dates (see src/core/time.ts etDayStart/etDayEnd). For zone/analysis requests ('draw the two zones', 'analyze my chart and draw supply & demand'), consult draw.md at repo root (if present) for the role->style palette and the analyze->draw recipe before drawing.",
     { id: z.string().min(1), symbol: z.string().min(1), shape: drawShapeSchema, style: drawStyleSchema.optional() },
     handler,
   );

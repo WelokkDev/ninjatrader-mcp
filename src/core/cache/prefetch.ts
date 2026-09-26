@@ -63,6 +63,7 @@ export type PrefetchJobState =
 
 interface Job {
   id: string;
+  owner: string | null;
   symbol: string;
   rawTimeframe: Timeframe;
   template: SessionTemplate;
@@ -77,6 +78,7 @@ interface Job {
 
 export interface PrefetchJobSnapshot {
   jobId: string;
+  owner: string | null;
   symbol: string;
   timeframe: Timeframe;
   state: PrefetchJobState;
@@ -101,6 +103,12 @@ export interface StartJobArgs {
   rawTimeframe: Timeframe;
   days: SessionDay[];
   template: SessionTemplate;
+  owner?: string;
+}
+
+export interface CancelOptions {
+  by?: string;
+  force?: boolean;
 }
 
 const MAX_RETAINED_TERMINAL_JOBS = 20;
@@ -112,7 +120,8 @@ export class PrefetchManager {
   private readonly deps: PrefetchDeps;
   private readonly nowMs: () => number;
   private readonly hi: QueueTask[] = [];
-  private readonly lo: QueueTask[] = [];
+  // Per owner, served round-robin so one long backfill can't starve another owner's short job.
+  private readonly lo = new Map<string | null, QueueTask[]>();
   private inFlight = false;
   private readonly jobs = new Map<string, Job>();
   private readonly settlers = new Map<string, Array<() => void>>();
@@ -172,8 +181,9 @@ export class PrefetchManager {
       if (clash.length > 0) {
         const head = clash.slice(0, 3).join(", ");
         const more = clash.length > 3 ? ` …and ${clash.length - 3} more` : "";
+        const whose = other.owner !== null && other.owner !== args.owner ? " (another conversation's job)" : "";
         return {
-          error: `Job ${other.id} is already fetching ${clash.length} of these day(s): ${head}${more}. Poll prefetch_status for it or cancel it first.`,
+          error: `Job ${other.id}${whose} is already fetching ${clash.length} of these day(s): ${head}${more}. Poll prefetch_status for it or cancel it first.`,
         };
       }
     }
@@ -181,6 +191,7 @@ export class PrefetchManager {
     const id = `pf-${(++this.seq).toString(36)}`;
     const job: Job = {
       id,
+      owner: args.owner ?? null,
       symbol: args.symbol,
       rawTimeframe: args.rawTimeframe,
       template: args.template,
@@ -202,9 +213,9 @@ export class PrefetchManager {
       job.finishedAtMs = this.nowMs();
       this.settle(id);
     } else {
-      for (const d of job.days) {
-        this.lo.push(() => this.executeDay(job, d));
-      }
+      const queue = this.lo.get(job.owner) ?? [];
+      for (const d of job.days) queue.push(() => this.executeDay(job, d));
+      this.lo.set(job.owner, queue);
       void this.pump();
     }
 
@@ -229,9 +240,14 @@ export class PrefetchManager {
     return { job: this.snapshot(job) };
   }
 
-  cancel(jobId: string): { error: string } | { job: PrefetchJobSnapshot } {
+  cancel(jobId: string, opts: CancelOptions = {}): { error: string } | { job: PrefetchJobSnapshot } {
     const job = this.jobs.get(jobId);
     if (!job) return { error: `unknown prefetch job "${jobId}"` };
+    if (job.owner !== null && opts.by !== undefined && job.owner !== opts.by && !opts.force) {
+      return {
+        error: `prefetch job "${jobId}" was started by another conversation (${job.owner}); pass force:true to cancel it anyway`,
+      };
+    }
     if (job.state === "running") {
       job.state = "cancelled";
       // Pending day-tasks self-skip; the in-flight request finishes and
@@ -256,7 +272,8 @@ export class PrefetchManager {
 
   private async pump(): Promise<void> {
     if (this.inFlight) return;
-    const task = this.hi.shift() ?? this.lo.shift();
+    const lane = this.hi.length > 0 ? undefined : this.lo.entries().next().value;
+    const task = lane ? lane[1].shift() : this.hi.shift();
     if (!task) return;
     this.inFlight = true;
     try {
@@ -266,6 +283,12 @@ export class PrefetchManager {
       // kill the executor loop.
       console.error("[prefetch] task error:", err);
     } finally {
+      if (lane) {
+        // Rotate only after the request, so owners who queued during it go first.
+        const [owner, queue] = lane;
+        this.lo.delete(owner);
+        if (queue.length > 0) this.lo.set(owner, queue);
+      }
       this.inFlight = false;
       void this.pump();
     }
@@ -486,6 +509,7 @@ export class PrefetchManager {
         : null;
     return {
       jobId: job.id,
+      owner: job.owner,
       symbol: job.symbol,
       timeframe: job.rawTimeframe,
       state: job.state,
