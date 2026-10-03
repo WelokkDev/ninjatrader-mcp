@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { initializeSchema } from "../../../db/schema.js";
 import { PrefetchManager, type BridgeRequest } from "../prefetch.js";
+import { recordContractEvent } from "../contracts.js";
+import { ingestCandles } from "../../../bridge/ingest.js";
 import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
 import type { SessionDay } from "../../sessions/types.js";
 
@@ -531,5 +533,106 @@ describe("PrefetchManager fairness across owners", () => {
     m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE, owner: "mcp:a" });
     const clash = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D2], template: TEMPLATE, owner: "mcp:b" });
     expect(clash).toMatchObject({ error: expect.stringMatching(/another conversation's job/) });
+  });
+});
+
+describe("prefetch_status contract notes", () => {
+  it("lists contract disputes recorded on the job's days, and nothing when there are none", async () => {
+    const db = memDb();
+    const m = manager(db, healingRequest(db));
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+    const id = started.job.jobId;
+    for (let i = 0; i < 50 && m.status().jobs.find((j) => j.jobId === id)?.state === "running"; i++) {
+      await flush();
+    }
+    expect(m.status().jobs.find((j) => j.jobId === id)?.contractNotes).toBeUndefined();
+
+    const created = m.status().jobs.find((j) => j.jobId === id)?.createdAt ?? 0;
+    recordContractEvent(db, {
+      symbol: "NQ", sessionDay: D2.label, kind: "reassigned",
+      from: "NQ 06-26", to: "NQ 09-26", ts: created + 5, count: 1,
+      detail: "92 bar(s) kept, no longer served",
+    });
+    recordContractEvent(db, {
+      symbol: "NQ", sessionDay: D1.label, kind: "off_front",
+      from: "NQ 09-26", to: "NQ 06-26", ts: created - 100, count: 9,
+    });
+    recordContractEvent(db, {
+      symbol: "NQ", sessionDay: D3.label, kind: "off_front",
+      from: "NQ 09-26", to: "NQ 06-26", ts: created + 5, count: 3,
+    });
+    const snap = m.status().jobs.find((j) => j.jobId === id);
+    expect(snap?.contractNotes).toEqual([
+      expect.stringMatching(/^2026-05-05: front contract moved NQ 06-26 → NQ 09-26/),
+    ]);
+  });
+});
+
+describe("a day serving two contracts is fetched again", () => {
+  function seedMixed15m(db: Database.Database, day: SessionDay): void {
+    const stmt = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume, contract)
+       VALUES ('NQ', '15m', ?, 1, 2, 0.5, 1.5, 10, ?)`,
+    );
+    let i = 0;
+    for (let t = day.startUnix + 900; t <= day.endUnix; t += 900) {
+      stmt.run(t, i++ % 2 ? "NQ 06-26" : "NQ 09-26");
+    }
+  }
+
+  async function settled(m: PrefetchManager, id: string) {
+    const find = () => m.status().jobs.find((j) => j.jobId === id);
+    for (let i = 0; i < 50 && find()?.state === "running"; i++) await flush();
+    const snap = find();
+    if (!snap) throw new Error("job vanished");
+    return snap;
+  }
+
+  it("the job fetches it, and the fetch assigns one contract", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const db = memDb();
+      seedMixed15m(db, D1);
+      let calls = 0;
+      const request: BridgeRequest = async (_type, payload) => {
+        calls++;
+        const candles = [];
+        for (let t = (payload.from as number) + 900; t <= (payload.to as number); t += 900) {
+          candles.push({ timestamp: t, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
+        }
+        ingestCandles("NQ", "15m", candles, db, {
+          mode: "day-refill",
+          nowUnix: D3.endUnix + 7200, // after the job was created
+          contractForDay: () => "NQ 09-26",
+        });
+        return {};
+      };
+      const m = manager(db, request);
+      const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1], template: TEMPLATE });
+      if ("error" in started) throw new Error(started.error);
+      expect(started.job.alreadyComplete).toBe(0);
+
+      const snap = await settled(m, started.job.jobId);
+      expect(calls).toBe(1);
+      expect(snap).toMatchObject({ state: "completed", fetched: 1, failed: 0 });
+      expect(snap.contractNotes).toEqual([
+        expect.stringMatching(/^2026-05-04: front contract moved NQ 06-26 → NQ 09-26/),
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("names the cause when the fetch brings no bars", async () => {
+    const db = memDb();
+    seedMixed15m(db, D1);
+    const m = manager(db, async () => ({}));
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+
+    const snap = await settled(m, started.job.jobId);
+    expect(snap.state).toBe("completed_with_failures");
+    expect(snap.failures[0].error).toMatch(/still serves bars from two contracts/);
   });
 });

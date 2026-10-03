@@ -12,6 +12,8 @@ import { wallClockHHMM } from "../time.js";
 import { getInstrumentConfig } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
+import { frontContractFor, servesMixedContracts, soleAttestedContract } from "./contracts.js";
+import { UNATTESTED_CONTRACT } from "../../db/schema.js";
 import { recomputeDerivedForSessionDay } from "./derived.js";
 import { isImportedSource, isSimulatedFeed } from "../../bridge/data-source.js";
 
@@ -76,7 +78,10 @@ export function classifySessionDay(
   }
   const r = validateSessionDay(db, symbol, day, rawTimeframe, nowUnix);
   if (r.status === "skipped") return "in_progress";
-  if (r.status === "ok") return "complete";
+  if (r.status === "ok") {
+    // Two contracts served: "partial" so a re-fetch assigns the day's front.
+    return servesMixedContracts(db, symbol, rawTimeframe, day) ? "partial" : "complete";
+  }
   return mismatchIsEmpty(r) ? "empty" : "partial";
 }
 
@@ -317,7 +322,14 @@ export async function ensureCached(
         continue;
       }
       const grid = expectedRawGrid(day, rawTimeframe, template, calendar);
-      const purged = purgeOffGridRawRows(db, symbol, rawTimeframe, day, grid, nowUnix);
+      // Only the served contract's rows are graded against the grid.
+      const purgeContract =
+        frontContractFor(db, symbol, day.label)?.contract ??
+        soleAttestedContract(db, symbol, rawTimeframe, day) ??
+        UNATTESTED_CONTRACT;
+      const purged = purgeOffGridRawRows(
+        db, symbol, rawTimeframe, day, grid, nowUnix, purgeContract,
+      );
       if (purged > 0) {
         console.error(
           `[fill] post-fetch reconcile ${symbol} ${rawTimeframe} ${day.label}: removed ${purged} off-grid row(s)`,

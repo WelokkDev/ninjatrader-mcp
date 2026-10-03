@@ -3,6 +3,7 @@ import {
   NoSessionSpanError,
   SessionClosedError,
   makeSessionDayResolver,
+  sessionDayAtOrBefore,
   sessionDayContaining,
   sessionDayRange,
   sessionDaysOverlapping,
@@ -290,5 +291,18 @@ describe("sessionDaysOverlapping regression (guard must not over-reject)", () =>
       "2026-05-07",
       "2026-05-08",
     ]);
+  });
+});
+
+describe("sessionDayAtOrBefore", () => {
+  it("is the containing session, else the last one that closed", () => {
+    // Friday 10:00 UTC: inside the session.
+    expect(sessionDayAtOrBefore(unix(2026, 6, 12, 10), TEMPLATE)?.label).toBe("2026-06-12");
+    // The daily break after Thursday's close (17:30 ET).
+    expect(sessionDayAtOrBefore(unix(2026, 6, 11, 21, 30), TEMPLATE)?.label).toBe("2026-06-11");
+    // Saturday: still Friday's session.
+    expect(sessionDayAtOrBefore(unix(2026, 6, 13, 12), TEMPLATE)?.label).toBe("2026-06-12");
+    // Sunday evening after the reopen: Monday's session.
+    expect(sessionDayAtOrBefore(unix(2026, 6, 14, 23), TEMPLATE)?.label).toBe("2026-06-15");
   });
 });

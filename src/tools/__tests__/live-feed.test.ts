@@ -12,6 +12,9 @@ import {
   type LiveFeedToolsDeps,
 } from "../live-feed.js";
 import type { SubscribeAckMessage, BarCloseMessage } from "../../bridge/protocol.js";
+import { getInstrumentConfig } from "../../core/sessions/registry.js";
+import { loadCalendar } from "../../core/sessions/calendar.js";
+import { sessionDayAtOrBefore, sessionDayContaining } from "../../core/sessions/session-day.js";
 
 const NOW = 1_789_000_000;
 
@@ -170,5 +173,74 @@ describe("per-session sources", () => {
     const out = parse(await createUnsubscribeLiveBarsHandler(a)({ symbol: "NQ", timeframe: "5m" }));
     expect(out.removedUpstream).toBe(false);
     expect(runtime.registry.list()[0].sources).toEqual(["mcp:b"]);
+  });
+});
+
+describe("live_feed_status contract check", () => {
+  function cacheWithFront(contract: string): { db: Database.Database; label: string } {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const config = getInstrumentConfig("NQ");
+    const day = sessionDayContaining(NOW, config.session, loadCalendar(db, config.session.name));
+    if (!day) throw new Error("fixture NOW falls outside every NQ session");
+    db.prepare(
+      `INSERT INTO session_contracts
+         (symbol, session_day, start_unix, end_unix, contract, decided_by, updated_at)
+       VALUES ('NQ', ?, ?, ?, ?, 'fetch', ?)`,
+    ).run(day.label, day.startUnix, day.endUnix, contract, NOW);
+    return { db, label: day.label };
+  }
+
+  it("flags a subscription bound off the day's front contract and lists today's disputes", async () => {
+    const runtime = makeRuntime();
+    await createSubscribeLiveBarsHandler(makeDeps(runtime))({ symbol: "NQ", timeframe: "5m" });
+    const { db, label } = cacheWithFront("NQ 12-26");
+    db.prepare(
+      `INSERT INTO contract_events
+         (symbol, session_day, kind, from_contract, to_contract, first_ts, last_ts, count, detail)
+       VALUES ('NQ', ?, 'off_front', 'NQ 12-26', 'NQ 09-26', ?, ?, 12, '5m live')`,
+    ).run(label, NOW, NOW);
+
+    const handler = createLiveFeedStatusHandler({ ...makeDeps(runtime), db, nowUnix: () => NOW });
+    const out = parse(await handler({}));
+    const subs = out.subscriptions as Array<Record<string, unknown>>;
+    expect(subs[0]).toMatchObject({ contract: "NQ 09-26", frontContract: "NQ 12-26", offFront: true });
+    expect(out.contractNotes).toEqual([
+      expect.stringMatching(/12 bar\(s\) arrived under NQ 09-26 while the front contract is NQ 12-26/),
+    ]);
+  });
+
+  it("still answers after the session closes: the weekend shows Friday's front", async () => {
+    const runtime = makeRuntime();
+    await createSubscribeLiveBarsHandler(makeDeps(runtime))({ symbol: "NQ", timeframe: "5m" });
+    const saturday = Math.floor(Date.UTC(2026, 8, 12, 12) / 1000);
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const config = getInstrumentConfig("NQ");
+    const friday = sessionDayAtOrBefore(saturday, config.session, loadCalendar(db, config.session.name));
+    expect(friday?.label).toBe("2026-09-11");
+    db.prepare(
+      `INSERT INTO session_contracts
+         (symbol, session_day, start_unix, end_unix, contract, decided_by, updated_at)
+       VALUES ('NQ', '2026-09-11', ?, ?, 'NQ 12-26', 'fetch', ?)`,
+    ).run(friday?.startUnix, friday?.endUnix, saturday);
+
+    const handler = createLiveFeedStatusHandler({
+      ...makeDeps(runtime), db, nowUnix: () => saturday,
+    });
+    const subs = parse(await handler({})).subscriptions as Array<Record<string, unknown>>;
+    expect(subs[0]).toMatchObject({ frontContract: "NQ 12-26", offFront: true });
+  });
+
+  it("reports the front quietly when the subscription matches it", async () => {
+    const runtime = makeRuntime();
+    await createSubscribeLiveBarsHandler(makeDeps(runtime))({ symbol: "NQ", timeframe: "5m" });
+    const { db } = cacheWithFront("NQ SEP26"); // NT8's other spelling of the same contract
+    const handler = createLiveFeedStatusHandler({ ...makeDeps(runtime), db, nowUnix: () => NOW });
+    const out = parse(await handler({}));
+    const subs = out.subscriptions as Array<Record<string, unknown>>;
+    expect(subs[0]).toMatchObject({ contract: "NQ 09-26", frontContract: "NQ SEP26" });
+    expect(subs[0]).not.toHaveProperty("offFront");
+    expect(out).not.toHaveProperty("contractNotes");
   });
 });

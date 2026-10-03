@@ -11,6 +11,11 @@ import {
   withCandleTimeoutHint,
 } from "./fill.js";
 import { expectedBarCount } from "./validator.js";
+import {
+  contractEventsFor,
+  describeContractEvent,
+  servesMixedContracts,
+} from "./contracts.js";
 
 // PrefetchManager — the single owner of request_candles traffic.
 //
@@ -94,6 +99,7 @@ export interface PrefetchJobSnapshot {
   etaSecs: number | null;
   /** Per-day failure detail, capped at 10 entries; `failed` is the full count. */
   failures: Array<{ day: string; error: string }>;
+  contractNotes?: string[];
   createdAt: number;
   finishedAt: number | null;
 }
@@ -365,7 +371,9 @@ export class PrefetchManager {
         d.state = "fetched";
       } else {
         d.state = "failed";
-        d.error = `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
+        d.error = servesMixedContracts(this.deps.db, job.symbol, job.rawTimeframe, freshDay())
+          ? "response received but the day still serves bars from two contracts — NinjaTrader sent no bars to assign its front contract; prefetch a timeframe not yet cached for that day to assign it"
+          : `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
       }
       job.durationsMs.push(this.nowMs() - t0);
     } catch (err) {
@@ -507,6 +515,15 @@ export class PrefetchManager {
             ),
           )
         : null;
+    const labels = [...job.days.map((d) => d.day.label), ...job.alreadyComplete].sort();
+    // Only events since the job started; older ones are not its doing.
+    const createdAtSec = Math.floor(job.createdAtMs / 1000);
+    const contractNotes =
+      labels.length > 0
+        ? contractEventsFor(this.deps.db, job.symbol, labels[0], labels[labels.length - 1])
+            .filter((e) => e.lastTs >= createdAtSec)
+            .map(describeContractEvent)
+        : [];
     return {
       jobId: job.id,
       owner: job.owner,
@@ -526,6 +543,7 @@ export class PrefetchManager {
       expectedBarsToFetch: job.expectedBarsToFetch,
       etaSecs,
       failures,
+      ...(contractNotes.length > 0 ? { contractNotes } : {}),
       createdAt: Math.floor(job.createdAtMs / 1000),
       finishedAt: job.finishedAtMs === null ? null : Math.floor(job.finishedAtMs / 1000),
     };

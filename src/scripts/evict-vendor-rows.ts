@@ -42,7 +42,7 @@ function survey(): SourceRow[] {
               MIN(timestamp)  AS oldest,
               MAX(timestamp)  AS newest,
               GROUP_CONCAT(DISTINCT symbol || ' ' || timeframe) AS symbols
-         FROM candles
+         FROM bars
         GROUP BY source
         ORDER BY n DESC`,
     )
@@ -106,7 +106,7 @@ function main(): number {
   const placeholders = markers.map(() => "?").join(", ");
   const deleted = db.transaction(() => {
     const info = db
-      .prepare(`DELETE FROM candles WHERE source IN (${placeholders})`)
+      .prepare(`DELETE FROM bars WHERE source IN (${placeholders})`)
       .run(...markers);
     return info.changes;
   })();

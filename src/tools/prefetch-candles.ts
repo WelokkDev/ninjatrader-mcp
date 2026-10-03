@@ -123,7 +123,7 @@ export function registerPrefetchTools(server: McpServer, session: SessionContext
 
   server.tool(
     "prefetch_status",
-    "Progress and outcome of background prefetch jobs. With jobId: that job's snapshot — state (running / completed / completed_with_failures / cancelled), per-day counts, currentDay, etaSecs, and the exact per-day failures with reasons. Without jobId: all recent jobs, newest first, from every conversation attached to this hub (owner says whose) — call this after a batch to confirm NOTHING failed silently. Background days are served round-robin across conversations, one NT8 request at a time. Jobs live in server memory; if the server restarted, re-issue prefetch_candles (already-cached days are skipped).",
+    "Progress and outcome of background prefetch jobs. With jobId: that job's snapshot — state (running / completed / completed_with_failures / cancelled), per-day counts, currentDay, etaSecs, the exact per-day failures with reasons, and contractNotes when a fetched day's front contract moved or bars arrived under another contract (read them: a moved front means the day's prices changed contract). Without jobId: all recent jobs, newest first, from every conversation attached to this hub (owner says whose) — call this after a batch to confirm NOTHING failed silently. Background days are served round-robin across conversations, one NT8 request at a time. Jobs live in server memory; if the server restarted, re-issue prefetch_candles (already-cached days are skipped).",
     {
       jobId: z.string().optional().describe("Job id from prefetch_candles. Omit to list recent jobs."),
     },

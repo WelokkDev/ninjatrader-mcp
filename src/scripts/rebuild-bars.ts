@@ -8,9 +8,14 @@
 import db from "../db/connection.js";
 
 function main(): void {
-  const before = (db.prepare("SELECT COUNT(*) as n FROM candles").get() as { n: number }).n;
-  const result = db.prepare("DELETE FROM candles").run();
-  const after = (db.prepare("SELECT COUNT(*) as n FROM candles").get() as { n: number }).n;
+  const before = (db.prepare("SELECT COUNT(*) as n FROM bars").get() as { n: number }).n;
+  const result = db.transaction(() => {
+    const r = db.prepare("DELETE FROM bars").run();
+    db.prepare("DELETE FROM session_contracts").run();
+    db.prepare("DELETE FROM contract_events").run();
+    return r;
+  })();
+  const after = (db.prepare("SELECT COUNT(*) as n FROM bars").get() as { n: number }).n;
   console.error(
     `[rebuild-bars] cleared candles table: ${before} rows → ${after} rows (deleted ${result.changes})`,
   );

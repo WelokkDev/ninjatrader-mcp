@@ -1,18 +1,113 @@
 import type Database from "better-sqlite3";
 
+// '' rather than NULL: SQLite treats NULLs in a PRIMARY KEY as distinct, so a
+// NULL-keyed bar could never be replaced. The `candles` view renders it NULL.
+export const UNATTESTED_CONTRACT = "";
+
+// `front` = 1 on the rows of the contract `session_contracts` assigns to the
+// day; the `candles` view serves only those.
+const BARS_TABLE_SQL = `
+    CREATE TABLE IF NOT EXISTS bars (
+      symbol      TEXT    NOT NULL,
+      timeframe   TEXT    NOT NULL,
+      timestamp   INTEGER NOT NULL,
+      open        REAL    NOT NULL,
+      high        REAL    NOT NULL,
+      low         REAL    NOT NULL,
+      close       REAL    NOT NULL,
+      volume      REAL    NOT NULL,
+      source      TEXT,
+      price_basis TEXT,
+      contract    TEXT    NOT NULL DEFAULT '',
+      front       INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (symbol, timeframe, timestamp, contract)
+    );
+`;
+
+const CONTRACT_SERVING_SQL = `
+    -- The front contract per (symbol, session-day).
+    CREATE TABLE IF NOT EXISTS session_contracts (
+      symbol      TEXT    NOT NULL,
+      session_day TEXT    NOT NULL,
+      start_unix  INTEGER NOT NULL,
+      end_unix    INTEGER NOT NULL,
+      contract    TEXT    NOT NULL,
+      decided_by  TEXT    NOT NULL,   -- 'fetch' | 'live'
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (symbol, session_day)
+    );
+
+    -- Contract conflicts, counted per (day, kind, from, to) rather than per bar.
+    CREATE TABLE IF NOT EXISTS contract_events (
+      symbol        TEXT    NOT NULL,
+      session_day   TEXT    NOT NULL,
+      kind          TEXT    NOT NULL,   -- 'reassigned' | 'off_front' | 'unattested_hidden' | 'bound_mismatch'
+      from_contract TEXT    NOT NULL,
+      to_contract   TEXT    NOT NULL,
+      first_ts      INTEGER NOT NULL,
+      last_ts       INTEGER NOT NULL,
+      count         INTEGER NOT NULL,
+      detail        TEXT,
+      PRIMARY KEY (symbol, session_day, kind, from_contract, to_contract)
+    );
+
+    -- What every reader queries, in the shape the old table had.
+    CREATE VIEW IF NOT EXISTS candles AS
+      SELECT symbol, timeframe, timestamp, open, high, low, close, volume,
+             source, price_basis, NULLIF(contract, '') AS contract
+        FROM bars
+       WHERE front = 1;
+
+    -- For seeds, scripts and tests; production ingest writes bars directly.
+    CREATE TRIGGER IF NOT EXISTS candles_insert INSTEAD OF INSERT ON candles
+    BEGIN
+      INSERT OR REPLACE INTO bars
+        (symbol, timeframe, timestamp, open, high, low, close, volume,
+         source, price_basis, contract, front)
+      VALUES (NEW.symbol, NEW.timeframe, NEW.timestamp, NEW.open, NEW.high, NEW.low,
+              NEW.close, NEW.volume, NEW.source, NEW.price_basis,
+              COALESCE(NEW.contract, ''),
+              CASE WHEN EXISTS (
+                SELECT 1 FROM session_contracts s
+                 WHERE s.symbol = NEW.symbol
+                   AND NEW.timestamp > s.start_unix AND NEW.timestamp <= s.end_unix
+                   AND s.contract <> COALESCE(NEW.contract, '')
+              ) THEN 0 ELSE 1 END);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS candles_update INSTEAD OF UPDATE ON candles
+    BEGIN
+      UPDATE bars
+         SET timestamp = NEW.timestamp, open = NEW.open, high = NEW.high, low = NEW.low,
+             close = NEW.close, volume = NEW.volume, source = NEW.source,
+             price_basis = NEW.price_basis, contract = COALESCE(NEW.contract, '')
+       WHERE symbol = OLD.symbol AND timeframe = OLD.timeframe
+         AND timestamp = OLD.timestamp AND contract = COALESCE(OLD.contract, '')
+         AND front = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS candles_delete INSTEAD OF DELETE ON candles
+    BEGIN
+      DELETE FROM bars
+       WHERE symbol = OLD.symbol AND timeframe = OLD.timeframe
+         AND timestamp = OLD.timestamp AND contract = COALESCE(OLD.contract, '')
+         AND front = 1;
+    END;
+`;
+
 export function initializeSchema(db: Database.Database): void {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS candles (
-      symbol    TEXT    NOT NULL,
-      timeframe TEXT    NOT NULL,
-      timestamp INTEGER NOT NULL,
-      open      REAL    NOT NULL,
-      high      REAL    NOT NULL,
-      low       REAL    NOT NULL,
-      close     REAL    NOT NULL,
-      volume    REAL    NOT NULL,
-      PRIMARY KEY (symbol, timeframe, timestamp)
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      name       TEXT    PRIMARY KEY,
+      applied_at INTEGER NOT NULL
     );
+  `);
+  migrateCandlesTableToBars(db);
+
+  db.exec(`
+    ${BARS_TABLE_SQL}
+
+    ${CONTRACT_SERVING_SQL}
 
     CREATE TABLE IF NOT EXISTS draw_commands (
       id         TEXT PRIMARY KEY,
@@ -25,9 +120,6 @@ export function initializeSchema(db: Database.Database): void {
       status     TEXT    NOT NULL DEFAULT 'pending',
       created_at INTEGER NOT NULL
     );
-
-    CREATE INDEX IF NOT EXISTS idx_candles_symbol_timeframe
-      ON candles (symbol, timeframe);
 
     CREATE INDEX IF NOT EXISTS idx_draw_commands_status
       ON draw_commands (status);
@@ -45,14 +137,6 @@ export function initializeSchema(db: Database.Database): void {
       source      TEXT NOT NULL,
       description TEXT,
       PRIMARY KEY (template, date)
-    );
-
-    -- One row per completed one-shot migration. Separate from the schema shape
-    -- because gating on "did I just create the column" strands a database whose
-    -- process died between ADD COLUMN and backfill.
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      name       TEXT    PRIMARY KEY,
-      applied_at INTEGER NOT NULL
     );
 
     -- Operator-desired live subscriptions (consumer interests are ephemeral).
@@ -189,21 +273,14 @@ export function initializeSchema(db: Database.Database): void {
       ON order_ops (client_order_id);
   `);
 
-  // Idempotent forward migrations: CREATE TABLE IF NOT EXISTS won't add columns
-  // to a pre-existing table. ALTER ... ADD COLUMN is non-destructive.
-  // Provenance of a cached bar: NULL means NT8 (predates this column), else
-  // an external importer (e.g. 'databento') — see isImportedSource.
-  ensureColumn(db, "candles", "source", "TEXT");
-
   // NULL = unknown, else 'as_traded' | 'back_adjusted'. ATOMIC ON PURPOSE:
-  // ADD COLUMN, backfill and the completion marker commit together, so a
-  // mid-backfill crash re-attempts cleanly instead of stranding the column.
+  // backfill and the completion marker commit together, so a mid-backfill
+  // crash re-attempts cleanly instead of stranding half the rows.
   //
   // A cache where an earlier blanket "stamp every NULL as_traded" already ran
   // over NT8 rows is NOT repairable here — those labels are indistinguishable
   // from legitimate ones, so it needs a manual purge and re-prefetch.
   db.transaction(() => {
-    ensureColumn(db, "candles", "price_basis", "TEXT");
     const done = db
       .prepare("SELECT 1 FROM schema_migrations WHERE name = ?")
       .get("price_basis_vendor_backfill");
@@ -212,7 +289,7 @@ export function initializeSchema(db: Database.Database): void {
     // basis depended on the merge policy at fetch time, unknowable after the
     // fact. Mirrors isImportedSource (data-source.ts).
     db.exec(
-      `UPDATE candles SET price_basis = 'as_traded'
+      `UPDATE bars SET price_basis = 'as_traded'
         WHERE price_basis IS NULL
           AND source IS NOT NULL
           AND LOWER(TRIM(source)) NOT IN ('', 'nt8')`,
@@ -234,9 +311,6 @@ export function initializeSchema(db: Database.Database): void {
       Math.floor(Date.now() / 1000),
     );
   })();
-  // NT8 FullName; NULL = unattested, never guessed. Written by ingest from
-  // NT8's rollover table, and by the live feed from its subscription's contract.
-  ensureColumn(db, "candles", "contract", "TEXT");
   ensureColumn(db, "trades", "management_mode", "TEXT");
   ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
   ensureColumn(db, "trades", "mfe", "REAL");
@@ -247,6 +321,47 @@ export function initializeSchema(db: Database.Database): void {
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id)",
   );
+}
+
+function migrateCandlesTableToBars(db: Database.Database): void {
+  const candlesIsTable = (): boolean =>
+    (
+      db.prepare("SELECT type FROM sqlite_master WHERE name = 'candles'").get() as
+        | { type: string }
+        | undefined
+    )?.type === "table";
+  if (!candlesIsTable()) return;
+
+  // Two processes can start at once: take the write lock, re-check under it,
+  // and wait out the other's copy instead of failing on the default timeout.
+  const busyTimeout = db.pragma("busy_timeout", { simple: true }) as number;
+  db.pragma("busy_timeout = 120000");
+  try {
+    db.transaction(() => {
+      if (!candlesIsTable()) return;
+      // Caches from before the provenance columns existed.
+      ensureColumn(db, "candles", "source", "TEXT");
+      ensureColumn(db, "candles", "price_basis", "TEXT");
+      ensureColumn(db, "candles", "contract", "TEXT");
+      db.exec(BARS_TABLE_SQL);
+      db.exec(
+        `INSERT INTO bars
+           (symbol, timeframe, timestamp, open, high, low, close, volume,
+            source, price_basis, contract, front)
+         SELECT symbol, timeframe, timestamp, open, high, low, close, volume,
+                source, price_basis, COALESCE(contract, ''), 1
+           FROM candles`,
+      );
+      db.exec("DROP TABLE candles");
+      // In the drop's transaction: no reader or crash finds `candles` missing.
+      db.exec(CONTRACT_SERVING_SQL);
+      db.prepare(
+        "INSERT OR REPLACE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+      ).run("bars_per_contract", Math.floor(Date.now() / 1000));
+    }).immediate();
+  } finally {
+    db.pragma(`busy_timeout = ${busyTimeout}`);
+  }
 }
 
 // Idempotent ADD COLUMN. One-time work tied to a column gates on

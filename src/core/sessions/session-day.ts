@@ -313,3 +313,22 @@ export function sessionDaysOverlapping(
   result.sort((a, b) => a.startUnix - b.startUnix);
   return result;
 }
+
+// Long enough to span a holiday weekend.
+const LAST_SESSION_LOOKBACK_SECS = 10 * 86_400;
+
+export function sessionDayAtOrBefore(
+  unixSec: number,
+  template: SessionTemplate,
+  calendar?: SessionCalendar,
+): SessionDay | null {
+  const containing = sessionDayContaining(unixSec, template, calendar);
+  if (containing) return containing;
+  let last: SessionDay | null = null;
+  for (const day of sessionDaysOverlapping(
+    unixSec - LAST_SESSION_LOOKBACK_SECS, unixSec, template, calendar,
+  )) {
+    if (day.endUnix <= unixSec && (last === null || day.endUnix > last.endUnix)) last = day;
+  }
+  return last;
+}

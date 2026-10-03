@@ -567,3 +567,173 @@ describe("get_candles derived-TF read path", () => {
     expect(out.data_complete).toBe(false);
   });
 });
+
+describe("get_candles contract reporting", () => {
+  const AFTER = DAY_START + 90_000;
+
+  function fiveMinuteBars() {
+    const out = [];
+    for (let i = 1; i <= 276; i++) {
+      out.push({ timestamp: DAY_START + i * 300, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
+    }
+    return out;
+  }
+
+  function quietly<T>(fn: () => T): T {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      return fn();
+    } finally {
+      log.mockRestore();
+    }
+  }
+
+  async function quietlyAsync<T>(fn: () => Promise<T>): Promise<T> {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      return await fn();
+    } finally {
+      log.mockRestore();
+    }
+  }
+
+  it("names the contract behind the bars", async () => {
+    const { db, handler } = harness();
+    quietly(() =>
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: AFTER,
+        contractForDay: () => "NQ 06-26",
+      }),
+    );
+    const out = JSON.parse(await call(handler, {}));
+    expect(out.contracts).toEqual(["NQ 06-26"]);
+    expect(out.contract_notes).toBeUndefined();
+    expect(out.data_complete).toBe(true);
+  });
+
+  it("flags a day still serving two contracts and withholds data_complete", async () => {
+    const { db, handler } = harness();
+    const seed = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume, contract)
+       VALUES ('NQ', '5m', ?, 1, 2, 0.5, 1.5, 10, ?)`,
+    );
+    for (let i = 1; i <= 276; i++) seed.run(DAY_START + i * 300, i % 2 ? "NQ 06-26" : "NQ 09-26");
+
+    const out = JSON.parse(await call(handler, {}));
+    expect(out.count).toBe(276);
+    expect(out.contracts).toEqual(["NQ 06-26", "NQ 09-26"]);
+    expect(out.contract_notes).toHaveLength(1);
+    expect(out.contract_notes[0]).toMatch(/2026-05-01: 2 contracts served \(NQ 06-26, NQ 09-26\)/);
+    expect(out.contract_notes[0]).toMatch(
+      /re-fetched automatically on the next read with NinjaTrader connected/,
+    );
+    expect(out.warning).toMatch(/more than one contract/);
+    expect(out.warning).toMatch(/NinjaTrader is not connected/);
+    expect(out.data_complete).toBe(false);
+  });
+
+  function seedMixedDay(db: Database.Database): void {
+    const seed = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume, contract)
+       VALUES ('NQ', '5m', ?, 1, 2, 0.5, 1.5, 10, ?)`,
+    );
+    for (let i = 1; i <= 276; i++) seed.run(DAY_START + i * 300, i % 2 ? "NQ 06-26" : "NQ 09-26");
+  }
+
+  it("re-fetches a mixed day on a connected read, which assigns one contract", async () => {
+    const { db, handler, request } = harness({ connected: true });
+    seedMixedDay(db);
+    request.mockImplementation(async () => {
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: AFTER,
+        contractForDay: () => "NQ 09-26",
+      });
+      return {};
+    });
+
+    const out = await quietlyAsync(async () => JSON.parse(await call(handler, {})));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(out.count).toBe(276);
+    expect(out.contracts).toEqual(["NQ 09-26"]);
+    expect(out.contract_notes).toEqual([
+      expect.stringMatching(/2026-05-01: front contract moved NQ 06-26 → NQ 09-26/),
+    ]);
+    expect(out.warning).toBeUndefined();
+    expect(out.data_complete).toBe(true);
+
+    await quietlyAsync(() => call(handler, {}));
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("says so when the re-fetch brought no bars", async () => {
+    const { db, handler, request } = harness({ connected: true });
+    seedMixedDay(db);
+    request.mockResolvedValue({});
+
+    const out = await quietlyAsync(async () => JSON.parse(await call(handler, {})));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(out.contract_notes[0]).toMatch(/re-fetched just now and NinjaTrader sent no bars/);
+    expect(out.warning).toMatch(/more than one contract/);
+    expect(out.data_complete).toBe(false);
+  });
+
+  it("reports a front contract that moved on the day, and serves only the new one", async () => {
+    const { db, handler } = harness();
+    quietly(() => {
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: AFTER,
+        contractForDay: () => "NQ 06-26",
+      });
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: AFTER,
+        contractForDay: () => "NQ 09-26",
+      });
+    });
+    const out = JSON.parse(await call(handler, {}));
+    expect(out.count).toBe(276);
+    expect(out.contracts).toEqual(["NQ 09-26"]);
+    expect(out.contract_notes).toEqual([
+      expect.stringMatching(/2026-05-01: front contract moved NQ 06-26 → NQ 09-26/),
+    ]);
+    expect(out.data_complete).toBe(true);
+    expect(out.warning).toBeUndefined(); // the move is months old
+  });
+
+  it("warns while a front move is fresh, dates the note, and leaves data_complete alone", async () => {
+    const { db, handler } = harness();
+    const now = Math.floor(Date.now() / 1000);
+    quietly(() => {
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: now - 7200,
+        contractForDay: () => "NQ 06-26",
+      });
+      ingestCandles("NQ", "5m", fiveMinuteBars(), db, {
+        mode: "day-refill",
+        nowUnix: now - 3600,
+        contractForDay: () => "NQ 09-26",
+      });
+    });
+    const out = JSON.parse(await call(handler, {}));
+    expect(out.data_complete).toBe(true);
+    expect(out.warning).toMatch(/front contract moved on 1 session-day\(s\).*last 24 hours/);
+    expect(out.contract_notes[0]).toMatch(
+      /moved NQ 06-26 → NQ 09-26 on \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/,
+    );
+  });
+
+  it("puts every signal ahead of the bars", async () => {
+    const { db, handler } = harness();
+    seedMixedDay(db);
+    const keys = Object.keys(JSON.parse(await call(handler, {})));
+    for (const signal of ["data_complete", "warning", "contracts", "contract_notes", "validation"]) {
+      expect(keys, signal).toContain(signal);
+      expect(keys.indexOf(signal), signal).toBeLessThan(keys.indexOf("candles"));
+    }
+    expect(keys[keys.length - 1]).toBe("candles");
+  });
+});

@@ -9,6 +9,7 @@ import {
 import { getInstrumentConfig } from "../../core/sessions/registry.js";
 import { loadCalendar } from "../../core/sessions/calendar.js";
 import { recomputeDerivedForSessionDay } from "../../core/cache/derived.js";
+import { contractEventsFor } from "../../core/cache/contracts.js";
 import {
   canonicalContract,
   contractForLabel,
@@ -278,7 +279,7 @@ describe("bar_close labels by what actually produced the bar", () => {
     expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual(["NQ 06-26"]);
   });
 
-  it("warns when a live bar names a different contract than the day's fetched rows", () => {
+  it("a live bar on another contract is kept off-front, logged once, and not served", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const db = memDb();
@@ -289,10 +290,21 @@ describe("bar_close labels by what actually produced the bar", () => {
       });
       const warns = log.mock.calls
         .map((c) => String(c[0]))
-        .filter((l) => l.includes("contract mismatch"));
+        .filter((l) => l.includes("OFF-FRONT BARS"));
       expect(warns).toHaveLength(1);
       expect(warns[0]).toContain("NQ 06-26");
       expect(warns[0]).toContain("NQ 09-26");
+      expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual(["NQ 09-26"]);
+      const stored = db
+        .prepare(
+          `SELECT contract, front FROM bars
+            WHERE symbol='NQ' AND timeframe='15m' AND timestamp = ? ORDER BY contract`,
+        )
+        .all(candle.timestamp);
+      expect(stored).toEqual([
+        { contract: "NQ 06-26", front: 0 },
+        { contract: "NQ 09-26", front: 1 },
+      ]);
     } finally {
       log.mockRestore();
     }
@@ -305,6 +317,51 @@ describe("bar_close labels by what actually produced the bar", () => {
       candle, dataSource: "My Broker Feed",
     });
     expect(contractsOf(db, "15m", D12_START, D12_END)).toEqual([null]);
+  });
+});
+
+describe("the table-versus-bound cross-check on the current session", () => {
+  const mismatches = (db: Database.Database) =>
+    contractEventsFor(db, "NQ", "2026-06-12", "2026-06-12").filter(
+      (e) => e.kind === "bound_mismatch",
+    );
+
+  it("becomes an event the tools can show; on an older day it stays a log line", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      // Inside session 2026-06-12.
+      vi.setSystemTime(new Date((D12_START + 5 * 3600) * 1000));
+      const db = memDb();
+      const fetch = () =>
+        createCandlesResponseHandler(db)(
+          response({ candles: bars15m(D12_START, 1, 16), contract: "NQ JUN26" }),
+        );
+      fetch();
+      expect(mismatches(db)).toEqual([
+        expect.objectContaining({ from: "NQ 09-26", to: "NQ 06-26", count: 1, detail: "15m fetch" }),
+      ]);
+      fetch();
+      expect(mismatches(db)).toHaveLength(1);
+      expect(mismatches(db)[0].count).toBe(2);
+      expect(
+        log.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("BOUND CONTRACT MISMATCH")),
+      ).toHaveLength(1);
+
+      // A month on, the AddOn binding a newer contract is expected.
+      vi.setSystemTime(new Date((AFTER + 30 * 86_400) * 1000));
+      const later = memDb();
+      createCandlesResponseHandler(later)(
+        response({
+          contract: "NQ DEC26",
+          rollovers: [...NQ_ROLLOVERS, { contractMonth: "2026-12-01", rolloverDate: "2026-09-14" }],
+        }),
+      );
+      expect(mismatches(later)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      log.mockRestore();
+    }
   });
 });
 

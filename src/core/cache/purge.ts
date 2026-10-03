@@ -41,9 +41,9 @@ export function expectedRawGrid(
 }
 
 /**
- * Delete cached raw rows at off-grid stamps within one closed session-day.
- * In-progress days are never touched. Not transactional — the caller owns
- * the transaction. Returns rows deleted.
+ * Delete one contract's cached raw rows at off-grid stamps within one closed
+ * session-day. In-progress days are never touched. Not transactional — the
+ * caller owns the transaction. Returns rows deleted.
  */
 export function purgeOffGridRawRows(
   database: Database,
@@ -52,15 +52,19 @@ export function purgeOffGridRawRows(
   day: SessionDay,
   expected: Set<number>,
   nowUnix: number,
+  contract: string,
 ): number {
   if (day.endUnix > nowUnix) return 0; // in-progress: never delete
   const offGrid = (
     database
       .prepare(
-        `SELECT timestamp FROM candles
-          WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+        `SELECT timestamp FROM bars
+          WHERE symbol = ? AND timeframe = ? AND contract = ?
+            AND timestamp > ? AND timestamp <= ?`,
       )
-      .all(symbol, timeframe, day.startUnix, day.endUnix) as Array<{ timestamp: number }>
+      .all(symbol, timeframe, contract, day.startUnix, day.endUnix) as Array<{
+      timestamp: number;
+    }>
   )
     .map((r) => r.timestamp)
     .filter((t) => !expected.has(t));
@@ -68,10 +72,10 @@ export function purgeOffGridRawRows(
     const chunk = offGrid.slice(i, i + DELETE_CHUNK);
     database
       .prepare(
-        `DELETE FROM candles WHERE symbol = ? AND timeframe = ?
+        `DELETE FROM bars WHERE symbol = ? AND timeframe = ? AND contract = ?
           AND timestamp IN (${chunk.map(() => "?").join(", ")})`,
       )
-      .run(symbol, timeframe, ...chunk);
+      .run(symbol, timeframe, contract, ...chunk);
   }
   return offGrid.length;
 }

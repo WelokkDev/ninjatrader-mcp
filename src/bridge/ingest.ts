@@ -4,6 +4,7 @@ import { isRawTimeframe, RAW_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
 import {
   makeSessionDayResolver,
+  sessionDayAtOrBefore,
   sessionDayRange,
 } from "../core/sessions/session-day.js";
 import { loadCalendar } from "../core/sessions/calendar.js";
@@ -29,6 +30,14 @@ import {
   sameContract,
   windowsFromResponse,
 } from "./contract-windows.js";
+import {
+  assignFrontContract,
+  frontContractFor,
+  recordContractEvent,
+  replaceUnattestedTwins,
+  soleAttestedContract,
+} from "../core/cache/contracts.js";
+import { UNATTESTED_CONTRACT } from "../db/schema.js";
 import type { BarCloseMessage, CandlesResponseMessage } from "./protocol.js";
 
 // Exported: the live runtime applies the same gate before /feed publish.
@@ -161,42 +170,116 @@ export function ingestCandles(
     opts.priceBasis && opts.priceBasis !== "unknown" ? opts.priceBasis : null;
 
   const insertStmt = database.prepare(
-    `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO bars
+       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract, front)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  const contractByDay = new Map<string, string | null>();
-  for (const label of perDayCount.keys()) {
-    contractByDay.set(label, opts.contractForDay?.(label) ?? null);
-  }
-
-  // Rows are the record: a refill that cannot attest never downgrades a day's
-  // label to NULL (a live bar stays NULL — its provenance is its own), and a
-  // contract that differs from the day's stored rows is stored but called out.
-  for (const [label, incoming] of contractByDay) {
-    const existing = existingContracts(
-      database, symbol, timeframe, sessionDayRange(label, config.session, calendar),
-    );
-    if (incoming === null) {
-      if (mode === "day-refill" && existing.length === 1) contractByDay.set(label, existing[0]);
-      continue;
-    }
-    const other = existing.find((e) => !sameContract(e, incoming));
-    if (other !== undefined) {
-      console.error(
-        `[ingest] contract mismatch for ${symbol} ${timeframe} ${label}: incoming bars are ${incoming}, ` +
-          `the day's stored rows are ${other} — a subscription still bound to the old contract, ` +
-          `or a fetch labelled off a stale table. Both are stored; derived rows go NULL until it converges.`,
-      );
-    }
-  }
 
   let inserted = 0;
   // Doubles as a screen on incoming bars, so a mis-stamped bar the provider
   // keeps re-sending can't be re-planted after each purge.
   const closedDayGrid = new Map<string, Set<number>>();
+  const rowContractByDay = new Map<string, string>();
+  const frontByDay = new Map<string, 0 | 1>();
+  let stampsByDay: Map<string, number[]> | null = null;
+  const stampsFor = (label: string): number[] => {
+    if (stampsByDay === null) {
+      stampsByDay = new Map();
+      for (const { candle, sessionDayLabel } of inSession) {
+        const list = stampsByDay.get(sessionDayLabel);
+        if (list) list.push(candle.timestamp);
+        else stampsByDay.set(sessionDayLabel, [candle.timestamp]);
+      }
+    }
+    return stampsByDay.get(label) ?? [];
+  };
 
   const tx = database.transaction(() => {
+    for (const [label, count] of perDayCount) {
+      const range = sessionDayRange(label, config.session, calendar);
+      const day: SessionDay = { label, ...range };
+      const incoming = opts.contractForDay?.(label) ?? null;
+      const current = frontContractFor(database, symbol, label);
+      // An unattested refill files under the day's existing contract; an
+      // unattested live bar stays unattested.
+      const rowContract =
+        incoming ??
+        (mode === "day-refill"
+          ? (current?.contract ??
+            soleAttestedContract(database, symbol, timeframe, day) ??
+            UNATTESTED_CONTRACT)
+          : UNATTESTED_CONTRACT);
+      if (mode === "day-refill" && rowContract !== UNATTESTED_CONTRACT) {
+        const replaced = replaceUnattestedTwins(
+          database, symbol, timeframe, day, stampsFor(label),
+        );
+        if (replaced > 0) {
+          console.error(
+            `[ingest] UNATTESTED BARS REPLACED for ${symbol} ${timeframe} ${label}: ${replaced} bar(s) with ` +
+              `no contract label deleted, each superseded by a ${rowContract} bar at the same timestamp`,
+          );
+        }
+      }
+      let front = current?.contract ?? null;
+      // A fetch is NT8's answer for the day and always wins. A live bar claims
+      // only an unclaimed day: its subscription can lag NT8's rollover table.
+      if (
+        rowContract !== UNATTESTED_CONTRACT &&
+        front !== rowContract &&
+        (mode === "day-refill" || front === null)
+      ) {
+        const outcome = assignFrontContract(
+          database,
+          symbol,
+          day,
+          rowContract,
+          mode === "day-refill" ? "fetch" : "live",
+          nowUnix,
+          { config, calendar },
+        );
+        if (outcome.displaced.length > 0) {
+          const was = outcome.displaced.join(",");
+          console.error(
+            `[ingest] FRONT CONTRACT MOVED for ${symbol} ${label}: ${was} → ${rowContract} ` +
+              `(${mode === "day-refill" ? "NT8's answer on this fetch" : "live subscription"}); ` +
+              `${outcome.hiddenRows} bar(s) under ${was} kept but no longer served`,
+          );
+        }
+        if (outcome.hiddenUnattested > 0) {
+          console.error(
+            `[ingest] UNATTESTED BARS HIDDEN for ${symbol} ${label}: ${outcome.hiddenUnattested} bar(s) ` +
+              `with no contract label stopped being served now that the day's front is ${rowContract}; ` +
+              `kept, not deleted — re-fetch those timeframes to replace them`,
+          );
+        }
+        front = rowContract;
+      }
+      rowContractByDay.set(label, rowContract);
+      const isFront = front === null || front === rowContract;
+      frontByDay.set(label, isFront ? 1 : 0);
+      if (!isFront) {
+        const fresh = recordContractEvent(database, {
+          symbol,
+          sessionDay: label,
+          kind: "off_front",
+          from: front ?? UNATTESTED_CONTRACT,
+          to: rowContract,
+          ts: nowUnix,
+          count,
+          detail: `${timeframe} ${mode === "append" ? "live" : "fetch"}`,
+        });
+        if (fresh) {
+          console.error(
+            `[ingest] OFF-FRONT BARS for ${symbol} ${timeframe} ${label}: ${count} bar(s) arrived under ` +
+              `${rowContract || "no contract"} but the day's front contract is ${front} — stored, not served` +
+              (mode === "append"
+                ? " (is the live subscription still bound to the old contract?)"
+                : ""),
+          );
+        }
+      }
+    }
+
     // Off-grid rows are structural extras (partial-bucket leftovers,
     // mis-stamps). Canonical rows are never deleted, so a truncated or
     // stamp-disjoint fetch can't destroy real bars. In-progress days are
@@ -216,7 +299,15 @@ export function ingestCandles(
         }
         const expectedSet = expectedRawGrid(day, timeframe, config.session, calendar);
         closedDayGrid.set(label, expectedSet);
-        const removed = purgeOffGridRawRows(database, symbol, timeframe, day, expectedSet, nowUnix);
+        const removed = purgeOffGridRawRows(
+          database,
+          symbol,
+          timeframe,
+          day,
+          expectedSet,
+          nowUnix,
+          rowContractByDay.get(label) ?? UNATTESTED_CONTRACT,
+        );
         if (removed > 0) {
           console.error(
             `[ingest] day-refill ${symbol} ${timeframe} ${label}: removed ${removed} off-grid row(s)`,
@@ -236,7 +327,8 @@ export function ingestCandles(
       }
       insertStmt.run(
         symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume, priceBasis,
-        contractByDay.get(sessionDayLabel) ?? null,
+        rowContractByDay.get(sessionDayLabel) ?? UNATTESTED_CONTRACT,
+        frontByDay.get(sessionDayLabel) ?? 1,
       );
       inserted++;
     }
@@ -289,23 +381,6 @@ export function ingestCandles(
     aggregated,
     ...(dailyMismatches.length > 0 && { dailyMismatches }),
   };
-}
-
-function existingContracts(
-  database: Database,
-  symbol: string,
-  timeframe: Timeframe,
-  range: { startUnix: number; endUnix: number },
-): string[] {
-  return (
-    database
-      .prepare(
-        `SELECT DISTINCT contract AS c FROM candles
-          WHERE symbol = ? AND timeframe = ? AND contract IS NOT NULL
-            AND timestamp > ? AND timestamp <= ?`,
-      )
-      .all(symbol, timeframe, range.startUnix, range.endUnix) as Array<{ c: string }>
-  ).map((r) => r.c);
 }
 
 /**
@@ -364,6 +439,32 @@ export function createCandlesResponseHandler(database: Database = db) {
         console.error(
           `[ingest] contract cross-check for ${msg.symbol} ${label}: rollover table says ${fromTable}, AddOn bound ${msg.contract} — expected for days outside the current window; investigate if this names TODAY`,
         );
+        // On the current session this predicts an off-front live stream, so it
+        // becomes an event the tools show, not only a log line.
+        const config = getInstrumentConfig(msg.symbol);
+        const nowUnix = Math.floor(Date.now() / 1000);
+        const current = sessionDayAtOrBefore(
+          nowUnix, config.session, loadCalendar(database, config.session.name),
+        );
+        if (current?.label === label) {
+          const fresh = recordContractEvent(database, {
+            symbol: msg.symbol,
+            sessionDay: label,
+            kind: "bound_mismatch",
+            from: fromTable,
+            to: bound ?? String(msg.contract),
+            ts: nowUnix,
+            count: 1,
+            detail: `${msg.timeframe} fetch`,
+          });
+          if (fresh) {
+            console.error(
+              `[ingest] BOUND CONTRACT MISMATCH for ${msg.symbol} ${label} (the current session): ` +
+                `rollover table says ${fromTable}, AddOn bound ${msg.contract} — a live stream resolved ` +
+                `the same way is off-front; check live_feed_status and re-subscribe`,
+            );
+          }
+        }
       }
       console.error(
         `[ingest] candles_response ${msg.symbol} ${msg.timeframe}: inserted=${result.inserted} dropped=${result.dropped} agg=${JSON.stringify(result.aggregated)}`,

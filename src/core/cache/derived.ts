@@ -4,6 +4,7 @@ import { isRawTimeframe, SUPPORTED_TIMEFRAMES } from "../constants.js";
 import type { SessionCalendar } from "../sessions/calendar.js";
 import type { InstrumentConfig, SessionDay } from "../sessions/types.js";
 import type { Candle, DerivedTimeframe, Timeframe } from "../types.js";
+import { UNATTESTED_CONTRACT } from "../../db/schema.js";
 
 // Aggregated from 15m on the 15m ingest path; other raw TFs are parallel
 // streams and don't feed this chain.
@@ -66,9 +67,10 @@ export function writeDerivedForSessionDay(
   const placeholders = DERIVED_TIMEFRAMES.map(() => "?").join(", ");
   database
     .prepare(
-      `DELETE FROM candles
+      // Hidden unattested derived rows go too: rebuilt from 15m, never data.
+      `DELETE FROM bars
         WHERE symbol = ? AND timeframe IN (${placeholders})
-          AND timestamp > ? AND timestamp <= ?`,
+          AND timestamp > ? AND timestamp <= ? AND (front = 1 OR contract = '')`,
     )
     .run(symbol, ...DERIVED_TIMEFRAMES, day.startUnix, day.endUnix);
 
@@ -83,7 +85,7 @@ export function writeDerivedForSessionDay(
     .all(symbol, day.startUnix, day.endUnix) as Array<{ pb: string | null }>;
   const priceBasis = basisRows.length === 1 ? basisRows[0].pb : null;
 
-  // Contract inherits by the same one-distinct-value-or-NULL rule.
+  // Contract inherits by the same one-distinct-value rule, else unattested.
   const contractRows = database
     .prepare(
       `SELECT DISTINCT contract AS ct FROM candles
@@ -91,12 +93,13 @@ export function writeDerivedForSessionDay(
           AND timestamp > ? AND timestamp <= ?`,
     )
     .all(symbol, day.startUnix, day.endUnix) as Array<{ ct: string | null }>;
-  const contract = contractRows.length === 1 ? contractRows[0].ct : null;
+  const contract =
+    contractRows.length === 1 ? (contractRows[0].ct ?? UNATTESTED_CONTRACT) : UNATTESTED_CONTRACT;
 
   const insertStmt = database.prepare(
-    `INSERT OR REPLACE INTO candles
-       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO bars
+       (symbol, timeframe, timestamp, open, high, low, close, volume, price_basis, contract, front)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
   );
   for (const [tf, aggCandles] of computed) {
     for (const a of aggCandles) {

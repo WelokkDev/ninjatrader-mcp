@@ -88,16 +88,14 @@ describe("price_basis migration", () => {
     expect(basisOf(db, 2000)).toBe("as_traded");
   });
 
-  it("rolls the whole migration back when the backfill fails — no half-migrated state", () => {
-    // ADD COLUMN lands, the process dies before the UPDATE, and a "did I just
-    // create the column" gate then declines to retry forever.
+  it("rolls the backfill back when it fails — the marker never lands without the rows", () => {
     const db = legacyCandlesDb();
     insertBar(db, 2000, "databento");
 
     const realExec = db.exec.bind(db);
     let attempted = false;
     (db as unknown as { exec: (sql: string) => unknown }).exec = (sql: string) => {
-      if (sql.includes("UPDATE candles SET price_basis")) {
+      if (sql.includes("UPDATE bars SET price_basis")) {
         attempted = true;
         throw new Error("simulated crash during backfill");
       }
@@ -109,11 +107,8 @@ describe("price_basis migration", () => {
 
     (db as unknown as { exec: (sql: string) => unknown }).exec = realExec;
 
-    // Column AND marker must be gone, so the next run re-attempts everything.
-    const cols = (db.prepare("PRAGMA table_info(candles)").all() as Array<{ name: string }>).map(
-      (c) => c.name,
-    );
-    expect(cols).not.toContain("price_basis");
+    // Marker and rows both untouched, so the next run re-attempts everything.
+    expect(basisOf(db, 2000)).toBeNull();
     expect(markerPresent(db)).toBe(false);
 
     // ...and a retry completes it.
@@ -158,5 +153,94 @@ describe("price_basis migration", () => {
     expect(cols).toContain("price_basis");
     expect(cols).toContain("source");
     expect(markerPresent(db)).toBe(true);
+  });
+});
+
+describe("bars per contract", () => {
+  function insertLabelled(db: Database.Database, ts: number, contract: string | null): void {
+    db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume, contract)
+       VALUES ('NQ', '5m', ?, 1, 2, 0.5, 1.5, 10, ?)`,
+    ).run(ts, contract);
+  }
+
+  it("moves a legacy candles table into bars and leaves candles as a view over the front rows", () => {
+    const db = legacyCandlesDb();
+    db.exec("ALTER TABLE candles ADD COLUMN contract TEXT");
+    insertBar(db, 1000, null);
+    insertLabelled(db, 2000, "NQ 09-26");
+
+    initializeSchema(db);
+
+    const kind = db.prepare("SELECT type FROM sqlite_master WHERE name = 'candles'").get() as {
+      type: string;
+    };
+    expect(kind.type).toBe("view");
+    expect(db.prepare("SELECT timestamp, contract, front FROM bars ORDER BY timestamp").all()).toEqual([
+      { timestamp: 1000, contract: "", front: 1 },
+      { timestamp: 2000, contract: "NQ 09-26", front: 1 },
+    ]);
+    expect(db.prepare("SELECT contract FROM candles WHERE timestamp = 1000").get()).toEqual({
+      contract: null,
+    });
+    expect(
+      db.prepare("SELECT 1 FROM schema_migrations WHERE name = 'bars_per_contract'").get(),
+    ).toBeDefined();
+
+    insertLabelled(db, 2000, "NQ 12-26");
+    expect(
+      (db.prepare("SELECT COUNT(*) AS n FROM bars WHERE timestamp = 2000").get() as { n: number }).n,
+    ).toBe(2);
+
+    initializeSchema(db);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM bars").get() as { n: number }).n).toBe(3);
+  });
+
+  it("swaps the table for the view in one step — a crash right after still leaves candles readable", () => {
+    const db = legacyCandlesDb();
+    insertBar(db, 1000, null);
+
+    // Die on the first statement batch that follows the migration transaction.
+    const realExec = db.exec.bind(db);
+    (db as unknown as { exec: (sql: string) => unknown }).exec = (sql: string) => {
+      if (sql.includes("CREATE TABLE IF NOT EXISTS draw_commands")) {
+        throw new Error("simulated crash after the migration");
+      }
+      return realExec(sql);
+    };
+    expect(() => initializeSchema(db)).toThrow(/simulated crash/);
+    (db as unknown as { exec: (sql: string) => unknown }).exec = realExec;
+
+    const kind = db.prepare("SELECT type FROM sqlite_master WHERE name = 'candles'").get() as
+      | { type: string }
+      | undefined;
+    expect(kind?.type).toBe("view");
+    expect(db.prepare("SELECT timestamp FROM candles").all()).toEqual([{ timestamp: 1000 }]);
+    insertBar(db, 2000, null);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM bars").get() as { n: number }).n).toBe(2);
+
+    initializeSchema(db);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM candles").get()).toEqual({ n: 2 });
+  });
+
+  it("a write through the view follows the day's assignment", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    db.prepare(
+      `INSERT INTO session_contracts
+         (symbol, session_day, start_unix, end_unix, contract, decided_by, updated_at)
+       VALUES ('NQ', '2026-06-12', 50, 150, 'NQ 12-26', 'fetch', 0)`,
+    ).run();
+    insertLabelled(db, 100, "NQ 09-26");
+    insertLabelled(db, 100, "NQ 12-26");
+    insertLabelled(db, 200, "NQ 09-26"); // outside the assigned day: served
+    expect(db.prepare("SELECT timestamp, contract FROM candles ORDER BY timestamp").all()).toEqual([
+      { timestamp: 100, contract: "NQ 12-26" },
+      { timestamp: 200, contract: "NQ 09-26" },
+    ]);
+    db.prepare("DELETE FROM candles WHERE timestamp = 100").run();
+    expect(db.prepare("SELECT contract, front FROM bars WHERE timestamp = 100").all()).toEqual([
+      { contract: "NQ 09-26", front: 0 },
+    ]);
   });
 });

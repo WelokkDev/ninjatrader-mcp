@@ -1,6 +1,17 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Database } from "better-sqlite3";
+import defaultDb from "../db/connection.js";
 import { getBridgeStatus } from "../bridge/index.js";
+import { sameContract } from "../bridge/contract-windows.js";
+import {
+  contractEventsFor,
+  describeContractEvent,
+  frontContractFor,
+} from "../core/cache/contracts.js";
+import { loadCalendar } from "../core/sessions/calendar.js";
+import { getInstrumentConfig } from "../core/sessions/registry.js";
+import { sessionDayAtOrBefore } from "../core/sessions/session-day.js";
 import { consumerHub } from "../bridge/consumer.js";
 import { getLiveFeedRuntime, type LiveFeedRuntime } from "../live/runtime.js";
 import type { LiveTimeframe } from "../live/registry.js";
@@ -18,6 +29,8 @@ export interface LiveFeedToolsDeps {
   bridgeStatus: () => ReturnType<typeof getBridgeStatus>;
   consumerCount: () => number;
   source: string;
+  db?: Database;
+  nowUnix?: () => number;
 }
 
 function defaultDeps(session: SessionContext): LiveFeedToolsDeps {
@@ -26,7 +39,19 @@ function defaultDeps(session: SessionContext): LiveFeedToolsDeps {
     bridgeStatus: getBridgeStatus,
     consumerCount: () => consumerHub.count(),
     source: session.source,
+    db: defaultDb,
   };
+}
+
+// Null for a symbol the registry does not know.
+function currentSessionLabel(db: Database, symbol: string, nowUnix: number): string | null {
+  try {
+    const config = getInstrumentConfig(symbol);
+    const calendar = loadCalendar(db, config.session.name);
+    return sessionDayAtOrBefore(nowUnix, config.session, calendar)?.label ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function createSubscribeLiveBarsHandler(deps: LiveFeedToolsDeps) {
@@ -83,14 +108,30 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
     const recorderByKey = new Map(
       runtime.recorder.status().map((s) => [`${s.symbol}:${s.timeframe}`, s]),
     );
+    const db = deps.db;
+    const nowUnix = deps.nowUnix?.() ?? Math.floor(Date.now() / 1000);
+    const contractNotes: string[] = [];
+    const notedSymbols = new Set<string>();
     const subscriptions = runtime.registry.list().map((sub) => {
       const rec = recorderByKey.get(`${sub.symbol}:${sub.timeframe}`);
+      const label = db ? currentSessionLabel(db, sub.symbol, nowUnix) : null;
+      const front = db && label ? frontContractFor(db, sub.symbol, label) : null;
+      const offFront =
+        front !== null && sub.contract !== null && !sameContract(sub.contract, front.contract);
+      if (db && label && !notedSymbols.has(sub.symbol)) {
+        notedSymbols.add(sub.symbol);
+        for (const e of contractEventsFor(db, sub.symbol, label, label)) {
+          contractNotes.push(describeContractEvent(e));
+        }
+      }
       return {
         symbol: sub.symbol,
         timeframe: sub.timeframe,
         sources: sub.sources,
         acked: sub.acked,
         contract: sub.contract,
+        frontContract: front?.contract ?? null,
+        ...(offFront ? { offFront: true } : {}),
         lastSeq: sub.lastSeq,
         lastTs: sub.lastTs,
         lastError: sub.lastError,
@@ -109,6 +150,7 @@ export function createLiveFeedStatusHandler(deps: LiveFeedToolsDeps) {
       consumers: deps.consumerCount(),
       healsInFlight: runtime.healer.healsInFlight(),
       ...(pendingUnsubscribes.length > 0 ? { pendingUnsubscribes } : {}),
+      ...(contractNotes.length > 0 ? { contractNotes } : {}),
       subscriptions,
       // Position feed health (see subscribe_live_positions).
       positions: runtime.positions.status(),
@@ -151,7 +193,7 @@ export function registerUnsubscribeLiveBars(
 export function registerLiveFeedStatus(server: McpServer): void {
   server.tool(
     "live_feed_status",
-    "Health of the live feeds. Bars: per-subscription truth (acked by NT8, resolved contract, last seq/timestamp, lag, bars received, duplicate/out-of-order/gap counters, last error) plus bridge connection state, connected /feed consumer count, and heals in flight. gapCount > 0 with healsInFlight 0 means a gap was detected and repaired, OR exceeded the heal window (check get_candles for that range), OR — on the sparse sub-minute TFs (1s/5s) — was deliberately never healed because the longest contiguous run of missing buckets fell under that TF's floor: NT8 emits no bar for a tickless bucket, so a short quiet stretch is counted as a gap for visibility but is not an outage. Expect a non-zero, slowly-climbing gapCount to be NORMAL on 1s/5s. Positions: the live position feed's health (desired vs NT8-acked, accounts tracked, open positions/trades, event/sync counters, seq gaps, last event/sync times, last error).",
+    "Health of the live feeds. Bars: per-subscription truth (acked by NT8, resolved contract, the cache's front contract for today's session and offFront:true when the two differ — the stream's bars are then stored but NOT served, so rebind by unsubscribing and resubscribing; last seq/timestamp, lag, bars received, duplicate/out-of-order/gap counters, last error), plus contractNotes for any contract dispute recorded today plus bridge connection state, connected /feed consumer count, and heals in flight. gapCount > 0 with healsInFlight 0 means a gap was detected and repaired, OR exceeded the heal window (check get_candles for that range), OR — on the sparse sub-minute TFs (1s/5s) — was deliberately never healed because the longest contiguous run of missing buckets fell under that TF's floor: NT8 emits no bar for a tickless bucket, so a short quiet stretch is counted as a gap for visibility but is not an outage. Expect a non-zero, slowly-climbing gapCount to be NORMAL on 1s/5s. Positions: the live position feed's health (desired vs NT8-acked, accounts tracked, open positions/trades, event/sync counters, seq gaps, last event/sync times, last error).",
     {},
     createLiveFeedStatusHandler(defaultDeps(STDIO_SESSION)),
   );

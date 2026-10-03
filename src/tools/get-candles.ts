@@ -24,6 +24,11 @@ import {
   computeDerivedForSessionDay,
   writeDerivedForSessionDay,
 } from "../core/cache/derived.js";
+import {
+  contractEventsFor,
+  describeContractEvent,
+  servedContracts,
+} from "../core/cache/contracts.js";
 import { prefetchManager } from "../prefetch-instance.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
@@ -31,6 +36,9 @@ import { errorResult, jsonResult, type ToolResult } from "./result.js";
 // colder ranges are refused toward prefetch_candles so a synchronous fill
 // can't outlive the MCP tool-call timeout.
 export const MAX_INLINE_COLD_DAYS = 10;
+
+// A moved front contract earns a `warning` this long; its note stays for good.
+const FRESH_MOVE_SECS = 86_400;
 
 // Session-day query semantics: startUnix is exclusive, endUnix is inclusive
 const QUERY_SQL = `SELECT timestamp, open, high, low, close, volume
@@ -335,6 +343,31 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     };
     const interSessionExcluded = flatInRange - totalInRange;
 
+    const served = servedContracts(deps.db, symbol, timeframe, finalDays);
+    const labels = finalDays.map((d) => d.label).sort();
+    const contractEvents =
+      labels.length > 0
+        ? contractEventsFor(deps.db, symbol, labels[0], labels[labels.length - 1])
+        : [];
+    const contractNotes = [
+      ...served.mixedDays.map((m) => {
+        const refetched = fillResult.fetchedDays.includes(m.day);
+        return (
+          `${m.day}: ${m.contracts.length} contracts served (${m.contracts.join(", ")}) — mixed day. ` +
+          (refetched
+            ? "It was re-fetched just now and NinjaTrader sent no bars to assign its front contract; " +
+              "prefetch a timeframe not yet cached for that day to assign it."
+            : "It is re-fetched automatically on the next read with NinjaTrader connected, which " +
+              "assigns one front contract and hides the other.")
+        );
+      }),
+      ...contractEvents.map(describeContractEvent),
+    ];
+    // Complete and single-contract, but not the bars an earlier read returned.
+    const freshMoves = contractEvents.filter(
+      (e) => e.kind === "reassigned" && nowUnix - e.lastTs <= FRESH_MOVE_SECS,
+    );
+
     // The daily bar of an in-progress session is ALWAYS partial: it is stamped
     // at the session close, which is still in the future, and its high/low/
     // close keep moving until then. Only its `open` is settled. Consumers must
@@ -418,6 +451,15 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           : `You're connected to NinjaTrader's Simulated Data Feed. The ${rows.length} bar(s) returned here are REAL data cached from an earlier real-feed fetch — they will NOT match your Sim chart, and in-progress days aren't refreshed while on Sim. Reconnect a real feed for live-consistent data.`;
     } else if (fillResult.bridgeDisconnected && rows.length === 0) {
       warning = `No cached data for ${symbol} ${timeframe} in this range. NinjaTrader is not connected — start NT8 with the McpBridge addon to fetch live data.`;
+    } else if (served.mixedDays.length > 0) {
+      // Ahead of the generic gap message: the unfilled window IS the mixed day.
+      warning =
+        `${served.mixedDays.length} session-day(s) serve bars from more than one contract at ${timeframe} — ` +
+        "prices jump by the inter-contract spread inside the day. " +
+        (fillResult.bridgeDisconnected
+          ? "NinjaTrader is not connected, so they could not be re-fetched; the next read with it connected does that. "
+          : "") +
+        "See `contract_notes`.";
     } else if (fillResult.windowsFailed > 0) {
       const summary = fillResult.errors
         .slice(0, 3)
@@ -439,6 +481,8 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       warning = `Underlying 15m data is incomplete for ${raw15m.mismatch} session-day(s) backing this ${timeframe} request — derived bars over those days may aggregate only part of their bucket. See \`validation.raw_15m\`.`;
     } else if (interSessionExcluded > 0) {
       warning = `${interSessionExcluded} cached row(s) stamped between session-day windows were excluded from this response — legacy residue (pre-fix seed or session-geometry changes), invisible to validation.`;
+    } else if (freshMoves.length > 0) {
+      warning = `The front contract moved on ${freshMoves.length} session-day(s) in this range within the last 24 hours — their bars now come from a different contract than an earlier read returned. See \`contract_notes\`.`;
     }
 
     // The single trust bit a consumer checks before relying on the data.
@@ -450,7 +494,8 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       fillResult.windowsFailed === 0 &&
       !fillResult.bridgeDisconnected &&
       !fillResult.simFeedRejected &&
-      !truncated;
+      !truncated &&
+      served.mixedDays.length === 0;
 
     const validationOut: ValidationSummary & { raw_15m?: ValidationSummary } = raw15m
       ? { ...validation, raw_15m: raw15m }
@@ -470,9 +515,12 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       ...(interSessionExcluded > 0 && {
         inter_session_rows_excluded: interSessionExcluded,
       }),
-      candles: rows,
-      validation: validationOut,
+      // Signals go ahead of the bars: a client that truncates keeps the head.
       ...(warning && { warning }),
+      contracts: served.contracts,
+      ...(contractNotes.length > 0 && { contract_notes: contractNotes }),
+      validation: validationOut,
+      candles: rows,
     });
   };
 }
@@ -489,7 +537,7 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached. `contracts` names the contract(s) the bars came from; `contract_notes`, when present, lists contract disputes on those days (a front assignment that moved at a roll, bars arriving under another contract, a day still serving two contracts) — read it before trusting price levels across a roll.",
     {
       symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
       timeframe: z
