@@ -107,7 +107,7 @@ describe("aggregateCandles — CME ETH 30m / 1h", () => {
     expect(c.low).toBe(95);
     expect(c.close).toBe(115);
     expect(c.volume).toBe(205);
-    // Close-stamp = close-stamp of last underlying bar (NT8 convention).
+    // Stamped with the bucket's period end (NT8 convention).
     expect(c.timestamp).toBe(et("2026-05-01T10:00:00"));
   });
 
@@ -216,12 +216,83 @@ describe("aggregateCandles — bars in maintenance break are dropped", () => {
     ];
     const out = aggregateCandles(input, "4h", ETH_OPTS);
     // The 17:30 bar is dropped. Tue session-day gets one bar (the 17:00
-    // stub), Wed session-day gets one bar (the 18:15 first bucket).
+    // stub), Wed session-day gets one bar (its first bucket, 18:00–22:00).
     expect(out).toHaveLength(2);
     expect(out[0].timestamp).toBe(et("2026-04-21T17:00:00"));
     expect(out[0].volume).toBe(10); // not 109 (= 10 + 99) — the poison was dropped
-    expect(out[1].timestamp).toBe(et("2026-04-21T18:15:00"));
+    expect(out[1].timestamp).toBe(et("2026-04-21T22:00:00"));
     expect(out[1].volume).toBe(20);
+  });
+});
+
+describe("aggregateCandles — a bucket is stamped with its period end", () => {
+  it("carries the period end even when its final 15m slots never traded", () => {
+    // Tue session-day's first 4h bucket (Mon 18:00–22:00) with bars only at
+    // 18:15 and 18:30, then the next bucket's first bar.
+    const input: Candle[] = [
+      bar("2026-04-20T18:15:00", [100, 105, 99, 104]),
+      bar("2026-04-20T18:30:00", [104, 108, 103, 107]),
+      bar("2026-04-20T22:15:00", [200, 201, 199, 200]),
+    ];
+    const out = aggregateCandles(input, "4h", ETH_OPTS);
+    expect(out.map((c) => c.timestamp)).toEqual([
+      et("2026-04-20T22:00:00"),
+      et("2026-04-21T02:00:00"),
+    ]);
+    // Values still come from the bars that exist.
+    expect(out[0]).toMatchObject({ open: 100, high: 108, low: 99, close: 107, volume: 204 });
+  });
+
+  it("stamps a lone first-slot bar with its bucket's close at every derived timeframe", () => {
+    const input: Candle[] = [bar("2026-04-21T10:15:00", [1, 2, 0.5, 1.5])];
+    expect(aggregateCandles(input, "30m", ETH_OPTS)[0].timestamp).toBe(et("2026-04-21T10:30:00"));
+    expect(aggregateCandles(input, "1h", ETH_OPTS)[0].timestamp).toBe(et("2026-04-21T11:00:00"));
+    expect(aggregateCandles(input, "2h", ETH_OPTS)[0].timestamp).toBe(et("2026-04-21T12:00:00"));
+    expect(aggregateCandles(input, "4h", ETH_OPTS)[0].timestamp).toBe(et("2026-04-21T14:00:00"));
+  });
+
+  it("ends the trailing stub bucket at the session close, not on the next grid line", () => {
+    // The last 4h bucket of a CME ETH day is the 14:00–17:00 stub.
+    const input: Candle[] = [bar("2026-04-21T14:15:00", [1, 2, 0.5, 1.5])];
+    expect(aggregateCandles(input, "4h", ETH_OPTS)[0].timestamp).toBe(et("2026-04-21T17:00:00"));
+  });
+
+  it("ends an early-close day's stub at the adjusted close", () => {
+    const cal = new Map([
+      ["2026-02-16", { date: "2026-02-16", kind: "modified" as const, closeTime: "13:00", source: "bootstrap" as const }],
+    ]);
+    // Presidents Day closes 13:00: the 4h bucket that opened 10:00 is a 3h stub.
+    const input: Candle[] = [bar("2026-02-16T10:15", [1, 2, 0.5, 1.5])];
+    const out = aggregateCandles(input, "4h", { ...ETH_OPTS, calendar: cal });
+    expect(out[0].timestamp).toBe(et("2026-02-16T13:00"));
+  });
+
+  it("gives a bucket the same stamp before and after its period ends", () => {
+    const input: Candle[] = [
+      bar("2026-04-20T18:15:00", [100, 105, 99, 104]),
+      bar("2026-04-20T21:30:00", [104, 108, 103, 107]),
+    ];
+    const at = (now: string) => aggregateCandles(input, "4h", { ...ETH_OPTS, now: et(now) })[0].timestamp;
+    expect(at("2026-04-20T21:59:59")).toBe(et("2026-04-20T22:00:00")); // still forming
+    expect(at("2026-04-20T22:00:00")).toBe(et("2026-04-20T22:00:00")); // closed
+  });
+
+  it("stamps the bucket still forming with its period end, ahead of the clock", () => {
+    // 20:35 ET: 15m bars through 20:30. The 1h buckets ending 19:00 and 20:00
+    // have closed; the one ending 21:00 is forming.
+    const now = et("2026-04-20T20:35:00");
+    const input: Candle[] = [];
+    for (let ts = et("2026-04-20T18:15:00"); ts <= et("2026-04-20T20:30:00"); ts += 900) {
+      input.push({ timestamp: ts, open: 100, high: 100, low: 100, close: 100, volume: 1 });
+    }
+    const out = aggregateCandles(input, "1h", { ...ETH_OPTS, now });
+    expect(out.map((c) => c.timestamp)).toEqual([
+      et("2026-04-20T19:00:00"),
+      et("2026-04-20T20:00:00"),
+      et("2026-04-20T21:00:00"),
+    ]);
+    expect(out[2].timestamp).toBeGreaterThan(now);
+    expect(out[2].partial).toBe(true);
   });
 });
 

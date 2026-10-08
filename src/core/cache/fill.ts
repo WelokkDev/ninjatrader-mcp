@@ -2,14 +2,14 @@ import type { Database } from "better-sqlite3";
 import type { Timeframe } from "../types.js";
 import { isSubMinuteTimeframe } from "../constants.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
-import { sessionDaysOverlapping } from "../sessions/session-day.js";
+import { sessionDayRange, sessionDaysOverlapping } from "../sessions/session-day.js";
 import {
   loadCalendar,
   recordObservedClose,
   type SessionCalendar,
 } from "../sessions/calendar.js";
 import { wallClockHHMM } from "../time.js";
-import { getInstrumentConfig } from "../sessions/registry.js";
+import { getInstrumentConfig, REGISTRY } from "../sessions/registry.js";
 import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
 import { frontContractFor, servesMixedContracts, soleAttestedContract } from "./contracts.js";
@@ -402,6 +402,30 @@ export function observeEarlyClose(
     console.error(
       `[fill] observed early close for ${template.name} ${day.label}: ${closeHHMM} (recorded)`,
     );
+    rederiveSessionDay(db, template, day.label, nowUnix);
   }
   return recorded;
+}
+
+// A recorded close shortens the day for every symbol on the template, and
+// their derived rows were stamped against the bounds it had before.
+function rederiveSessionDay(
+  db: Database,
+  template: SessionTemplate,
+  label: string,
+  nowUnix: number,
+): void {
+  const calendar = loadCalendar(db, template.name);
+  const day: SessionDay = { label, ...sessionDayRange(label, template, calendar) };
+  const has15m = db.prepare(
+    `SELECT 1 FROM candles
+      WHERE symbol = ? AND timeframe = '15m' AND timestamp > ? AND timestamp <= ? LIMIT 1`,
+  );
+  db.transaction(() => {
+    for (const [symbol, config] of Object.entries(REGISTRY)) {
+      if (config.session.name !== template.name) continue;
+      if (has15m.get(symbol, day.startUnix, day.endUnix) === undefined) continue;
+      recomputeDerivedForSessionDay(db, symbol, day, config, calendar, nowUnix);
+    }
+  })();
 }

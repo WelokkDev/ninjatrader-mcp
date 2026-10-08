@@ -63,14 +63,14 @@ describe("ingest convergence", () => {
 
     // Step 1 — mid-session snapshot: 15m data through 20:30 ET.
     ingestCandles("NQ", "15m", bars15m(1, 10), db, { mode: "day-refill", nowUnix: MID_SESSION });
-    // Trailing buckets are cut at 20:30 — off-grid at 1h/2h/4h.
-    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 9000]);
-    expect(stamps(db, "4h")).toEqual([DAY_START + 9000]);
+    // Trailing buckets are still forming: stamped with period ends not yet reached.
+    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 10800]);
+    expect(stamps(db, "4h")).toEqual([DAY_START + 14400]);
 
     // Step 2 — the whole-day refill fill.ts performs after the session closes.
     ingestCandles("NQ", "15m", bars15m(1, 92), db, { mode: "day-refill", nowUnix: AFTER_CLOSE });
 
-    // Derived rows must be EXACTLY the canonical stamp sets — no 20:30 orphans.
+    // Derived rows must be EXACTLY the canonical stamp sets.
     expect(stamps(db, "1h")).toEqual(canonical(3600, 23));
     expect(stamps(db, "2h")).toEqual(canonical(7200, 11, DAY_END));
     expect(stamps(db, "4h")).toEqual(canonical(14400, 5, DAY_END));
@@ -140,14 +140,20 @@ describe("ingest convergence", () => {
     expect(validateSessionDay(db, "NQ", SD, "15m", AFTER_CLOSE).status).toBe("ok");
   });
 
-  it("append-mode 15m ingest recomputes derived rows: the previous forming bucket is replaced", () => {
+  it("append-mode 15m ingest recomputes derived rows: the forming bucket is updated in place", () => {
     const db = memDb();
+    const forming1h = () =>
+      db
+        .prepare(`SELECT volume FROM candles WHERE symbol = 'NQ' AND timeframe = '1h' AND timestamp = ?`)
+        .get(DAY_START + 10800) as { volume: number };
     // Live bar_close path (append) through 20:30…
     ingestCandles("NQ", "15m", bars15m(1, 10), db, { mode: "append", nowUnix: MID_SESSION });
-    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 9000]);
-    // …then the 20:45 bar closes: the forming 20:30 row must be superseded, not accumulated.
+    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 10800]);
+    const before = forming1h().volume;
+    // …then the 20:45 bar closes: same bucket, same stamp, one more bar in it.
     ingestCandles("NQ", "15m", bars15m(11, 11), db, { mode: "append", nowUnix: DAY_START + 11 * 900 + 300 });
-    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 9900]);
+    expect(stamps(db, "1h")).toEqual([DAY_START + 3600, DAY_START + 7200, DAY_START + 10800]);
+    expect(forming1h().volume).toBeGreaterThan(before);
   });
 
   it("no raw delete on an in-progress day: a lagging refill cannot erase newer live bars", () => {

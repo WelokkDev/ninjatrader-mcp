@@ -2,7 +2,8 @@ import type { Database } from "better-sqlite3";
 import { aggregateCandles } from "../aggregator.js";
 import { isRawTimeframe, SUPPORTED_TIMEFRAMES } from "../constants.js";
 import type { SessionCalendar } from "../sessions/calendar.js";
-import type { InstrumentConfig, SessionDay } from "../sessions/types.js";
+import { sessionDayRange } from "../sessions/session-day.js";
+import type { InstrumentConfig, SessionDay, SessionTemplate } from "../sessions/types.js";
 import type { Candle, DerivedTimeframe, Timeframe } from "../types.js";
 import { UNATTESTED_CONTRACT } from "../../db/schema.js";
 
@@ -59,12 +60,16 @@ export function writeDerivedForSessionDay(
   database: Database,
   symbol: string,
   day: SessionDay,
+  session: SessionTemplate,
   computed: Map<Timeframe, Candle[]>,
 ): Record<string, number> {
   const counts: Record<string, number> = Object.fromEntries(
     DERIVED_TIMEFRAMES.map((tf) => [tf, 0]),
   );
   const placeholders = DERIVED_TIMEFRAMES.map(() => "?").join(", ");
+  // Rows are stamped against the day's bounds at write time. A close time
+  // recorded later shortens the day, so clear the template's span too.
+  const template = sessionDayRange(day.label, session);
   database
     .prepare(
       // Hidden unattested derived rows go too: rebuilt from 15m, never data.
@@ -72,7 +77,12 @@ export function writeDerivedForSessionDay(
         WHERE symbol = ? AND timeframe IN (${placeholders})
           AND timestamp > ? AND timestamp <= ? AND (front = 1 OR contract = '')`,
     )
-    .run(symbol, ...DERIVED_TIMEFRAMES, day.startUnix, day.endUnix);
+    .run(
+      symbol,
+      ...DERIVED_TIMEFRAMES,
+      Math.min(day.startUnix, template.startUnix),
+      Math.max(day.endUnix, template.endUnix),
+    );
 
   // Exactly one distinct value across the day's 15m rows propagates, else
   // NULL — a derived bar can't be more certain than what built it.
@@ -114,9 +124,10 @@ export function writeDerivedForSessionDay(
 
 /**
  * Recompute a session-day's derived rows from its cached 15m rows. Derived
- * state is a pure function of those rows, so a day with zero cached 15m rows
- * converges derived to empty — callers healing existing state must guard on
- * 15m presence first. Not transactional: the caller owns the transaction.
+ * state is a pure function of those rows and the day's bounds, so a day with
+ * zero cached 15m rows converges derived to empty — callers healing existing
+ * state must guard on 15m presence first. Not transactional: the caller owns
+ * the transaction.
  */
 export function recomputeDerivedForSessionDay(
   database: Database,
@@ -130,6 +141,7 @@ export function recomputeDerivedForSessionDay(
     database,
     symbol,
     day,
+    config.session,
     computeDerivedForSessionDay(database, symbol, day, config, calendar, nowUnix),
   );
 }

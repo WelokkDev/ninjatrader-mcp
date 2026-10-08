@@ -443,7 +443,8 @@ describe("get_candles derived-TF read path", () => {
     wireBridge15m(db, request, bars15m(1, 10));
 
     const out = JSON.parse(await call(handler, { timeframe: "1h" }));
-    expect(out.count).toBe(3); // 19:00, 20:00, 20:30(forming)
+    expect(out.count).toBe(3); // 19:00, 20:00, 21:00(forming)
+    expect(out.candles[2].timestamp).toBe(DAY_START + 10800);
     expect(out.candles[0].partial).toBeUndefined();
     expect(out.candles[1].partial).toBeUndefined();
     expect(out.candles[2].partial).toBe(true);
@@ -451,6 +452,20 @@ describe("get_candles derived-TF read path", () => {
     // In-progress day never falsifies the trust bit — the flag makes that safe.
     expect(out.data_complete).toBe(true);
     expect(out.validation).toMatchObject({ in_progress: 1, mismatch: 0 });
+  });
+
+  it("flags NT8's own forming raw bar: its stamp is still in the future", async () => {
+    vi.useFakeTimers();
+    // 20:35 ET — NT8 sends the 15m bar that will close at 20:45 with the closed ones.
+    vi.setSystemTime(new Date((DAY_START + 10 * 900 + 300) * 1000));
+    const { db, handler, request } = harness({ connected: true });
+    wireBridge15m(db, request, bars15m(1, 11));
+
+    const out = JSON.parse(await call(handler, { timeframe: "15m" }));
+    expect(out.count).toBe(11);
+    expect(out.candles[9].partial).toBeUndefined();
+    expect(out.candles[10].partial).toBe(true);
+    expect(out.partial_bars).toBe(1);
   });
 
   it("never flags a legitimate early-close stub bar (Presidents Day 13:00 close)", async () => {
@@ -490,12 +505,12 @@ describe("get_candles derived-TF read path", () => {
 
   it("does not flap the derived heal on a permanently gapped day (no-op recompute is skipped)", async () => {
     const { db, handler } = harness(); // disconnected — nothing can backfill the gap
-    // Closed day whose 15m gap tail-clips the first 1h bucket (bar 4 missing):
-    // the recompute deterministically reproduces the off-grid derived row.
+    // Closed day whose first 1h bucket has no 15m bars at all, so the 1h
+    // series is missing a bar that no recompute can produce.
     const respond = createCandlesResponseHandler(db);
     respond({
       v: 1, id: "x", type: "candles_response", symbol: "NQ", timeframe: "15m",
-      candles: [...bars15m(1, 3), ...bars15m(5, 92)],
+      candles: bars15m(5, 92),
     });
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const out1 = JSON.parse(await call(handler, { timeframe: "1h" }));
@@ -507,6 +522,22 @@ describe("get_candles derived-TF read path", () => {
     // …and the day stays loud on both reads.
     expect(out1.validation.mismatch).toBe(1);
     expect(out2.validation.mismatch).toBe(1);
+  });
+
+  it("reports a bucket missing its last 15m bar on the 15m backing, not as an off-grid 1h bar", async () => {
+    const { db, handler } = harness(); // disconnected — nothing can backfill the gap
+    // Bar 4 closes the first 1h bucket. Without it the bucket still ends on
+    // its grid, so the 1h series is canonical and the hole shows at 15m.
+    const respond = createCandlesResponseHandler(db);
+    respond({
+      v: 1, id: "x", type: "candles_response", symbol: "NQ", timeframe: "15m",
+      candles: [...bars15m(1, 3), ...bars15m(5, 92)],
+    });
+    const out = JSON.parse(await call(handler, { timeframe: "1h" }));
+    expect(out.candles[0].timestamp).toBe(DAY_START + 3600);
+    expect(out.validation.mismatch).toBe(0);
+    expect(out.validation.raw_15m.mismatch).toBe(1);
+    expect(out.data_complete).toBe(false);
   });
 
   it("re-derives a closed day whose derived rows are missing over complete 15m backing", async () => {
@@ -538,7 +569,7 @@ describe("get_candles derived-TF read path", () => {
     expect(out.count).toBe(3);
     expect(out.candles[0].partial).toBe(true); // canonical stamp, holed backing
     expect(out.candles[1].partial).toBeUndefined(); // complete 20:00 bucket
-    expect(out.candles[2].partial).toBe(true); // forming 20:30 bar
+    expect(out.candles[2].partial).toBe(true); // the forming bar
     expect(out.partial_bars).toBe(2);
     // In-progress day: the flag carries the distrust, not the trust bit.
     expect(out.data_complete).toBe(true);

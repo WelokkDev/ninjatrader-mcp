@@ -114,12 +114,12 @@ describe("buildFrozenView — forming/completed flips at a 4h boundary ±1s", ()
       et("2026-04-21T02:00:00"),
       et("2026-04-21T06:00:00"),
     ]);
-    // asOfView carries the forming bar as its trailing element, close-
-    // stamped at the last visible 5m bar (09:55), not 10:00.
+    // asOfView carries the forming bar as its trailing element, stamped
+    // with the period end it has not reached yet.
     expect(asOfView).toHaveLength(4);
-    expect(asOfView[asOfView.length - 1].timestamp).toBe(et("2026-04-21T09:55:00"));
+    expect(asOfView[asOfView.length - 1].timestamp).toBe(close);
     // The forming bar is NOT in completed.
-    expect(completed.some((b) => b.timestamp === et("2026-04-21T09:55:00"))).toBe(false);
+    expect(completed.some((b) => b.timestamp === close)).toBe(false);
   });
 
   it("close exactly: the bucket is completed, no forming slot", () => {
@@ -163,7 +163,7 @@ describe("buildFrozenView — leak probe (no future data reaches the frozen view
 
     // Its data appears ONLY as asOfView's trailing forming bar, built from exactly the 24 in-window bars (06:05..08:00), the spike is gone.
     const forming = asOfView[asOfView.length - 1];
-    expect(forming.timestamp).toBe(asOf); // close-stamped at the last visible bar
+    expect(forming.timestamp).toBe(end); // its period end, still ahead of asOf
     expect(forming.high).toBe(101);
     expect(forming.low).toBe(99);
     expect(forming.volume).toBe(24);
@@ -241,6 +241,69 @@ describe("buildFrozenView — consistency with aggregateCandles (everything clos
       // Past series end there is nothing forming.
       expect(fv.asOfView.get(tf)).toEqual(fv.completed.get(tf));
     }
+  });
+});
+
+describe("buildFrozenView — sparse primary bars", () => {
+  // A 5m series with holes: every bucket keeps at least one bar, but many
+  // lose their last one, as 1s-built bars do whenever a final second is quiet.
+  function sparse(closeDate: string): Candle[] {
+    return eth5mFlat(closeDate).filter((_, i) => i % 3 !== 2);
+  }
+
+  it("stamps a completed bucket with its period end when its last bar is missing", () => {
+    // Drop 21:55 and 22:00, the tail of the first 4h bucket.
+    const bars = eth5mFlat("2026-04-21").filter(
+      (b) => b.timestamp !== et("2026-04-20T21:55:00") && b.timestamp !== et("2026-04-20T22:00:00"),
+    );
+    const fv = buildFrozenView({ primaryBars: bars, asOf: FAR, timeframes: ["4h"], session: ETH });
+    const first = fv.completed.get("4h")![0];
+    expect(first.timestamp).toBe(et("2026-04-20T22:00:00"));
+    expect(first.volume).toBe(46); // 48 five-minute bars less the two dropped
+  });
+
+  it("keeps completed equal to aggregateCandles on the same holed input", () => {
+    const bars = [...sparse("2026-04-21"), ...sparse("2026-04-22")];
+    const tfs: Timeframe[] = ["30m", "1h", "2h", "4h"];
+    const fv = buildFrozenView({ primaryBars: bars, asOf: FAR, timeframes: tfs, session: ETH });
+    for (const tf of tfs) {
+      expect(fv.completed.get(tf)).toEqual(aggregateCandles(bars, tf, ethOpts(FAR)));
+    }
+  });
+
+  it("puts every completed bar on its timeframe's grid", () => {
+    const bars = sparse("2026-04-21");
+    const open = et("2026-04-20T18:00:00");
+    const close = et("2026-04-21T17:00:00");
+    const tfs: Array<[Timeframe, number]> = [["15m", 900], ["30m", 1800], ["1h", 3600], ["2h", 7200], ["4h", 14400]];
+    const fv = buildFrozenView({ primaryBars: bars, asOf: FAR, timeframes: tfs.map(([tf]) => tf), session: ETH });
+    for (const [tf, period] of tfs) {
+      for (const b of fv.completed.get(tf)!) {
+        expect((b.timestamp - open) % period === 0 || b.timestamp === close, `${tf} ${b.timestamp}`).toBe(true);
+      }
+    }
+  });
+
+  it("ends an early-close day's stub where aggregateCandles does when given the calendar", () => {
+    const calendar = new Map([
+      ["2026-04-21", { date: "2026-04-21", kind: "modified" as const, closeTime: "13:00", source: "bootstrap" as const }],
+    ]);
+    const bars = eth5mFlat("2026-04-21").filter((b) => b.timestamp <= et("2026-04-21T13:00:00"));
+    const tfs: Timeframe[] = ["30m", "1h", "2h", "4h"];
+    const fv = buildFrozenView({ primaryBars: bars, asOf: FAR, timeframes: tfs, session: ETH, calendar });
+    for (const tf of tfs) {
+      const completed = fv.completed.get(tf)!;
+      expect(completed[completed.length - 1].timestamp, tf).toBe(et("2026-04-21T13:00:00"));
+      expect(completed).toEqual(aggregateCandles(bars, tf, { ...ethOpts(FAR), calendar }));
+    }
+  });
+
+  it("stamps the forming bar with its period end too", () => {
+    const bars = sparse("2026-04-21");
+    const asOf = et("2026-04-21T08:00:00"); // inside the (06:00,10:00] bucket
+    const fv = buildFrozenView({ primaryBars: bars, asOf, timeframes: ["4h"], session: ETH });
+    const view = fv.asOfView.get("4h")!;
+    expect(view[view.length - 1].timestamp).toBe(et("2026-04-21T10:00:00"));
   });
 });
 

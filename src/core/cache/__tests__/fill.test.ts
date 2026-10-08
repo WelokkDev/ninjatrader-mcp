@@ -12,7 +12,9 @@ import {
   type EnsureCachedDeps,
 } from "../fill.js";
 import { expectedCloseStamps } from "../validator.js";
+import { DERIVED_TIMEFRAMES, recomputeDerivedForSessionDay } from "../derived.js";
 import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
+import { getInstrumentConfig } from "../../sessions/registry.js";
 import type { SessionCalendar } from "../../sessions/calendar.js";
 import type { Timeframe } from "../../types.js";
 
@@ -318,5 +320,47 @@ describe("sparse 15s days through classify and early-close observation", () => {
     expect(
       classifySessionDay(db, "NQ", { label: "2026-05-04", ...prefix }, "15s", NOW),
     ).toBe("complete");
+  });
+});
+
+describe("observed early close and derived rows", () => {
+  it("re-derives the day for every symbol on the template, leaving no row past the close", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    db.prepare(
+      `INSERT INTO session_calendar (template, date, kind, source)
+       VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
+    ).run();
+    const untimed: SessionCalendar = new Map([
+      ["2026-05-04", { date: "2026-05-04", kind: "modified" as const, source: "nt8" as const }],
+    ]);
+    // 15m bars through a 13:00 ET close, derived while the close time is
+    // unknown: the 2h and 4h buckets holding 13:00 end on the template grid.
+    const earlyClose = DAYS[0].endUnix - 4 * 3600;
+    const insert15m = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES (?, '15m', ?, 1, 2, 0.5, 1.5, 10)`,
+    );
+    const lastStamp = (symbol: string, tf: Timeframe): number =>
+      (
+        db
+          .prepare(`SELECT MAX(timestamp) AS m FROM candles WHERE symbol = ? AND timeframe = ?`)
+          .get(symbol, tf) as { m: number }
+      ).m;
+    for (const symbol of ["NQ", "MNQ"]) {
+      for (const t of expectedCloseStamps({ startUnix: DAYS[0].startUnix, endUnix: earlyClose }, "15m")) {
+        insert15m.run(symbol, t);
+      }
+      recomputeDerivedForSessionDay(db, symbol, DAYS[0], getInstrumentConfig(symbol), untimed, NOW);
+      expect(lastStamp(symbol, "4h")).toBe(earlyClose + 3600);
+    }
+
+    expect(observeEarlyClose(db, "NQ", "15m", DAYS[0], CME_US_INDEX_FUTURES_ETH, untimed, NOW)).toBe(true);
+
+    for (const symbol of ["NQ", "MNQ"]) {
+      for (const tf of DERIVED_TIMEFRAMES) {
+        expect(lastStamp(symbol, tf), `${symbol} ${tf}`).toBe(earlyClose);
+      }
+    }
   });
 });

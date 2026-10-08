@@ -297,7 +297,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           }
           if (!differs) continue;
           deps.db.transaction(() => {
-            writeDerivedForSessionDay(deps.db, symbol, day, computed);
+            writeDerivedForSessionDay(deps.db, symbol, day, config.session, computed);
           })();
           healed.push(day.label);
         }
@@ -368,26 +368,22 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       (e) => e.kind === "reassigned" && nowUnix - e.lastTs <= FRESH_MOVE_SECS,
     );
 
-    // The daily bar of an in-progress session is ALWAYS partial: it is stamped
-    // at the session close, which is still in the future, and its high/low/
-    // close keep moving until then. Only its `open` is settled. Consumers must
-    // not read H/L/C off a partial daily bar — that is tomorrow's information.
+    // Every bar is stamped with the end of its period, so one whose stamp is
+    // still in the future is forming: its high/low/close keep moving until
+    // then and only its `open` is settled. Consumers must not read H/L/C off
+    // a partial bar — that is information from later than now.
     let partialBars = 0;
-    if (timeframe === "1d") {
-      for (const day of finalDays) {
-        if (day.endUnix <= nowUnix) continue;
-        for (const row of rows) {
-          if (row.timestamp !== day.endUnix) continue;
-          row.partial = true;
-          partialBars++;
-        }
+    for (const row of rows) {
+      if (row.timestamp > nowUnix) {
+        row.partial = true;
+        partialBars++;
       }
     }
 
-    // A derived bar in an in-progress day is partial when its stamp is off
-    // the expected grid (bucket still forming), or when its stamp is canonical
-    // but a 15m constituent is missing (NT8-side gap), so its OHLC covers only
-    // part of the bucket. Closed days are covered by validation instead.
+    // A derived bar that has closed inside an in-progress day is still partial
+    // when a 15m constituent is missing (NT8-side gap), so its OHLC covers
+    // only part of the bucket, or when its stamp is off the expected grid.
+    // Closed days are covered by validation instead.
     if (isDerived) {
       const cached15mStmt = deps.db.prepare(
         `SELECT timestamp FROM candles
@@ -404,6 +400,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           }>).map((r) => r.timestamp),
         );
         for (const row of rows) {
+          if (row.partial) continue;
           if (row.timestamp <= day.startUnix || row.timestamp > day.endUnix) continue;
           if (!expectedSet.has(row.timestamp)) {
             row.partial = true;
@@ -423,9 +420,9 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       }
     }
 
-    // A day can have fully canonical derived stamps over a holed 15m stream,
-    // since interior gaps preserve the bucket's last bar — so surface the
-    // backing state. Only for days not already flagged at the requested TF,
+    // A day can have fully canonical derived stamps over a holed 15m stream:
+    // a bucket missing some 15m bars still closes on its grid — so surface
+    // the backing state. Only for days not already flagged at the requested TF,
     // which are loud once via validation.issues.
     let raw15m: ValidationSummary | undefined;
     if (isDerived) {
@@ -543,7 +540,7 @@ export function registerGetCandles(server: McpServer): void {
       timeframe: z
         .enum(SUPPORTED_TIMEFRAMES as [Timeframe, ...Timeframe[]])
         .describe(
-          "Candle timeframe. 1s, 5s, 15s, 5m and 1d are raw parallel streams; 30m–4h derive from 15m. The sub-minute TFs are DENSE — per session-day roughly 82,800 buckets at 1s, 16,560 at 5s, 5,520 at 15s — so they always need an explicit `limit`, are meant for engine consumption, and should be filled via prefetch_candles rather than inline here. They are also SPARSE: NT8 emits no bar for a bucket that saw no tick, so a 1s day legitimately returns well under its 82,800 buckets (>=14% absent) and that is not a gap. 1d is exactly one bar per session-day, stamped at the session CLOSE (so today's daily bar carries a future timestamp and `partial: true` until the session ends).",
+          "Candle timeframe. 1s, 5s, 15s, 5m and 1d are raw parallel streams; 30m–4h derive from 15m. The sub-minute TFs are DENSE — per session-day roughly 82,800 buckets at 1s, 16,560 at 5s, 5,520 at 15s — so they always need an explicit `limit`, are meant for engine consumption, and should be filled via prefetch_candles rather than inline here. They are also SPARSE: NT8 emits no bar for a bucket that saw no tick, so a 1s day legitimately returns well under its 82,800 buckets (>=14% absent) and that is not a gap. 1d is exactly one bar per session-day. Every bar is stamped at the END of its period, so the one still forming carries a future timestamp and `partial: true` until that period ends (for 1d, the session close).",
         ),
       start: z
         .string()

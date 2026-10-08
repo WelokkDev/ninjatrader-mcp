@@ -1,4 +1,5 @@
 import type { Candle, DerivedTimeframe, Timeframe } from "./types.js";
+import { bucketIndexOf, bucketPeriodEnd } from "./buckets.js";
 import { isRawTimeframe } from "./constants.js";
 import type { AlignmentStrategy, SessionTemplate } from "./sessions/types.js";
 import type { SessionCalendar } from "./sessions/calendar.js";
@@ -32,11 +33,10 @@ export interface AggregateOptions {
  * Aggregates 15-minute close-stamped candles into the target timeframe
  * using the instrument's session model.
  *
- * Output is close-stamped: each aggregated bar's `timestamp` is the
- * close-stamp of the LAST underlying 15-minute bar in its bucket, which
- * matches NT8's display convention (a 4h bucket Mon 18:00 → Mon 22:00 ET
- * is labeled 22:00).
- *
+ * Output is close-stamped the way NT8 stamps it: every bucket carries its
+ * period end (the 4h bucket Mon 18:00 → Mon 22:00 ET is labeled 22:00),
+ * whichever of its 15m slots traded. The bucket still forming carries it
+ * too, so its stamp is in the future until the period ends.
  */
 export function aggregateCandles(
   candles: Candle[],
@@ -64,7 +64,7 @@ export function aggregateCandles(
   }
 
   const periodSeconds = PERIOD_MINUTES[targetTimeframe] * 60;
-  const buckets = new Map<string, Candle[]>();
+  const buckets = new Map<string, { bars: Candle[]; periodEnd: number }>();
   const resolveDay = makeSessionDayResolver(options.session, options.calendar);
 
   for (const candle of candles) {
@@ -75,44 +75,40 @@ export function aggregateCandles(
       );
       continue;
     }
-    // CRITICAL: subtract 1 second from the close-stamp before flooring
-    // so that boundary close-stamps (e.g. Tue 22:00 = the close of the
-    // first 4h bucket on CME ETH) fall into the bucket their data window
-    // belongs to, not the next one.
-    //
-    // DO NOT REMOVE the `- 1`. A simplification pass that deletes it as
-    // dead arithmetic will silently shift every boundary close-stamp
-    // into the wrong bucket.
-    const bucketIndex = Math.floor(
-      (candle.timestamp - sd.startUnix - 1) / periodSeconds,
-    );
-    const key = `${sd.label}|${bucketIndex}`;
+    const index = bucketIndexOf(candle.timestamp, sd.startUnix, periodSeconds);
+    const key = `${sd.label}|${index}`;
     let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = [];
+      bucket = {
+        bars: [],
+        periodEnd: bucketPeriodEnd(sd.startUnix, sd.endUnix, index, periodSeconds),
+      };
       buckets.set(key, bucket);
     }
-    bucket.push(candle);
+    bucket.bars.push(candle);
   }
 
   const result: Candle[] = [];
-  for (const group of buckets.values()) {
-    group.sort((a, b) => a.timestamp - b.timestamp);
-    const last = group[group.length - 1];
-    result.push({
-      // Close-stamp of the LAST underlying bar = close-stamp of the
-      // bucket. Matches NT8's display convention.
-      timestamp: last.timestamp,
-      open: group[0].open,
-      high: Math.max(...group.map((c) => c.high)),
-      low: Math.min(...group.map((c) => c.low)),
-      close: last.close,
-      volume: group.reduce((sum, c) => sum + c.volume, 0),
-    });
+  for (const { bars, periodEnd } of buckets.values()) {
+    bars.sort((a, b) => a.timestamp - b.timestamp);
+    result.push(aggregateBucket(bars, periodEnd));
   }
 
   result.sort((a, b) => a.timestamp - b.timestamp);
   return markPartial(result, options, resolveDay);
+}
+
+/** One bucket's bars, ascending, reduced to a single candle stamped `timestamp`. */
+export function aggregateBucket(group: readonly Candle[], timestamp: number): Candle {
+  const last = group[group.length - 1];
+  return {
+    timestamp,
+    open: group[0].open,
+    high: Math.max(...group.map((c) => c.high)),
+    low: Math.min(...group.map((c) => c.low)),
+    close: last.close,
+    volume: group.reduce((sum, c) => sum + c.volume, 0),
+  };
 }
 
 function stripPartial(c: Candle): Candle {
