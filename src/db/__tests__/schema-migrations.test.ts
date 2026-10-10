@@ -156,6 +156,160 @@ describe("price_basis migration", () => {
   });
 });
 
+describe("trades table", () => {
+  const CURRENT_COLUMNS = [
+    "trade_id", "source", "external_id", "symbol", "direction", "quantity",
+    "entry_time", "entry_price", "exit_time", "exit_price", "commission", "created_at",
+  ];
+
+  /** The table as it was when it also held the backtest engine's trades. */
+  function oldTradesDb(opts: { importColumns?: boolean } = {}): Database.Database {
+    const db = new Database(":memory:");
+    db.exec(`
+      CREATE TABLE trades (
+        trade_id     TEXT    PRIMARY KEY,
+        run_id       TEXT,
+        mode         TEXT    NOT NULL,
+        symbol       TEXT    NOT NULL,
+        direction    TEXT    NOT NULL,
+        entry_time   INTEGER NOT NULL,
+        entry_price  REAL    NOT NULL,
+        stop_price   REAL    NOT NULL,
+        target_price REAL    NOT NULL,
+        exit_time    INTEGER,
+        exit_price   REAL,
+        exit_reason  TEXT,
+        r_multiple   REAL,
+        zone_ref     TEXT,
+        decision_ref TEXT,
+        created_at   INTEGER NOT NULL
+      );
+      CREATE INDEX idx_trades_run_id ON trades (run_id);
+      CREATE INDEX idx_trades_mode ON trades (mode);
+      CREATE TABLE positions (
+        symbol        TEXT    PRIMARY KEY,
+        qty           INTEGER NOT NULL,
+        avg_price     REAL    NOT NULL,
+        open_trade_id TEXT,
+        updated_at    INTEGER NOT NULL
+      );
+    `);
+    if (opts.importColumns !== false) {
+      db.exec(`
+        ALTER TABLE trades ADD COLUMN management_mode TEXT;
+        ALTER TABLE trades ADD COLUMN bars_in_trade INTEGER;
+        ALTER TABLE trades ADD COLUMN mfe REAL;
+        ALTER TABLE trades ADD COLUMN source TEXT;
+        ALTER TABLE trades ADD COLUMN external_id TEXT;
+        CREATE INDEX idx_trades_external_id ON trades (external_id);
+      `);
+    }
+    return db;
+  }
+
+  function insertImported(db: Database.Database, externalId: string): void {
+    db.prepare(
+      `INSERT INTO trades
+         (trade_id, run_id, mode, symbol, direction, entry_time, entry_price, stop_price,
+          target_price, exit_time, exit_price, exit_reason, source, external_id, created_at)
+       VALUES (?, NULL, 'live', 'NQ', 'long', 1000, 5000, 5000, 5000, 2000, 5010, 'manual',
+               'ninjatrader', ?, 3000)`,
+    ).run(`ninjatrader:${externalId}`, externalId);
+  }
+
+  function insertBacktest(db: Database.Database, tradeId: string): void {
+    db.prepare(
+      `INSERT INTO trades
+         (trade_id, run_id, mode, symbol, direction, entry_time, entry_price, stop_price,
+          target_price, created_at)
+       VALUES (?, 'run-1', 'backtest', 'NQ', 'short', 1000, 5000, 5020, 4960, 3000)`,
+    ).run(tradeId);
+  }
+
+  const columns = (db: Database.Database, table: string): string[] =>
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  const count = (db: Database.Database, table: string): number =>
+    (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+  it("carries imported rows into the current shape and drops the old table", () => {
+    const db = oldTradesDb();
+    insertImported(db, "A");
+
+    initializeSchema(db);
+
+    expect(columns(db, "trades")).toEqual(CURRENT_COLUMNS);
+    expect(db.prepare("SELECT * FROM trades").all()).toEqual([
+      {
+        trade_id: "ninjatrader:A", source: "ninjatrader", external_id: "A", symbol: "NQ",
+        direction: "long", quantity: null, entry_time: 1000, entry_price: 5000,
+        exit_time: 2000, exit_price: 5010, commission: null, created_at: 3000,
+      },
+    ]);
+    expect(columns(db, "trades_legacy")).toEqual([]);
+    expect(
+      db.prepare("SELECT 1 FROM schema_migrations WHERE name = 'trades_import_only'").get(),
+    ).toBeDefined();
+  });
+
+  it("keeps the old table as trades_legacy when it holds rows that are not imports", () => {
+    const db = oldTradesDb();
+    insertImported(db, "A");
+    insertBacktest(db, "bt-1");
+
+    initializeSchema(db);
+
+    expect(db.prepare("SELECT trade_id FROM trades").all()).toEqual([{ trade_id: "ninjatrader:A" }]);
+    expect(count(db, "trades_legacy")).toBe(2);
+    expect(columns(db, "trades_legacy")).toContain("zone_ref");
+  });
+
+  it("treats every row as a non-import when the table predates the import columns", () => {
+    const db = oldTradesDb({ importColumns: false });
+    insertBacktest(db, "bt-1");
+
+    initializeSchema(db);
+
+    expect(columns(db, "trades")).toEqual(CURRENT_COLUMNS);
+    expect(count(db, "trades")).toBe(0);
+    expect(count(db, "trades_legacy")).toBe(1);
+  });
+
+  it("is idempotent, and leaves the import index on the new table", () => {
+    const db = oldTradesDb();
+    insertImported(db, "A");
+
+    initializeSchema(db);
+    initializeSchema(db);
+
+    expect(count(db, "trades")).toBe(1);
+    expect(
+      db.prepare("SELECT tbl_name FROM sqlite_master WHERE name = 'idx_trades_external_id'").get(),
+    ).toEqual({ tbl_name: "trades" });
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name IN ('idx_trades_run_id', 'idx_trades_mode')").all(),
+    ).toEqual([]);
+  });
+
+  it("drops an empty positions table but leaves one that holds rows", () => {
+    const empty = oldTradesDb();
+    initializeSchema(empty);
+    expect(columns(empty, "positions")).toEqual([]);
+
+    const filled = oldTradesDb();
+    filled.exec("INSERT INTO positions (symbol, qty, avg_price, updated_at) VALUES ('NQ', 1, 5000, 0)");
+    initializeSchema(filled);
+    expect(count(filled, "positions")).toBe(1);
+  });
+
+  it("creates only the current shape on a fresh database", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    expect(columns(db, "trades")).toEqual(CURRENT_COLUMNS);
+    expect(columns(db, "positions")).toEqual([]);
+    expect(columns(db, "trades_legacy")).toEqual([]);
+  });
+});
+
 describe("bars per contract", () => {
   function insertLabelled(db: Database.Database, ts: number, contract: string | null): void {
     db.prepare(

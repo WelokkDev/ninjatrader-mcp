@@ -132,11 +132,6 @@ export interface NinjaTraderSourceOptions {
 
 export class NinjaTraderSource implements TradeSource {
   readonly id = "ninjatrader";
-  readonly capabilities = {
-    serverSideRange: false,  // pairing needs the full fill history; [from, to] filters paired trades post-hoc
-    realizedPnl:     false,  // NT stores fills, not round-trip P&L; we derive trades
-    commission:      true,
-  };
 
   constructor(private readonly opts: NinjaTraderSourceOptions) {}
 
@@ -201,7 +196,6 @@ export class NinjaTraderSource implements TradeSource {
         side:       NT_SCHEMA.orderActionToSide(Number(r["orderAction"])),  // from Orders.OrderAction
         commission: NT_SCHEMA.commissionOf(r),                              // Commission from e.*
         account:    r["account"] == null ? null : String(r["account"]),
-        raw:        r,
       }));
 
       // Range selects paired trades by entryTime; pairing saw the full history.

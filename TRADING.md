@@ -7,17 +7,15 @@ at every one. Nothing here reaches a broker until you deliberately turn it on.
 The write logic lives in one reusable place — `ExecutionService`
 (`src/execution/service.ts`): `submit()`, `submitOco()`, `cancel()`,
 `cancelAll()`, `flatten()`, `change()`. The MCP tools are thin adapters over
-it; the future Python algo will call the same gateway over a local RPC, so
-there is exactly one code path that ever touches an order.
+it, and bots call the same gateway over the `/feed` channel
+([examples/python/](examples/python/README.md)), so there is exactly one code
+path that ever touches an order.
 
 > **Phase 2 (now):** single orders (Market / Limit / Stop / StopLimit;
 > Day / Gtc / Ioc), OCO **exit pairs** (`place_oco`), in-place amends
 > (`change_order`), and the risk-reducing ops `cancel_order` / `cancel_all` /
-> `flatten`. **No FOK:** NT8's `TimeInForce` has no FOK value (verified against
-> the installed assemblies) — Ioc is the closest primitive, and FOK is not
-> emulated. **No ATM strategies and no trailing-stop order type** — NT8 has no
-> trailing `OrderType`; trailing is agent behavior (repeated `change_order` on
-> the stop leg).
+> `flatten`. What it leaves out is under
+> [Known limitations](#known-limitations-phase-2).
 
 ## What an ack means (read this)
 
@@ -115,9 +113,9 @@ The bracket workflow, end to end:
    `stopPrice` amends keep the order working the whole time. Prefer this over
    cancel+replace — no unprotected gap, and queue position is kept where the
    change allows. Prices are tick-rounded; the ack echoes effective values.
-   Note: `change_order` is **risk-adding** (a widened stop or raised qty adds
-   exposure), so it rides the full gate including the rate limit — a rapid trail
-   loop can be throttled (`blockedBy: "rate-limited"`, `certainlyNotDispatched`),
+   Note: `change_order` is **risk-adding**, so it rides the full gate including
+   the rate limit — a rapid trail loop can be throttled
+   (`blockedBy: "rate-limited"`, `certainlyNotDispatched`),
    which leaves the stop at its last accepted value, NOT wherever you last tried
    to move it. If you must cut risk while the rate window is full, use
    `cancel_order` / `flatten` — they are risk-reducing and never rate-limited.
@@ -137,9 +135,6 @@ Sharp edges to keep in mind:
   state). You cannot turn the bracket into a bare stop by cancelling the
   target — you would lose both legs. To keep protection while removing the
   target, place a fresh single stop first, then cancel the pair.
-- **Retry rules:** placements are deduped by `clientOrderId` — reuse the id
-  only to retry an ambiguous result. Cancel/change/flatten are idempotent —
-  retrying them is always safe.
 
 ## Enabling it (sim/paper first)
 
@@ -198,8 +193,10 @@ remove the risk-adding tools from the surface, restart the server with
   bracket are still separate calls; place the OCO pair as soon as you see the
   fill, and do not walk away in between. (Server-side auto-brackets are a
   possible phase 3.)
-- **No FOK** (NT8 has none — Ioc is the closest primitive), **no ATM
-  strategies, no trailing-stop order type** (trail by repeated `change_order`).
+- **No FOK, no ATM strategies, no trailing-stop order type.** NT8's
+  `TimeInForce` has no FOK value (verified against the installed assemblies);
+  Ioc is the closest primitive and FOK is not emulated. NT8 has no trailing
+  `OrderType` either, so trail by repeated `change_order` on the stop leg.
   These are exclusions by design, not gaps.
 
 The first item is safe-by-omission on Sim, but treat it as a blocker for live.

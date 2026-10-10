@@ -1,0 +1,2 @@
+websocket-client>=1.6  # feed_client.py, nt8_broker.py, bracket_bot.py
+websockets>=14         # live_feed_client.py only

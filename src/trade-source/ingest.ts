@@ -1,25 +1,15 @@
-import type { Ledger } from "../db/ledger.js";
+import type { Ledger, Trade } from "../db/ledger.js";
 import type { RawTrade, TradeSource } from "./types.js";
-import type { Trade } from "../core/decision/types.js";
 
 function toTrade(rt: RawTrade): Trade {
   return {
     tradeId: `${rt.source}:${rt.externalId}`,
-    runId: null, mode: "live", symbol: rt.symbol, direction: rt.direction,
-    entryTime: rt.entryTime, entryPrice: rt.entryPrice,
-    stopPrice: rt.entryPrice, targetPrice: rt.entryPrice,
-    exitTime: rt.exitTime, exitPrice: rt.exitPrice,
-    exitReason: rt.exitTime === null ? null : "manual",
-    rMultiple: null,
-    zoneRef: null, decisionRef: null,
-    managementMode: null, barsInTrade: null,
-    // mfe reuses the broker realizedPnl for ingested trades. A dedicated
-    // realized_pnl column will replace this interim mapping once the
-    // schema is extended; until then mfe is the only numeric slot that accepts
-    // an arbitrary broker P&L value without changing the DDL.
-    mfe: rt.realizedPnl,
-    createdAt: Math.floor(Date.now() / 1000),
     source: rt.source, externalId: rt.externalId,
+    symbol: rt.symbol, direction: rt.direction, quantity: rt.quantity,
+    entryTime: rt.entryTime, entryPrice: rt.entryPrice,
+    exitTime: rt.exitTime, exitPrice: rt.exitPrice,
+    commission: rt.commission,
+    createdAt: Math.floor(Date.now() / 1000),
   };
 }
 

@@ -5,9 +5,7 @@ import { announceToolGating, registerGenericTools } from "./server.js";
 import { runBin } from "./hub/bin.js";
 
 // The public MCP server: every generic tool, no private module required.
-// Experiment tools are runner-gated (they need a Lab bound to a backtest
-// engine) and are registered by private bins instead — see BUILD-YOUR-OWN.md
-// for composing your own server on top of this surface.
+// See BUILD-YOUR-OWN.md for composing your own server on top of this surface.
 
 announceToolGating();
 

@@ -20,8 +20,6 @@ function rawTrade(over: Partial<RawTrade> & { externalId: string }): RawTrade {
     exitPrice: 5010,
     quantity: 1,
     commission: 2,
-    realizedPnl: null,
-    raw: null,
     ...over,
   };
 }
@@ -29,7 +27,6 @@ function rawTrade(over: Partial<RawTrade> & { externalId: string }): RawTrade {
 function fakeSource(id: string, trades: RawTrade[]): TradeSource {
   return {
     id,
-    capabilities: { serverSideRange: false, realizedPnl: false, commission: true },
     async fetchTrades() {
       return trades.map((t) => ({ ...t, source: id }));
     },
@@ -58,11 +55,31 @@ describe("ingestTrades", () => {
     expect(ledger.getTrade("ninjatrader:B")).toBeUndefined();
   });
 
+  it("stores what the source reports about the round trip, size and commission included", async () => {
+    const source = fakeSource("ninjatrader", [
+      rawTrade({ externalId: "A", direction: "short", quantity: 3, commission: 12.6 }),
+    ]);
+    await ingestTrades(source, ledger, RANGE);
+    expect(ledger.getTrade("ninjatrader:A")).toMatchObject({
+      tradeId: "ninjatrader:A",
+      source: "ninjatrader",
+      externalId: "A",
+      symbol: "NQ",
+      direction: "short",
+      quantity: 3,
+      entryTime: 1_000,
+      entryPrice: 5000,
+      exitTime: 2_000,
+      exitPrice: 5010,
+      commission: 12.6,
+    });
+  });
+
   it("re-ingesting the same range is idempotent", async () => {
     const source = fakeSource("ninjatrader", [rawTrade({ externalId: "A" })]);
     expect(await ingestTrades(source, ledger, RANGE)).toEqual({ fetched: 1, inserted: 1 });
     expect(await ingestTrades(source, ledger, RANGE)).toEqual({ fetched: 1, inserted: 0 });
-    expect(ledger.listTrades({ mode: "live" })).toHaveLength(1);
+    expect(ledger.listTrades()).toHaveLength(1);
   });
 
   it("does not update an existing row (insert-if-absent, not upsert)", async () => {
@@ -78,6 +95,6 @@ describe("ingestTrades", () => {
     await ingestTrades(fakeSource("ibkr", [rawTrade({ externalId: "X" })]), ledger, RANGE);
     expect(ledger.getTrade("ninjatrader:X")).toBeDefined();
     expect(ledger.getTrade("ibkr:X")).toBeDefined();
-    expect(ledger.listTrades({ mode: "live" })).toHaveLength(2);
+    expect(ledger.listTrades()).toHaveLength(2);
   });
 });

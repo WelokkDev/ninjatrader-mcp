@@ -33,20 +33,6 @@ export type DerivedTimeframe = Exclude<Timeframe, RawTimeframe>;
 
 export type ZoneType = "supply" | "demand";
 
-export interface Trade {
-  id: string;
-  symbol: string;
-  zone_type: ZoneType;
-  timeframe: Timeframe;
-  entry: number;
-  stop: number;
-  target: number;
-  r_multiple: number;
-  outcome: "win" | "loss" | "breakeven" | "open";
-  notes: string;
-  created_at: number;
-}
-
 export interface DrawCommand {
   id: string;
   action: "draw" | "clear";

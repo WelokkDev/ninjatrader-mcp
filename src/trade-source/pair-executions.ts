@@ -26,7 +26,6 @@ import type { RawExecution, RawTrade } from "./types.js";
  *   closingComm + remainderComm = fillComm (total is conserved, no double-count).
  *
  * Open position at series end → emitted with exitTime: null, exitPrice: null.
- * realizedPnl is left null here (set by the adapter if the broker provides it).
  * source is left "" here (the adapter stamps the real source after pairing).
  *
  * Output order
@@ -70,8 +69,6 @@ interface OpenSegment {
   peakAbs: number;
   /** Σcommission across all fills belonging to this segment (null treated as 0). */
   commissionSum: number;
-  /** Opening fill's raw field — carried forward for audit. */
-  raw: unknown;
   /**
    * Original input-array index of the opening fill.
    * Used as a stable tiebreak when two trades share the same entryTime.
@@ -98,7 +95,6 @@ function createSegment(
     exitQty: 0,
     peakAbs: qty,
     commissionSum: commission,
-    raw: fill.raw,
     openOrdinal: ordinal,
   };
 }
@@ -117,8 +113,6 @@ function closeSegment(seg: OpenSegment, exitTime: number | null): RawTrade {
     exitPrice: closed && seg.exitQty > 0 ? seg.exitPriceSum / seg.exitQty : null,
     quantity: seg.peakAbs,
     commission: seg.commissionSum,
-    realizedPnl: null,
-    raw: seg.raw,
   };
 }
 

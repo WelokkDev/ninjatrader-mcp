@@ -11,7 +11,6 @@ import type { TradeSource } from "../trade-source/types.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 // get_trades + sync_trades — thin fetch-or-read shells over the ledger + NinjaTrader source.
-// Both tools follow the same pattern as list-trades.ts (createXHandler factory + registerX(server) calling server.tool).
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -113,13 +112,13 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
     const inRange = (t: { entryTime: number }) =>
       t.entryTime >= from && t.entryTime <= to;
 
-    let trades = ledger.listTrades({ mode: "live" }).filter(inRange);
+    let trades = ledger.listTrades().filter(inRange);
 
     if (trades.length === 0 || sync === true) {
       try {
         const source = resolveSource();
         await ingestTrades(source, ledger, { from, to });
-        trades = ledger.listTrades({ mode: "live" }).filter(inRange);
+        trades = ledger.listTrades().filter(inRange);
       } catch (err) {
         if (trades.length === 0) {
           // No pre-existing rows and ingest failed — surface the error.
@@ -143,7 +142,7 @@ export function registerGetTrades(server: McpServer): void {
 
   server.tool(
     "get_trades",
-    "Returns the user's live/imported trades in [from,to]; ingests on demand if the range is empty or sync is true; returns { count, trades }. mfe carries broker realized P&L when the source provides it; for NinjaTrader-imported trades it is null until a P&L-bearing derivation lands.",
+    "Returns the user's imported trades in [from,to]; ingests on demand if the range is empty or sync is true; returns { count, trades }. Each trade carries its entry and exit time and price, direction, quantity and commission; P&L is not stored.",
     {
       from: z.number().describe("range start, unix seconds"),
       to: z.number().describe("range end, unix seconds"),

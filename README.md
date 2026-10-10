@@ -14,7 +14,7 @@ Install the server, compile the NT8 AddOn once (the only NinjaTrader-side step, 
 | **Watch it live** — closed bars and position / P&L / risk updates streamed as they happen | `subscribe_live_bars`, `live_feed_status`, `get_positions` |
 | **Mark up your charts** — rectangles, horizontal & vertical lines, and text drawn onto the live NT8 chart | `draw`, `clear_zones`, `list_open_charts` |
 | **Drive the chart** — "show me June 12th 9am": scroll any open chart to a date/time and zoom, no mouse required | `navigate_chart` |
-| **Review your trading** — your real executed trades imported straight from NinjaTrader's database and paired into round trips | `get_trades`, `sync_trades`, `list_trades` |
+| **Review your trading** — your real executed trades imported straight from NinjaTrader's database and paired into round trips | `get_trades`, `sync_trades` |
 
 Everything above is **read-only or draw-only** — the bridge never touches your orders. **[SETUP.md](SETUP.md)** is the whole walkthrough: install → bridge → a live drawing on your chart, every step verifiable. That's all you need to start.
 
@@ -27,7 +27,9 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 - [SETUP.md](SETUP.md) — **start here.** Install → bridge → live data; every step verifiable.
 - [TRADING.md](TRADING.md) — the optional, default-off order write path and its three fail-closed gates.
 - [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) — *for algo developers:* compose your own private strategy module on the substrate.
+- [examples/python/](examples/python/README.md) — *for bot developers:* the `/feed` protocol, a feed client, a bracket-order broker and a runnable bot.
 - [CLAUDE.md](CLAUDE.md) — boundary rules for agents working in this repo.
+- [bedivere](https://github.com/WelokkDev/bedivere) — *separate repo, for Python algo developers:* my backtest-and-live engine.
 
 ---
 
@@ -42,17 +44,15 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   ┌──────────────────────────────────────────────────────────────────┐
   │  ninjatrader-mcp (Node.js process)                               │
   │                                                                  │
-  │   MCP tools (src/tools/) — 23 generic tools, plus:               │
+  │   MCP tools (src/tools/) — 21 generic tools, plus:               │
   │     6 write tools (place/oco/change when trading is enabled;     │
   │     cancel/cancel_all/flatten when accounts are allow-listed)    │
-  │     5 experiment-lab tools (registered by private bins           │
-  │     that bind a Lab to their own engine)                         │
   │     list_sessions (registered by the hub itself)                 │
   │                                                                  │
   │   Bridge (src/bridge/)          SQLite (data/candles.db, WAL)    │
   │   - WS server on 127.0.0.1:9472 - candles (1s/5s/15s/5m/15m,     │
   │   - Bearer-token auth             1d raw; 30m–4h from 15m)       │
-  │   - one active NT8 client       - trades / decisions ledger      │
+  │   - one active NT8 client       - trades ledger                  │
   │   - /feed push channel          - live subscriptions, positions  │
   │     for local bots              - order-submission audit         │
   │                                                                  │
@@ -61,11 +61,9 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   │   - bar recorder + gap healer     ExecutionService.submit()      │
   │   - position feed               - fail-closed gate + audit       │
   │                                                                  │
-  │   Lab (src/lab/ + adapters/)    src/private/ (gitignored, yours) │
-  │   - generic experiment          - your decision engine,          │
-  │     orchestrator                  strategies, tools — composed   │
-  │   - detached runner process       per BUILD-YOUR-OWN.md          │
-  │   - disk-as-truth recovery                                       │
+  │   src/private/ (gitignored, yours)                               │
+  │   - your decision engine, strategies, tools — composed           │
+  │     per BUILD-YOUR-OWN.md                                        │
   └───────┬────────────────────────────▲──────────────────┬──────────┘
           │  WebSocket (loopback only) │                  │ read-only
           │  hello/heartbeat ·         │                  │ snapshot copy
@@ -94,13 +92,12 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 5. **Positions (read-only).** `get_positions` and the position event feed observe accounts — fills, order changes, position transitions, with snapshot self-heal on reconnect. When NT8 is disconnected the answer is marked stale, never assumed flat.
 6. **Trade import (no bridge).** `get_trades` / `sync_trades` read NinjaTrader's own `NinjaTrader.sqlite` directly — via a temp snapshot copy, never the live file — pair executions into round-trip trades, and store them in the ledger.
 7. **Orders (default-off).** There is exactly one write path — `ExecutionService` (place, OCO exit pairs, change, cancel, cancel-all, flatten) — behind three independent fail-closed gates (tool registration, runtime config, and a C#-side gate the server can't recompile away). Risk-reducing ops (cancel/flatten) are allow-list-only so they keep working through a kill-switch. Every attempt is audited. See [TRADING.md](TRADING.md).
-8. **Experiments run out of process.** `start_experiment` returns immediately; the lab spawns a detached runner that writes progress and results to `backtest-results/<experimentId>/`. The lab re-derives run state from **disk** on every restart, so killed servers or orphaned runs reconcile instead of dangling.
 
 ---
 
 ## MCP tools
 
-The public server (`build/index.js`) registers 24 tools (23 with `NT_NO_HUB=1`: `list_sessions` is hub-only). The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable). The five lab tools appear only in a private bin that binds a `Lab` to its own engine (see [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)).
+The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: `list_sessions` is hub-only). The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable).
 
 ### Market data
 
@@ -120,7 +117,7 @@ The public server (`build/index.js`) registers 24 tools (23 with `NT_NO_HUB=1`: 
 | `subscribe_live_positions` / `unsubscribe_live_positions` | Sparse event feed (fills, order changes, position transitions) with full-snapshot self-heal; adds per-trade age, fill history, and MAE/MFE to `get_positions`. |
 | `list_sessions` | Every conversation attached to the hub and what each holds — bar subscriptions, running prefetch jobs, drawings, idle time — plus the hub process and whether it is serving an older build than the one on disk. |
 
-**For bots and dashboards** there is a push channel on the same port: `ws://127.0.0.1:9472/feed`, same bearer token. Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is self-sufficient. A minimal Python consumer ships at `examples/python/live_feed_client.py`. Bars tagged `backfill: true` closed well before delivery — act-on-close logic must skip them.
+**For bots and dashboards** the same port serves a push channel, `ws://127.0.0.1:9472/feed`: bars in, orders out. [`examples/python/`](examples/python/README.md) documents it and ships a client to start from.
 
 ### Chart drawing & reads
 
@@ -139,13 +136,6 @@ Drawings survive chart reloads: the AddOn retains every draw command per symbol 
 **Reading indicators is discover-then-poll:** call `list_chart_indicators` once for an `id`, then poll `read_indicator_values` with it — the poll is lean (values only, no reflection). An `id` is stable within a session but a chart reload or timeframe switch recreates indicators and invalidates it; the read then answers `found: false` (a normal outcome, not an error) and you re-discover. Value timestamps use the same unix-seconds convention as `get_candles`, so points line up 1:1 with candles. When a plot's `availableFrom`/`availableTo` are narrower than the range you asked for, you hit that indicator instance's value-retention wall (`readableDepth`, usually NT8's default 256 bars) rather than a gap in the chart — the response reports the chart's own loaded window alongside, so the two are distinguishable. Both tools are strictly read-only; `set_indicator_params` is the only write, and neither tool can add or remove an indicator.
 
 **Writing a setting takes a rebuild.** NT8 only applies a changed setting by re-running the indicator over history — what the Indicators dialog's Apply does — and exposes no API for it, so the tool drives whatever reload command the chart itself binds, and reports a rebuild it cannot confirm rather than claiming success.
-
-### Ledger reads
-
-| Tool | Summary |
-|---|---|
-| `list_trades` | Read persisted trades, filterable by `runId`, `mode` (`backtest`/`paper`/`live`), `managementMode`. |
-| `list_decisions` | Read per-bar decisions from a backtest. Defaults to the aggregated "stall funnel" (counts of no-verdicts by reason); the full trace is opt-in and hard-capped, because a real run holds ~15k rows. |
 
 ### Trade import (from NinjaTrader's own database)
 
@@ -167,19 +157,7 @@ The importer copies `NinjaTrader.sqlite` (plus WAL/SHM) to a temp snapshot, inte
 | `cancel_all` | Cancel every working order for an instrument on an account — including manually placed ones. Risk-reducing. |
 | `flatten` | Panic button: cancel all working orders AND close the position at market for the instrument. Risk-reducing. |
 
-Three independent fail-closed gates (TS registration, TS runtime config, a C#-side config read immediately before every NT8 call), every attempt audited (`order_submissions` / `order_ops`). Read [TRADING.md](TRADING.md) before enabling anything.
-
-### Experiment lab (runner-gated)
-
-| Tool | Summary |
-|---|---|
-| `start_experiment` | Launch a backtest experiment in a detached process; returns `{experimentId, etaSecs, queued}` instantly. Accepts an optional pre-registered `prediction` (hypothesis, expected trade band) to score later — an anti-self-deception measure. |
-| `experiment_status` | Live status: phase, percent, calibrated ETA band, recent events. |
-| `experiment_result` | Normalized ~3 KB result for a finished run: decision funnel, per-mode metrics, provenance (git SHAs, config hash), integrity report. Never returns the multi-hundred-MB decision trace. |
-| `list_experiments` | Compact summaries, newest first, optionally filtered by status. |
-| `diff_experiments` | Diff two finished runs: funnel deltas, per-reason deltas, per-mode metric deltas, with a caution flag if config/engine differ. |
-
-These tools only exist once a private bin calls `registerExperimentTools(server, lab)` with a `Lab` bound to a backtest engine — the public server doesn't create `data/lab.db` at all. Lab durability: each run writes a self-describing bundle under `backtest-results/<experimentId>/`; on startup and every 20s the lab reconciles in-flight state from **disk**, adopting completed bundles, marking dead processes failed, and recovering runs orphaned by a restart.
+Read [TRADING.md](TRADING.md) before enabling anything.
 
 ---
 
@@ -207,51 +185,11 @@ npm run build     # private-free: tsc, then a private-module step that no-ops wh
 npm start
 ```
 
-A fresh clone builds clean — no private module required. `npm start` runs the **hub**, the one process that owns the NT8 bridge, the candle cache and the live feeds. On first run it creates `data/candles.db` (SQLite, WAL; schema is idempotent — nothing to create by hand), generates a bearer token, writes it to `.env.local`, and prints it once to stderr. Paste that token into NT8's `bridge.config.json`, then start NT8 with the McpBridge AddOn compiled. **[SETUP.md](SETUP.md) is the real walkthrough** — install → bridge → verified live data, with a troubleshooting table for every failure mode.
+A fresh clone builds clean with no private module. `npm start` runs the **hub**, the one process that owns the NT8 bridge, the candle cache and the live feeds; every MCP conversation attaches to it through the repo's `.mcp.json`, with no per-user editing.
 
-The repo's `.mcp.json` already wires the server into Claude Code:
+On the NT8 side there are two files to copy and compile: `ninja-addon/addons/mcp-bridge.cs` (the AddOn) and `ninja-addon/indicators/mcp-renderer.cs` (the renderer; attach it to every chart the server should draw on). Both are **the developer's own steps**.
 
-```json
-{
-  "mcpServers": {
-    "ninjatrader": {
-      "command": "node",
-      "args": ["./scripts/mcp-entry.mjs"],
-      "timeout": 1800000
-    }
-  }
-}
-```
-
-`scripts/mcp-entry.mjs` picks `build/private/index.js` when a private module has been built, otherwise `build/index.js` — no per-user editing. The process it starts is a thin **shim** that proxies the conversation's stdio to the hub over loopback HTTP, starting the hub if none is running. Any number of conversations attach at once, each with its own session; a hub the shims started exits ~90s after the last one leaves, `npm start` keeps one up all day, `npm run status` / `npm stop` inspect and stop it. A rebuild takes effect when the hub restarts (the shim warns when it is serving an older build).
-
-### Environment variables
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `NT_BRIDGE_TOKEN` | auto-generated, persisted to `.env.local` | Shared secret between server and NT8 AddOn. |
-| `NT_BRIDGE_PORT` | `9472` | Loopback TCP port for the bridge; an invalid value disables the bridge but not the server. |
-| `NT_HUB_PORT` | `9474` | Loopback port of the hub every conversation attaches to. |
-| `NT_HUB_TOKEN` | auto-generated, persisted to `.env.local` | Shared secret between the per-conversation shims and the hub. |
-| `NT_NO_HUB` | unset | `1` runs the bin in-process for one client (the pre-hub layout). |
-| `NT_DATA_PATH` | `<repo>/data` | Directory for `candles.db`, `lab.db`, and lab calibration. |
-| `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Path to the trade-import config. |
-| `NT_TRADING_*` | unset ⇒ **disabled** | Order write path enablement — see [TRADING.md](TRADING.md). |
-
-### Config files
-
-| File | Where | Tracked? | Purpose |
-|---|---|---|---|
-| `.env.local` | repo root | no | `NT_BRIDGE_TOKEN` and `NT_HUB_TOKEN` (created on first run) and, opt-in, the `NT_TRADING_*` variables. |
-| `ninjatrader.config.json` | repo root | no | `{ "dbPath": ..., "account"? }` for trade import; copy the tracked `.example.json`. |
-| `bridge.config.json` | NT8 user data dir | — | `{ "token", "url" }` — the AddOn's connection config; re-read every 5s while disconnected. |
-| `trading.config.json` | NT8 user data dir | — | The C#-side order gate; missing ⇒ write path disabled. See [TRADING.md](TRADING.md). |
-| `data/lab-calibration.json` | repo | yes | Experiment ETA calibration data. |
-| `data/sample/*.csv` | repo | yes | 15m fixtures for `npm run seed` (offline cache proof, no NT8 needed). |
-
-### NT8 side
-
-Two files to copy and compile — `ninja-addon/addons/mcp-bridge.cs` (AddOn) and `ninja-addon/indicators/mcp-renderer.cs` (renderer; attach it to every chart the server should draw on). Copying and compiling in the NinjaScript Editor are **the developer's own steps** (see [SETUP.md](SETUP.md) §4–5, including the Trading Hours template mapping, which fails closed rather than silently serving RTH data).
+**[SETUP.md](SETUP.md) is the walkthrough** for all of it: first run and the bridge token, the NT8 side, environment variables and config files, NT8 in a VM, and a troubleshooting table for every failure mode.
 
 ---
 
@@ -264,11 +202,11 @@ npm run typecheck        # public only; private counterpart: npm run typecheck:p
 npm run inspect          # MCP inspector against the built server
 ```
 
-Vitest picks up `test/` plus co-located `__tests__/` under `src/` (bridge, core, tools, lab, adapters, execution). Tests run against a throwaway `.test-data/` DB, never `data/candles.db`.
+Vitest picks up `test/` plus co-located `__tests__/` under `src/` (bridge, core, tools, execution). Tests run against a throwaway `.test-data/` DB, never `data/candles.db`.
 
 Most tool handlers follow a factory + register pattern (`createXHandler(deps)` for dependency-injected testing, `registerX(server)` to wire real deps) — to add a tool with the testing pattern, copy the shape of `src/tools/draw.ts`.
 
-Public test coverage highlights: bridge wire protocol round-trips, candle aggregation across session/DST boundaries, session-day math, cache gap-fill planning and validation, the `get_candles` fail-closed gate, `resolve_session_days` anchors, drawing tools, the execution gateway's fail-closed gates, execution pairing and trade ingest, the NinjaTrader SQLite reader, and lab lifecycle + restart recovery.
+Public test coverage highlights: bridge wire protocol round-trips, candle aggregation across session/DST boundaries, session-day math, cache gap-fill planning and validation, the `get_candles` fail-closed gate, `resolve_session_days` anchors, drawing tools, the execution gateway's fail-closed gates, execution pairing and trade ingest, and the NinjaTrader SQLite reader.
 
 ### Ops scripts
 
@@ -289,7 +227,7 @@ Public test coverage highlights: bridge wire protocol round-trips, candle aggreg
 src/
   index.ts             public MCP bin — every generic tool, no private module needed
   server.ts            the composition seam: registerGenericTools /
-                       registerExperimentTools / startRuntime
+                       startRuntime
   bridge/              WS server, wire protocol (zod), auth, connection manager,
                        candle + live ingest, /feed consumer hub
   live/                live feed runtime: subscription registry, recorder,
@@ -299,12 +237,8 @@ src/
   core/                sessions (session-day math, templates, registry, calendar),
                        aggregator, time/ET helpers, cache fill + validator
   db/                  SQLite connection, schema, ledger DAO
-                       (candles + trades + decisions share data/candles.db)
+                       (candles + trades share data/candles.db)
   tools/               MCP tool handlers
-  lab/                 generic experiment orchestrator (store, runner port, ETA,
-                       observability, integrity, diff) — engine-agnostic
-  adapters/
-    ninjatrader/       detached backtest-runner adapter + result-bundle mapper
   trade-source/        NinjaTrader.sqlite reader, execution pairing, ingest
   scripts/             ops scripts + fake-NT dev harnesses
   private/             (gitignored, yours) your methodology — see BUILD-YOUR-OWN.md
@@ -313,12 +247,11 @@ ninja-addon/
                        draw store, gated order submit)
   indicators/          McpBridgeRenderer
 scripts/               mcp-entry.mjs (bin auto-switch), init-private.mjs, build-private.mjs
-examples/python/       minimal /feed WebSocket consumer
+examples/python/       /feed client, bracket-order broker, and a runnable bot
 test/                  vitest suites for public infrastructure
 data/
   sample/              tracked seed fixtures
-  candles.db, lab.db   created at runtime (gitignored)
-backtest-results/      (gitignored) per-experiment run bundles
+  candles.db           created at runtime (gitignored)
 docs/                  (gitignored) local design docs and specs
 ```
 
@@ -328,18 +261,13 @@ docs/                  (gitignored) local design docs and specs
 
 Everything above works with zero code. This section is the **other half** of the project, and you can skip it entirely if you only want to trade by hand.
 
-The repo is structured **open-core**. The substrate — bridge, cache, live feeds, session math, drawing, trade import, ledger, experiment lab, execution gateway, NT8 AddOn — is public, here in this repo. The trading *methodology* (zone detection, decision engines, strategy configs) is meant to live **not here**: in each developer's own gitignored `src/private/` module, composed on top. The aim is that public code never imports private and a **fresh clone builds and tests clean with no `src/private/`** (`tsc` excludes it), with the composition seam — `registerGenericTools` / `registerExperimentTools` / `startRuntime` in `src/server.ts` — exercised daily. But this split is recent: remnants of my own methodology, and of my own NT8 setup, probably still linger in pieces of the public code — field names, spec shapes, the odd default — so expect to find traces. The split is architectural, not yet surgical, and I'm still working on it.
+The repo is structured **open-core**. The substrate — bridge, cache, live feeds, session math, drawing, trade import, execution gateway, NT8 AddOn — is public. The trading *methodology* (zone detection, decision engines, strategy configs) lives in each developer's own gitignored `src/private/` module, composed on top through `registerGenericTools` / `startRuntime` in `src/server.ts`. Public code never imports private, and a fresh clone builds and tests clean without it. The split is recent, so expect the traces the status note at the top describes.
 
-Building a private module unlocks two more tool surfaces:
-
-- **The write tools** — `place_order` / `place_oco` / `change_order` appear only when trading is enabled at startup; `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed. See [TRADING.md](TRADING.md).
-- **Five experiment-lab tools** (`start_experiment`, `experiment_status`, `experiment_result`, `list_experiments`, `diff_experiments`) appear only in a private bin that binds a `Lab` to your own backtest engine. The public server doesn't create `data/lab.db` at all.
+**Backtesting lives in [bedivere](https://github.com/WelokkDev/bedivere), not here.** The Strategy Lab this repo used to ship (the `start_experiment` tools) is deprecated and has been removed. bedivere is the public version of my Python engine: one loop runs both the backtest and the live session, so what you test is what you deploy. It ships no NinjaTrader connection; [`examples/python/`](examples/python/) here is where to start for one.
 
 **What's still poorly defined is the build-your-own backend.** [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md) gets you reliably from scaffold to your first custom tool, but past that point there are gaps, and you should expect to read source and makeshift:
 
-- **Binding your own backtest engine to the lab is improvised, not paved.** The runner port (`src/lab/runner/types.ts`) is documented in-code, but the result contract (`ExperimentResult`, the decision funnel) lives only in `src/lab/types.ts`, and the bundle layout the stock `NinjaTraderRunner` adapter expects (`summary.json` / `funnel.json` / `run-meta.json`) is implicit in `src/adapters/ninjatrader/map-bundle.ts`. You'll be lining shapes up by hand.
-- `ExperimentSpec` still carries fields from my own methodology (`strategy`, `smaPreset`); treat `extra` as the generic escape hatch for your engine's knobs.
-- **No worked recipe for the live feed in BUILD-YOUR-OWN.md** — `subscribe_live_bars` and the `/feed` channel are documented in [SETUP.md](SETUP.md) §8, but the only consumer example is `examples/python/live_feed_client.py`. Anything like "alert me when my signal triggers" is yours to assemble on top of it.
+- **No worked recipe for the live feed in BUILD-YOUR-OWN.md** — `subscribe_live_bars` is covered in [SETUP.md](SETUP.md) §8 and [`examples/python/`](examples/python/README.md) has a working `/feed` bot to start from, but wiring a feed consumer into your private module is yours to assemble.
 - **No CI yet** enforces the public-only build or the import boundary; discipline does.
 
 If you hit a wall composing a private module, that's expected at this stage — the seams are young. Issues describing where you had to improvise are the most useful kind. To start: **[BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)**.

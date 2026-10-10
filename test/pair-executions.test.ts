@@ -24,7 +24,6 @@ function fill(
     side,
     commission: null,
     account: "A",
-    raw: null,
     ...over,
   };
 }

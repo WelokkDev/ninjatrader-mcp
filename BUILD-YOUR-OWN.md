@@ -10,25 +10,24 @@ verifiable before moving on.
 
 ## 1. The model
 
-- `src/private/` is the user's own folder. It is **gitignored** — nothing in it
-  ever reaches the public repo, and the public code never imports from it. The
-  dependency is strictly one-way: private imports public.
+- `src/private/` is the user's own folder. It is **gitignored**: nothing in it
+  reaches the public repo, so never `git add -f` it or include it in a pull
+  request. To version it, `git init` **inside** it (a nested repo with its own
+  private remote).
+- The dependency is one-way: private imports public. If public code needs
+  private logic, put a generic seam in public and the implementation in
+  private.
 - Their private module is its own MCP server bin (`src/private/index.ts`) that
   boots the **whole public tool surface with one call** and then registers
   their own tools on top.
-- One **hub** process serves every MCP client. `scripts/mcp-entry.mjs` (what
-  `.mcp.json` runs) is a thin per-conversation shim that attaches to the hub
-  over loopback HTTP and starts it if none is running. The hub owns the
-  NinjaTrader bridge, the candle cache and the live feeds; each conversation
-  gets its own session, so any number can be open at once. The bin's `compose`
-  callback runs once per session, so keep process-once work (client_request
-  handlers, singletons) in `onRuntimeReady`.
-- Public compile stays private-free: `npm run typecheck` and the `tsc` step of
-  `npm run build` never compile `src/private/`. When a private module exists,
-  `npm run build` finishes by rebuilding it (same guard as
-  `npm run build:private`) so the two bundles never drift, and `npm test` DOES
-  run `src/private/tests/` when present. The private counterparts are
-  `npm run build:private` and `npm run typecheck:private`.
+- One **hub** process serves every MCP client ([SETUP.md](SETUP.md) §3). The
+  bin's `compose` callback runs once per conversation, so keep process-once
+  work (client_request handlers, singletons) in `onRuntimeReady`.
+- `npm run typecheck` and the `tsc` step of `npm run build` never compile
+  `src/private/`; the private counterparts are `npm run build:private` and
+  `npm run typecheck:private`. `npm run build` finishes by rebuilding an
+  existing private module, and `npm test` runs `src/private/tests/` when
+  present.
 
 ## 2. Scaffold
 
@@ -139,7 +138,7 @@ gitignored skills load exactly like tracked ones, and edits are picked up live
 - **Start from a template:** copy one from `.claude/skill-templates/` (tracked,
   shipped with the repo) into `.claude/skills/` and personalize it:
   ```
-  cp -r .claude/skill-templates/analyzing-backtest-results .claude/skills/analyzing-backtest-results
+  cp -r .claude/skill-templates/chart-drawing .claude/skills/chart-drawing
   ```
   Templates are NOT auto-discovered — only copies in `.claude/skills/` are.
 - **Write your own:** any `.claude/skills/<name>/SKILL.md` with `name` and a
@@ -167,24 +166,13 @@ gitignored skills load exactly like tracked ones, and edits are picked up live
 - **Look-ahead-safe logic**: when a tool reasons "as of" a historical moment,
   query with `timestamp <= asOf` cutoffs so nothing from the future leaks into
   the decision. Build frozen views once, pass them down.
-- **The ledger**: `trades` and `trade_decisions` tables (see `src/db/schema.ts`
-  and the `list_trades` / `list_decisions` tools) — write your decisions there
-  and they become queryable history.
+- **The ledger**: the `trades` table holds imported round trips, read with
+  `get_trades`. To import from another broker, implement `TradeSource`
+  (`src/trade-source/types.ts`) and pass it to `ingestTrades`.
 - **Session math**: never compute `days × bars/day` by hand — use the helpers
   in `src/core/sessions/` (holiday calendar, maintenance breaks, session-day
   ranges), same as `resolve_session_days` does.
-- **Experiments (needs an engine)**: once the user has their own backtest
-  runner, bind it to a `Lab` (see `src/lab/` — the generic orchestrator: store,
-  ETA, observability, crash recovery) and add
-  `registerExperimentTools(server, lab)` to their bin to get
-  `start_experiment` / `experiment_status` / `experiment_result` /
-  `list_experiments` / `diff_experiments` over their engine.
-
-## Etiquette
-
-- Never `git add -f src/private/`, never include it in a PR to the public repo.
-- To version the private module, `git init` **inside** `src/private/` (nested
-  repo with its own private remote).
-- Public code must never import from `src/private/` — if a public file needs
-  private logic, invert it: put a generic seam in public and the implementation
-  in private.
+- **Backtesting**: not in this repo. Point the user at
+  [bedivere](https://github.com/WelokkDev/bedivere), and at
+  [examples/python/](examples/python/README.md) to connect a Python engine to
+  this server.

@@ -95,6 +95,26 @@ const CONTRACT_SERVING_SQL = `
     END;
 `;
 
+// One imported round trip per row; (source, external_id) is the dedupe key.
+const TRADES_TABLE_SQL = `
+    CREATE TABLE IF NOT EXISTS trades (
+      trade_id    TEXT    PRIMARY KEY,
+      source      TEXT    NOT NULL,   -- adapter id, e.g. 'ninjatrader'
+      external_id TEXT    NOT NULL,   -- the source's own id for the round trip
+      symbol      TEXT    NOT NULL,
+      direction   TEXT    NOT NULL,   -- 'long' | 'short'
+      quantity    REAL,               -- largest position held; NULL only on rows that predate the column
+      entry_time  INTEGER NOT NULL,   -- unix seconds
+      entry_price REAL    NOT NULL,
+      exit_time   INTEGER,
+      exit_price  REAL,
+      commission  REAL,
+      created_at  INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id);
+`;
+
 export function initializeSchema(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -103,6 +123,7 @@ export function initializeSchema(db: Database.Database): void {
     );
   `);
   migrateCandlesTableToBars(db);
+  migrateTradesToImports(db);
 
   db.exec(`
     ${BARS_TABLE_SQL}
@@ -156,59 +177,7 @@ export function initializeSchema(db: Database.Database): void {
       updated_at INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS backtest_runs (
-      run_id        TEXT    PRIMARY KEY,
-      strategy_name TEXT    NOT NULL,
-      config_json   TEXT    NOT NULL,
-      symbol        TEXT    NOT NULL,
-      range_start   INTEGER NOT NULL,
-      range_end     INTEGER NOT NULL,
-      git_sha       TEXT,
-      created_at    INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS trades (
-      trade_id     TEXT    PRIMARY KEY,
-      run_id       TEXT,             -- null for paper/live trades
-      mode         TEXT    NOT NULL, -- 'backtest' | 'paper' | 'live'
-      symbol       TEXT    NOT NULL,
-      direction    TEXT    NOT NULL, -- 'long' | 'short'
-      entry_time   INTEGER NOT NULL,
-      entry_price  REAL    NOT NULL,
-      stop_price   REAL    NOT NULL,
-      target_price REAL    NOT NULL,
-      exit_time    INTEGER,
-      exit_price   REAL,
-      exit_reason  TEXT,             -- 'stop'|'target'|'gap-stop'|'gap-target'|'timeout'|'manual'
-      r_multiple   REAL,
-      zone_ref     TEXT,             -- opaque JSON zone reference (engine-defined shape)
-      decision_ref TEXT,             -- opaque JSON decision payload at entry
-      management_mode TEXT,          -- 'fixed'|'trailing'|'constrained' (backtest exit policy); null for legacy/live
-      bars_in_trade   INTEGER,       -- bars held until exit; null while open
-      mfe             REAL,          -- max favorable excursion in R; null while open
-      source          TEXT,          -- adapter id for imported trades (e.g. 'ninjatrader'); null for engine trades
-      external_id     TEXT,          -- broker round-trip/exec id; dedupe key for imported trades; null for engine trades
-      created_at   INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS trade_decisions (
-      decision_id TEXT    PRIMARY KEY,
-      run_id      TEXT,
-      symbol      TEXT    NOT NULL,
-      as_of       INTEGER NOT NULL,
-      verdict     TEXT    NOT NULL, -- 'yes' | 'no'
-      reason      TEXT,             -- short reason code for 'no'
-      trace_json  TEXT    NOT NULL,
-      created_at  INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS positions (
-      symbol        TEXT    PRIMARY KEY,
-      qty           INTEGER NOT NULL,
-      avg_price     REAL    NOT NULL,
-      open_trade_id TEXT,
-      updated_at    INTEGER NOT NULL
-    );
+    ${TRADES_TABLE_SQL}
 
     -- Append-only audit of every order-submission attempt — allowed, blocked,
     -- or failed. Distinct from the trades table (filled round-trips): this is
@@ -259,10 +228,6 @@ export function initializeSchema(db: Database.Database): void {
       reason          TEXT                -- caller-supplied rationale
     );
 
-    CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades (run_id);
-    CREATE INDEX IF NOT EXISTS idx_trades_mode ON trades (mode);
-    CREATE INDEX IF NOT EXISTS idx_trade_decisions_run_id
-      ON trade_decisions (run_id);
     CREATE INDEX IF NOT EXISTS idx_order_submissions_client_order_id
       ON order_submissions (client_order_id);
     CREATE INDEX IF NOT EXISTS idx_order_submissions_ts
@@ -311,15 +276,78 @@ export function initializeSchema(db: Database.Database): void {
       Math.floor(Date.now() / 1000),
     );
   })();
-  ensureColumn(db, "trades", "management_mode", "TEXT");
-  ensureColumn(db, "trades", "bars_in_trade", "INTEGER");
-  ensureColumn(db, "trades", "mfe", "REAL");
-  ensureColumn(db, "trades", "source", "TEXT");
-  ensureColumn(db, "trades", "external_id", "TEXT");
+  // Nothing ever read or wrote positions; one that someone did fill is left alone.
+  db.transaction(() => {
+    const done = db
+      .prepare("SELECT 1 FROM schema_migrations WHERE name = ?")
+      .get("positions_retired");
+    if (done) return;
+    if (columnsOf(db, "positions").length > 0) {
+      const { n } = db.prepare("SELECT COUNT(*) AS n FROM positions").get() as { n: number };
+      if (n === 0) {
+        db.exec("DROP TABLE positions");
+      } else {
+        console.error(`[schema] positions: ${n} row(s) in a table nothing uses; left in place`);
+      }
+    }
+    db.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)").run(
+      "positions_retired",
+      Math.floor(Date.now() / 1000),
+    );
+  })();
   ensureColumn(db, "order_submissions", "oco_group", "TEXT");
-  // Must come after ensureColumn so the column exists.
-  db.exec(
-    "CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id)",
+}
+
+// The table once also held a backtest engine's trades, in columns the import
+// never filled. Imported rows move to the current shape; an old table holding
+// anything else stays behind as trades_legacy.
+function migrateTradesToImports(db: Database.Database): void {
+  const isOldShape = (): boolean => columnsOf(db, "trades").includes("mode");
+  if (!isOldShape()) return;
+
+  db.transaction(() => {
+    if (!isOldShape()) return;
+    const old = columnsOf(db, "trades");
+    const hasImports = old.includes("source") && old.includes("external_id");
+    for (const index of ["idx_trades_run_id", "idx_trades_mode", "idx_trades_external_id"]) {
+      db.exec(`DROP INDEX IF EXISTS ${index}`);
+    }
+    db.exec("ALTER TABLE trades RENAME TO trades_legacy");
+    db.exec(TRADES_TABLE_SQL);
+    if (hasImports) {
+      db.exec(
+        `INSERT INTO trades
+           (trade_id, source, external_id, symbol, direction, entry_time, entry_price,
+            exit_time, exit_price, created_at)
+         SELECT trade_id, source, external_id, symbol, direction, entry_time, entry_price,
+                exit_time, exit_price, created_at
+           FROM trades_legacy
+          WHERE source IS NOT NULL AND external_id IS NOT NULL`,
+      );
+    }
+    const { n: stranded } = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM trades_legacy${
+          hasImports ? " WHERE source IS NULL OR external_id IS NULL" : ""
+        }`,
+      )
+      .get() as { n: number };
+    if (stranded === 0) {
+      db.exec("DROP TABLE trades_legacy");
+    } else {
+      console.error(
+        `[schema] trades: ${stranded} row(s) that are not imports stay in trades_legacy; nothing reads that table`,
+      );
+    }
+    db.prepare(
+      "INSERT OR REPLACE INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+    ).run("trades_import_only", Math.floor(Date.now() / 1000));
+  }).immediate();
+}
+
+function columnsOf(db: Database.Database, table: string): string[] {
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
+    (c) => c.name,
   );
 }
 
@@ -372,9 +400,6 @@ function ensureColumn(
   column: string,
   decl: string,
 ): void {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
-    name: string;
-  }>;
-  if (cols.some((c) => c.name === column)) return;
+  if (columnsOf(db, table).includes(column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }

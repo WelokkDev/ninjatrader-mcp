@@ -8,7 +8,6 @@ export interface RawExecution {
   side: "buy" | "sell";
   commission: number | null;
   account: string | null;
-  raw: unknown;                // original row (audit / never lose fields)
 }
 
 // A normalized round-trip trade (entry+exit), after pairing.
@@ -17,19 +16,16 @@ export interface RawTrade {
   source: string;              // adapter id, e.g. "ninjatrader"
   symbol: string;
   direction: "long" | "short";
-  entryTime: number;           // unix s — opening fill (drives later scoring)
+  entryTime: number;           // unix s — opening fill
   entryPrice: number;          // size-weighted avg if scaled in
   exitTime: number | null;
   exitPrice: number | null;    // size-weighted avg if scaled out; null while open
   quantity: number;            // max position size during the trade
   commission: number | null;   // summed across fills
-  realizedPnl: number | null;  // from broker if available, else null
-  raw: unknown;
 }
 
 // The fetch-only port. Every adapter implements this.
 export interface TradeSource {
   readonly id: string;
-  readonly capabilities: { serverSideRange: boolean; realizedPnl: boolean; commission: boolean };
   fetchTrades(range: { from: number; to: number }): Promise<RawTrade[]>;
 }

@@ -6,8 +6,6 @@ export default defineConfig({
     include: [
       "test/**/*.test.ts",
       "src/private/tests/**/*.test.ts",
-      "src/lab/**/*.test.ts",
-      "src/adapters/**/*.test.ts",
       "src/tools/**/*.test.ts",
       "src/core/**/*.test.ts",
       "src/bridge/**/*.test.ts",

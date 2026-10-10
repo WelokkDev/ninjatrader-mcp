@@ -39,23 +39,15 @@ npm install
 npm run build
 ```
 
-`npm run build` is private-free — it runs `tsc` and then a private-module build
-that **exits silently when `src/private/` is absent**. A fresh clone builds
-cleanly. (If you've read an older claim that the build requires `src/private/`,
-it's stale.)
+`npm run build` runs `tsc`, then a private-module step that exits silently when
+`src/private/` is absent, so a fresh clone builds cleanly.
 
 Verify: `build/index.js` exists.
 
 ## 3. First run — the database and your token
 
-There is **no database setup step**. Opening the connection creates everything:
-`src/db/connection.ts` runs `mkdirSync` on the data directory, opens
-`data/candles.db` in WAL mode, and calls `initializeSchema`, which creates all
-nine tables (`candles`, `draw_commands`, `session_calendar`,
-`live_subscriptions`, `live_position_feed`, `backtest_runs`, `trades`,
-`trade_decisions`, `positions`) plus indexes. Every statement is
-`CREATE TABLE IF NOT EXISTS` and the column migrations are idempotent, so this
-runs safely on every boot. Nothing to create by hand, ever.
+There is **no database setup step**. The first run creates `data/candles.db`
+(SQLite, WAL) and its schema, and every later boot re-checks it idempotently.
 
 The server is registered in `.mcp.json` already:
 
@@ -239,81 +231,17 @@ Restart your MCP client so it picks up the server, then:
 3. **`prefetch_status`** — call it with no `jobId` to list recent jobs. **Do
    check it**: this is how you catch days that failed instead of assuming the
    pull was clean. Jobs live in server memory and don't survive a restart.
-4. **`get_candles`** — read the range back. It's fail-closed: if the expected bar
-   count exceeds `limit` (default 500) it refuses rather than truncating, and
-   every response reports expected vs. actual counts with per-day validation.
+4. **`get_candles`** — read the range back. It refuses rather than truncates
+   when the range holds more bars than `limit` (default 500).
 
-The **session calendar needs no manual step**. A small bootstrap set of
-2026–2027 CME holidays is inserted offline, and on every NT8 `hello` the server
-syncs full holiday/early-close calendars for each registered template. Sync
-failures are logged and never break the connection.
+The **session calendar needs no manual step**: holidays and early closes sync
+from NT8 on every connect, and a sync failure never breaks the connection.
 
 **Offline alternative:** `npm run seed` loads the two tracked fixtures
 (`data/sample/ES_15m.csv`, `NQ_15m.csv`) into the cache and derives the higher
 timeframes — no NT8 required. It runs `build/scripts/seed.js` directly, so
 **build first**. It's ES/NQ 15m only: useful to prove the cache works, not a
 substitute for real history.
-
-### Vendor history (Databento) — not into this cache
-
-NT8 only retains about a year of tick data, and second-based bars are built from
-it, so a deeper `1s`/`5s` history still has to come from outside. It just does
-not come in *here*.
-
-**`data/candles.db` is the NT8 store, and only the NT8 store.** Vendor bars
-belong in a separate Parquet bar lake, and the two never mix in one table: the
-two sources roll contracts on different dates, so a range crossing a roll would
-hold different contracts depending on which rows happened to answer, with
-nothing in the response to say so. The old `npm run import-databento` /
-`npm run verify-import` pair wrote `source='databento'` rows straight into the
-cache — the exact thing that rule forbids — and has been removed.
-
-The bar lake and its ingest live in the **private module**, not in this repo (a
-fresh public clone has no lake and needs none — NT8 fills the cache). If you
-have a private module, the way in is `src/private/py/scripts/ingest_lake.py`.
-Session geometry is TS-owned and handed to Python as data, so it takes a
-resolved session-day envelope rather than computing one:
-
-```
-npm run build   # session-envelope.mjs reads the compiled session resolver
-
-node src/private/scripts/session-envelope.mjs \
-  --symbol MNQ --from 2024-01-02 --to 2026-08-13 --out src/private/py/mnq-days.json
-
-cd src/private/py && uv run --no-sync python scripts/ingest_lake.py \
-  --archive path/to/x.ohlcv-1s.dbn.zst --session mnq-days.json \
-  --symbol MNQ --timeframe 1s --dry-run
-```
-
-Request the batch with `schema=ohlcv-1s` and a parent symbol (`MNQ.FUT`); the
-ingest keeps outright contracts only and picks a **volume-ranked front month per
-session-day, without back-adjusting** — ranked on the *previous* day's volume,
-so a roll day carries no lookahead. Drop `--dry-run` to write. It writes one
-Parquet partition per session-day and then derives the resample ladder; re-runs
-replace whole partitions, so repeating one is safe.
-
-What stays in this repo is the read-only inspector. It never writes anywhere:
-
-```
-.venv-tools/Scripts/python scripts/inspect-dbn.py path/to/x.ohlcv-1s.dbn.zst
-```
-
-It prints the file's metadata, its `instrument_id -> raw_symbol` map and a
-per-contract per-day volume profile, and re-checks the two conversion
-assumptions any importer depends on — `ts_event` is the interval **start** in
-nanoseconds on an exact second boundary, and prices are int64 fixed-point at
-1e-9. (That first one is the classic silent bug: this cache is close-stamped, so
-an ingest that forgets to add a period lands every bar one period early, nothing
-errors, and backtests read the future.)
-
-It needs a one-time `python -m venv .venv-tools && .venv-tools/Scripts/pip
-install databento`. Deliberately its own venv, not `src/private/py/.venv` —
-public commands must not depend on the private module.
-
-If an older import left vendor rows in your cache, `node
-build/scripts/evict-vendor-rows.js` reports them (`--confirm` deletes and
-VACUUMs). Run it only *after* the same range is in the lake and verified there:
-it cannot see the lake, and deliberately does not pretend to.
 
 ## 7. Smoke test — draw on a chart
 
@@ -331,10 +259,7 @@ With `McpBridgeRenderer` attached to a chart, call `draw`:
 The line should appear on the chart. Then `clear_zones` with the same `id` (or no
 `id`, which clears what this conversation drew) removes it.
 
-Drawings survive chart reloads: the AddOn retains draw commands per symbol and
-the renderer replays them when the data series reloads. All drawing tools fail
-closed with a clear message when NT8 isn't connected — if `draw` reports that,
-go back to step 5.
+If `draw` reports that NT8 isn't connected, go back to step 5.
 
 Other shapes: `rectangle` (`proximal`, `distal`), `vline` (`ts`), `text` (`ts`,
 `price`, `text`). Timestamps are unix **seconds**.
@@ -342,10 +267,8 @@ Other shapes: `rectangle` (`proximal`, `distal`), `vline` (`ts`), `text` (`ts`,
 ## 8. Optional — live bar feed
 
 Stream closed bars from NT8 into the candle cache as they happen, instead of
-fetching after the fact. Requires the AddOn from step 4 to have been compiled
-from a source tree that includes `subscribe_bars` (recompile after updating
-`ninja-addon/addons/mcp-bridge.cs` if unsure — a subscribe that times out with
-a "recompile" hint means the AddOn predates it).
+fetching after the fact. A subscribe that times out with a "recompile" hint
+means the compiled AddOn predates the feature.
 
 Start a stream and check it:
 
@@ -354,37 +277,26 @@ subscribe_live_bars { "symbol": "MNQ", "timeframe": "5m" }
 live_feed_status {}
 ```
 
-`subscribe_live_bars` answers with the truth from NT8 — `acked: true` plus the
-resolved contract (e.g. `MNQ 09-26`) — not just "message sent". After the next
-5m boundary, `live_feed_status` shows the bar count and lag (expect ≤ ~2 s
-during RTH), and `get_candles` serves the bar from the cache immediately.
-Higher timeframes (30m–4h) derive automatically on 15m closes; `15s`, `5s` and
-`1s` work but are subscribe-on-demand only (seconds history is shallow
-provider-side, and shallower the finer the timeframe).
+`subscribe_live_bars` answers with `acked: true` and the resolved contract
+(e.g. `MNQ 09-26`). After the next 5m boundary, `live_feed_status` shows the
+bar count and lag (expect ≤ ~2 s during RTH), and `get_candles` serves the bar
+from the cache. The subscription persists across server restarts.
 
-Subscriptions persist across server restarts and replay whenever NT8
-reconnects; missed bars are healed automatically through `request_candles`
-(visible as `gapCount` in `live_feed_status`).
-
-**For bots and dashboards** there is a push channel on the same port:
-`ws://127.0.0.1:9472/feed`, authenticated with the same bearer token. A minimal
-Python consumer ships in the repo:
+**Bots and dashboards** connect to `ws://127.0.0.1:9472/feed` with the same
+bearer token. Check the pipe with the minimal consumer:
 
 ```bash
 pip install websockets
 python examples/python/live_feed_client.py MNQ 5m
 ```
 
-Subscribing on `/feed` creates the upstream NT8 stream too, so a bot is
-self-sufficient. Bars tagged `backfill: true` closed well before delivery
-(reconnect catch-up) — act-on-close logic must skip them.
+The protocol and an order-placing bot are in
+[examples/python/README.md](examples/python/README.md).
 
 ## 9. Optional — live position tracking
 
-Strictly **read-only** observation of your accounts — the bridge never places,
-changes, or cancels orders. Requires the AddOn to have been compiled from a
-source tree that includes `subscribe_positions` (a request that times out with
-a "recompile" hint means it predates the feature).
+Read-only observation of your accounts. A request that times out with a
+"recompile" hint means the compiled AddOn predates the feature.
 
 Check what's open right now (works with or without the feed):
 
@@ -392,12 +304,8 @@ Check what's open right now (works with or without the feed):
 get_positions {}
 ```
 
-Every position comes back with the account it belongs to (sim vs. live is
-flagged by name heuristic and never merged), average entry, working stops and
-targets matched into dollar risk and an R-multiple, and unrealized P&L computed
-from the freshest price the server knows — the answer says which price source
-it used and how old it is. When NT8 is disconnected the reply is marked
-`stale: true` with a warning: treat it as *unknown*, never as flat.
+When NT8 is disconnected the reply is marked `stale: true`: treat it as
+*unknown*, never as flat.
 
 Turn on the event feed for live-trade context:
 
@@ -405,15 +313,11 @@ Turn on the event feed for live-trade context:
 subscribe_live_positions {}
 ```
 
-While on, the AddOn streams fills, order changes, and position transitions
-(sparse events — not a P&L ticker), and pushes a full snapshot on subscribe,
-provider reconnect, and account changes so state self-heals. `get_positions`
-then also carries per-trade age, fill history, and MAE/MFE — excursion
-granularity follows whatever live bar feeds are running (a sub-minute bar sub
-on the traded symbol gives the finest picture — `1s` the finest of all). The toggle persists across server
-restarts and replays on every NT8 reconnect. Health lives in
-`live_feed_status` under `positions`; events also broadcast on the `/feed`
-channel (send `{"type": "subscribe_positions"}`).
+`get_positions` then also carries per-trade age, fill history and MAE/MFE.
+Excursion granularity follows whatever live bar feeds are running, so a
+sub-minute subscription on the traded symbol gives the finest picture. The
+toggle persists across server restarts, and its health is under `positions` in
+`live_feed_status`.
 
 ## 10. Optional — trade import
 
@@ -466,20 +370,10 @@ fails as `failed to parse config`. If you do use backslashes, double them (`\\`)
 `ninjatrader.config.json` is gitignored; the `.example.json` is tracked. Keep it
 that way — your config holds a local filesystem path and possibly an account name.
 
-**`dbPath`** is the only required key. **`account`** is optional: add it to
-restrict the import to a single NinjaTrader account.
-
-```json
-{
-  "dbPath": "C:/Users/YOUR_NAME/Documents/NinjaTrader 8/db/NinjaTrader.sqlite",
-  "account": "Sim101"
-}
-```
-
-The example deliberately omits `account`, because leaving it out imports **all**
-accounts — the safe default. Only add it once you know the exact account name as
-NinjaTrader spells it: the filter is an exact SQL match and a typo returns zero
-trades **silently**, with no error.
+**`dbPath`** is the only required key. Add `"account": "Sim101"` to restrict the
+import to one account; leaving it out imports **all** accounts, the safe
+default. Spell it exactly as NinjaTrader does: the filter is an exact match and
+a typo returns zero trades **silently**.
 
 **Finding `NinjaTrader.sqlite` — two traps:**
 
@@ -492,10 +386,8 @@ trades **silently**, with no error.
   `NinjaTrader-DESKTOP-XXXX.sqlite`. Use the plain, un-suffixed
   `NinjaTrader.sqlite`.
 
-**You do not need to close NinjaTrader.** The importer copies the database (plus
-its `-wal`/`-shm` siblings) to a temp snapshot, integrity-checks the copy, and
-opens it read-only. It never opens the live file read-write; a test enforces the
-source is byte-identical afterward.
+**You do not need to close NinjaTrader.** The importer reads a temp snapshot
+copy and never opens the live file.
 
 **Verify with `sync_trades`** (`from`, `to` as unix seconds), not `get_trades` —
 it always attempts an ingest, returns the diagnostic `{fetched, inserted}`, and
@@ -506,10 +398,9 @@ surfaces errors directly instead of swallowing them. Reading the result:
   `(source, external_id)`, so re-syncing is idempotent.
 - `fetched > 0, inserted: 0` on a **first** run usually means the range held only
   open positions — only closed round trips are imported.
-- `fetched: 0` with a configured `account` — the account filter is an exact SQL
-  match and yields zero rows **silently** on a typo. Check the name in NT8.
+- `fetched: 0` with a configured `account` — check the name's spelling in NT8.
 
-Then read them back with `get_trades` or `list_trades`.
+Then read them back with `get_trades`.
 
 ## 11. Optional — connection alerts
 
@@ -641,10 +532,22 @@ machines.
 | `NT_HUB_PORT` | `9474` | Port of the hub every conversation attaches to. Read from process env or `.env.local`. Always loopback; `NT_BRIDGE_HOST` does not apply to it. |
 | `NT_HUB_TOKEN` | generated into `.env.local` on first run | Shared secret between the per-conversation shims and the hub. |
 | `NT_NO_HUB` | unset | `1` makes the entry run the bin in-process for its one client (the pre-hub layout), same as `--stdio`. Useful with the MCP inspector. |
-| `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/` or `backtest-results/`, which stay repo-relative. |
+| `NT_DATA_PATH` | `<repo>/data` | Where `candles.db` lives. Note it does **not** move `data/sample/`, which stays repo-relative. |
 | `NT_TRADES_DB_PATH` | unset | Path to NT8's `NinjaTrader.sqlite`. Read from process env or `.env.local`. **Takes priority over the config file** — set this and no JSON config is needed. |
 | `NT_TRADES_ACCOUNT` | unset | Optional account filter to pair with `NT_TRADES_DB_PATH`. Leave unset to import all accounts. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. Only consulted when `NT_TRADES_DB_PATH` is unset. |
+| `NT_TRADING_*` | unset ⇒ **disabled** | The order write path. See [TRADING.md](TRADING.md). |
+
+### Config files
+
+| File | Where | Tracked? | Purpose |
+|---|---|---|---|
+| `.env.local` | repo root | no | The two tokens (created on first run), machine-specific values and, opt-in, the `NT_TRADING_*` variables. |
+| `ninjatrader.config.json` | repo root | no | `{ "dbPath": ..., "account"? }` for trade import (step 10). |
+| `bridge.config.json` | NT8 user data dir | — | `{ "token", "url" }`, the AddOn's connection config (step 3). |
+| `trading.config.json` | NT8 user data dir | — | The C#-side order gate; missing ⇒ write path disabled. See [TRADING.md](TRADING.md). |
+| `feed-watchdog.config.json` | NT8 user data dir | — | Optional connection-alert settings (step 11). |
+| `data/sample/*.csv` | repo | yes | 15m fixtures for `npm run seed`. |
 
 ### Running NT8 in a VM (Parallels / VMware) with the server on the host
 
@@ -736,14 +639,12 @@ its `-wal`/`-shm` siblings and integrity-checks the copy), just slower.
 
 ## 13. Next steps
 
-You now have the public tool surface: `get_candles`, `resolve_session_days`,
-`prefetch_candles` / `prefetch_status` / `prefetch_cancel`, `draw`,
-`clear_zones`, `list_trades`, `list_decisions`, `get_trades`, `sync_trades`.
+The public tool surface is set up; [README.md](README.md#mcp-tools) lists every
+tool. From here:
 
-The trading logic — zone detection, decision engines, strategies — is
-deliberately not here. It lives in your own gitignored `src/private/` module,
-composed on top of this substrate. `data/lab.db` and the experiment tools
-(`start_experiment` and friends) likewise only appear once you've bound a Lab to
-your own backtest engine; the public server doesn't create `lab.db` at all.
-
-To build your own: **[BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md)**.
+- **Orders** (default-off): [TRADING.md](TRADING.md).
+- **Python bots over `/feed`**: [examples/python/README.md](examples/python/README.md).
+- **Your own tools and strategy logic**: [BUILD-YOUR-OWN.md](BUILD-YOUR-OWN.md).
+  The trading logic is deliberately not in this repo.
+- **Backtesting**: [bedivere](https://github.com/WelokkDev/bedivere), a separate
+  repo.

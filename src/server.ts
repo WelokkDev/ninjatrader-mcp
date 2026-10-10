@@ -1,5 +1,4 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Lab } from "./lab/lab.js";
 import { startBridge, stopBridge } from "./bridge/index.js";
 import { consumerHub } from "./bridge/consumer.js";
 import { getExecutionService } from "./execution/service.js";
@@ -40,14 +39,7 @@ import {
   registerUnsubscribeLivePositions,
 } from "./tools/positions.js";
 import { getLiveFeedRuntime, startLiveFeedRuntime } from "./live/runtime.js";
-import { registerListTrades } from "./tools/list-trades.js";
-import { registerListDecisions } from "./tools/list-decisions.js";
 import { registerGetTrades, registerSyncTrades } from "./tools/get-trades.js";
-import { registerStartExperiment } from "./tools/start-experiment.js";
-import { registerExperimentStatus } from "./tools/experiment-status.js";
-import { registerExperimentResult } from "./tools/experiment-result.js";
-import { registerListExperiments } from "./tools/list-experiments.js";
-import { registerDiffExperiments } from "./tools/diff-experiments.js";
 import { registerPlaceOrder } from "./tools/place-order.js";
 import { registerPlaceOco } from "./tools/place-oco.js";
 import { registerChangeOrder } from "./tools/change-order.js";
@@ -92,8 +84,8 @@ export function announceToolGating(
 }
 
 /**
- * Every generic tool — the full public surface minus anything runner-gated and
- * list_sessions, which the hub registers.
+ * Every generic tool — the full public surface minus list_sessions, which the
+ * hub registers.
  *
  * `except` skips the stock registration for the named tools so a private bin
  * can register its own replacement under the same name (the MCP SDK rejects
@@ -131,8 +123,6 @@ export function registerGenericTools(
   unless(["get_positions"], () => registerGetPositions(server));
   unless(["subscribe_live_positions"], () => registerSubscribeLivePositions(server));
   unless(["unsubscribe_live_positions"], () => registerUnsubscribeLivePositions(server));
-  unless(["list_trades"], () => registerListTrades(server));
-  unless(["list_decisions"], () => registerListDecisions(server));
   unless(["get_trades"], () => registerGetTrades(server));
   unless(["sync_trades"], () => registerSyncTrades(server));
   // Risk-ADDING write tools — registered ONLY when trading is enabled at
@@ -155,18 +145,6 @@ export function registerGenericTools(
       registerFlatten(server, session);
     }
   });
-}
-
-/**
- * Strategy Lab — async experiment orchestration + observability. Runner-gated:
- * only meaningful when the caller can supply a Lab bound to a backtest engine.
- */
-export function registerExperimentTools(server: McpServer, lab: Lab): void {
-  registerStartExperiment(server, lab);
-  registerExperimentStatus(server, lab);
-  registerExperimentResult(server, lab);
-  registerListExperiments(server, lab);
-  registerDiffExperiments(server, lab);
 }
 
 /** NT8 bridge + live/candles ingest + calendar sync. Run exactly one process. */
