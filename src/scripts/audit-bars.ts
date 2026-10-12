@@ -24,6 +24,7 @@ import {
 import { loadCalendar, type SessionCalendar } from "../core/sessions/calendar.js";
 import { formatExchangeTime } from "../core/time.js";
 import {
+  isAcceptableSparseMismatch,
   SPARSE_TOLERANCE,
   validateSessionDay,
   type ValidationResult,
@@ -59,6 +60,8 @@ interface SparseObservation {
 }
 
 function observeSparse(r: ValidationResult): SparseObservation | null {
+  // A day verified against its daily bar says nothing about the allowance.
+  if (!isAcceptableSparseMismatch(r)) return null;
   // Read the period off the grid itself so this works for any fixed-period TF.
   if (r.missing.length === 0 || r.expected.length < 2) return null;
   const period = r.expected[1] - r.expected[0];

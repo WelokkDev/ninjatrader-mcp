@@ -3,9 +3,7 @@ import type { SessionSpan, SessionTemplate } from "./types.js";
 // Shared Globex weekly ETH schedule: Sun 18:00 ET → Fri 17:00 ET, one
 // span per Mon-Fri close-day; the daily 17:00–18:00 ET maintenance break
 // is emergent (the gap between spans, not a declared break). Shared by
-// the three ETH templates below — do not mutate.
-//
-// Schedule pending user verification against actual NT8 templates.
+// the ETH templates below — do not mutate.
 const GLOBEX_WEEKLY_SPANS: SessionSpan[] = [
   { openWeekday: 0, openTime: "18:00", closeWeekday: 1, closeTime: "17:00" }, // Mon session
   { openWeekday: 1, openTime: "18:00", closeWeekday: 2, closeTime: "17:00" }, // Tue session
@@ -17,6 +15,7 @@ const GLOBEX_WEEKLY_SPANS: SessionSpan[] = [
 // CME index futures Globex/ETH session.
 export const CME_US_INDEX_FUTURES_ETH: SessionTemplate = {
   name: "cme_us_index_futures_eth",
+  nt8TradingHours: "CME US Index Futures ETH",
   description: "CME US Index Futures ETH (Globex). Sun 18:00 → Fri 17:00 ET, daily 17–18 ET maintenance break.",
   timezone: "America/New_York",
   spans: GLOBEX_WEEKLY_SPANS,
@@ -28,6 +27,7 @@ export const CME_US_INDEX_FUTURES_ETH: SessionTemplate = {
 // the consolidation being self-evident.
 export const NYMEX_ENERGY_ETH: SessionTemplate = {
   name: "nymex_energy_eth",
+  nt8TradingHours: "Nymex Metals - Energy ETH",
   description: "NYMEX energy futures on Globex. Sun 18:00 → Fri 17:00 ET, daily 17–18 ET maintenance break.",
   timezone: "America/New_York",
   spans: GLOBEX_WEEKLY_SPANS,
@@ -38,7 +38,17 @@ export const NYMEX_ENERGY_ETH: SessionTemplate = {
 // reason as NYMEX_ENERGY_ETH.
 export const COMEX_METALS_ETH: SessionTemplate = {
   name: "comex_metals_eth",
+  nt8TradingHours: "Nymex Metals - Energy ETH",
   description: "COMEX metals futures on Globex. Sun 18:00 → Fri 17:00 ET, daily 17–18 ET maintenance break.",
+  timezone: "America/New_York",
+  spans: GLOBEX_WEEKLY_SPANS,
+};
+
+// Same schedule; its own template because NT8 keeps a separate holiday list for FX.
+export const CME_FX_FUTURES_ETH: SessionTemplate = {
+  name: "cme_fx_futures_eth",
+  nt8TradingHours: "CME FX Futures ETH",
+  description: "CME FX futures on Globex. Sun 18:00 → Fri 17:00 ET, daily 17–18 ET maintenance break.",
   timezone: "America/New_York",
   spans: GLOBEX_WEEKLY_SPANS,
 };

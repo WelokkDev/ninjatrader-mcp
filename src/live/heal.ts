@@ -1,4 +1,6 @@
 import { getInstrumentConfig } from "../core/sessions/registry.js";
+import { tradingHoursFields } from "../core/sessions/nt8-hours.js";
+import type { SessionTemplate } from "../core/sessions/types.js";
 import type { DetectedGap } from "./recorder.js";
 import type { LiveTimeframe } from "./registry.js";
 
@@ -79,9 +81,9 @@ export class GapHealer {
       return { requested: false, reason: "bridge not connected" };
     }
 
-    let template: string;
+    let template: SessionTemplate;
     try {
-      template = getInstrumentConfig(gap.symbol).session.name;
+      template = getInstrumentConfig(gap.symbol).session;
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       return { requested: false, reason: m };
@@ -117,7 +119,7 @@ export class GapHealer {
           timeframe: gap.timeframe,
           from,
           to,
-          tradingHoursTemplate: template,
+          ...tradingHoursFields(template),
         },
         HEAL_REQUEST_TIMEOUT_MS,
       );

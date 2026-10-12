@@ -205,6 +205,34 @@ describe("resolve_session_days with a session calendar", () => {
   });
 });
 
+describe("resolve_session_days nt8Hours", () => {
+  const check = (differences: string[]) => () => ({
+    nt8Template: "CME US Index Futures ETH",
+    differences,
+    nt8Sessions: "Sun 17:00 → Mon 16:00 [Mon] (Central Standard Time)",
+  });
+
+  async function nqToday(nt8HoursCheck?: ReturnType<typeof check>) {
+    const handler = createResolveSessionDaysHandler({ now: () => WED_1500_ET, nt8HoursCheck });
+    const res = await handler({ symbol: "NQ", relative: "today" } as never);
+    return JSON.parse(res.content[0].text);
+  }
+
+  it("is absent when NT8 agrees, and when NT8 has not been asked", async () => {
+    expect(await nqToday(check([]))).not.toHaveProperty("nt8Hours");
+    expect(await nqToday()).not.toHaveProperty("nt8Hours");
+  });
+
+  it("lists where NT8's template differs", async () => {
+    const out = await nqToday(check(["Mon opens Sun 19:00 in NT8, Sun 18:00 here"]));
+    expect(out.nt8Hours).toEqual({
+      nt8Template: "CME US Index Futures ETH",
+      nt8Sessions: "Sun 17:00 → Mon 16:00 [Mon] (Central Standard Time)",
+      differences: ["Mon opens Sun 19:00 in NT8, Sun 18:00 here"],
+    });
+  });
+});
+
 describe("resolve_session_days input validation", () => {
   it("requires exactly one of explicit range or relative", async () => {
     expect(await resolve(WED_1500_ET, {})).toMatch(/either/i);

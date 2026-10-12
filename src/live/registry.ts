@@ -1,6 +1,8 @@
 import type { Database } from "better-sqlite3";
 import { LIVE_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig } from "../core/sessions/registry.js";
+import { tradingHoursFields } from "../core/sessions/nt8-hours.js";
+import type { SessionTemplate } from "../core/sessions/types.js";
 import type {
   BarCloseMessage,
   SubscribeAckMessage,
@@ -66,7 +68,7 @@ export interface RegistryDeps {
 interface SubEntry {
   symbol: string;
   timeframe: LiveTimeframe;
-  tradingHoursTemplate: string;
+  template: SessionTemplate;
   sources: Set<string>;
   acked: boolean;
   contract: string | null;
@@ -109,9 +111,9 @@ export class LiveSubscriptionRegistry {
       .all() as Array<{ symbol: string; timeframe: string; created_at: number }>;
     for (const row of rows) {
       if (this.subs.has(key(row.symbol, row.timeframe))) continue;
-      let template: string;
+      let template: SessionTemplate;
       try {
-        template = getInstrumentConfig(row.symbol).session.name;
+        template = getInstrumentConfig(row.symbol).session;
       } catch {
         console.error(
           `[live-registry] dropping persisted sub for unknown symbol ${row.symbol}`,
@@ -121,7 +123,7 @@ export class LiveSubscriptionRegistry {
       this.subs.set(key(row.symbol, row.timeframe), {
         symbol: row.symbol,
         timeframe: row.timeframe as LiveTimeframe,
-        tradingHoursTemplate: template,
+        template,
         sources: new Set([PERSISTED_SOURCE]),
         acked: false,
         contract: null,
@@ -139,9 +141,9 @@ export class LiveSubscriptionRegistry {
     timeframe: LiveTimeframe,
     source: string,
   ): Promise<EnsureResult> {
-    let template: string;
+    let template: SessionTemplate;
     try {
-      template = getInstrumentConfig(symbol).session.name;
+      template = getInstrumentConfig(symbol).session;
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       return { ok: false, state: this.deadState(symbol, timeframe), error: m };
@@ -163,7 +165,7 @@ export class LiveSubscriptionRegistry {
       entry = {
         symbol,
         timeframe,
-        tradingHoursTemplate: template,
+        template,
         sources: new Set(),
         acked: false,
         contract: null,
@@ -203,7 +205,7 @@ export class LiveSubscriptionRegistry {
         {
           symbol: entry.symbol,
           timeframe: entry.timeframe,
-          tradingHoursTemplate: entry.tradingHoursTemplate,
+          ...tradingHoursFields(entry.template),
         },
         SUBSCRIBE_TIMEOUT_MS,
       )) as SubscribeAckMessage;

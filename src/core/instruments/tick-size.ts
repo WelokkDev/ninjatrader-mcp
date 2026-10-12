@@ -23,10 +23,16 @@ export const INSTRUMENTS: Record<string, Readonly<InstrumentSpec>> = {
   MNQ: { tickSize: 0.25, pointValue: 2 },    // $0.50/tick
   MYM: { tickSize: 1.0,  pointValue: 0.5 },  // $0.50/tick
   M2K: { tickSize: 0.1,  pointValue: 5 },    // $0.50/tick
-  // NYMEX energy — quoted in $/barrel over a 1,000 bbl contract.
+  // NYMEX energy — quoted in $/barrel; pointValue is the contract's barrels.
   CL:  { tickSize: 0.01, pointValue: 1000 }, // $10.00/tick
-  // COMEX metals — quoted in $/troy oz over a 100 oz contract.
+  MCL: { tickSize: 0.01, pointValue: 100 },  // $1.00/tick
+  // COMEX metals — quoted in $/troy oz; pointValue is the contract's ounces.
   GC:  { tickSize: 0.1,  pointValue: 100 },  // $10.00/tick
+  MGC: { tickSize: 0.1,  pointValue: 10 },   // $1.00/tick
+  SIL: { tickSize: 0.005, pointValue: 1000 }, // $5.00/tick
+  // CME FX — quoted in USD per unit; pointValue is the contract's units.
+  M6A: { tickSize: 0.0001, pointValue: 10000 }, // $1.00/tick
+  M6E: { tickSize: 0.0001, pointValue: 12500 }, // $1.25/tick
 };
 
 export function getInstrument(symbol: string): Readonly<InstrumentSpec> {

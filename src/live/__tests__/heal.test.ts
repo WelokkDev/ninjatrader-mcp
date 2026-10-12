@@ -46,6 +46,7 @@ describe("GapHealer", () => {
         from: NOW - 3_600 - 300,
         to: NOW - 3_000 + 300,
         tradingHoursTemplate: "cme_us_index_futures_eth",
+        nt8TradingHours: "CME US Index Futures ETH",
       },
       expect.any(Number),
     );

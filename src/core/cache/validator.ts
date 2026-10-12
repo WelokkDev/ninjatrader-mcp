@@ -1,6 +1,7 @@
 import type { Database } from "better-sqlite3";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import type { Timeframe } from "../types.js";
+import { REGISTRY } from "../sessions/registry.js";
 
 // Intraday period lengths. "1d" has no fixed period — its geometry is the
 // session-day itself (see DAILY_* below), so it is absent by design and every
@@ -72,6 +73,80 @@ export function isAcceptableSparseMismatch(
   return true;
 }
 
+// NT8's tick, minute and day stores drift by a fraction of a percent; a real hole is far larger.
+export const THIN_VOLUME_TOLERANCE = 0.005;
+
+// A day and its 1d bar fetched mid-session agree, so volume cannot tell it from a finished one.
+const THIN_CLOSE_WINDOW_SECONDS = 900;
+
+function isThin(symbol: string): boolean {
+  return REGISTRY[symbol]?.density === "thin";
+}
+
+export function mayNeedDailyBar(symbol: string, timeframe: Timeframe): boolean {
+  return !isDaily(timeframe) && isThin(symbol);
+}
+
+/** The day's own bars hold more than its 1d bar: that bar was fetched before the close. */
+function overDailyBar(volume: number, daily: number): boolean {
+  return volume - daily > daily * THIN_VOLUME_TOLERANCE;
+}
+
+function sessionVolume(
+  db: Database,
+  symbol: string,
+  day: Pick<SessionDay, "startUnix" | "endUnix">,
+  timeframe: Timeframe,
+): number | null {
+  const row = db
+    .prepare(
+      `SELECT SUM(volume) AS v FROM candles
+        WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
+    )
+    .get(symbol, timeframe, day.startUnix, day.endUnix) as { v: number | null };
+  return row.v;
+}
+
+function volumeDefect(
+  day: SessionDay,
+  actual: readonly number[],
+  volume: number,
+  daily: number | null,
+): string | undefined {
+  const toClose = day.endUnix - actual[actual.length - 1];
+  if (toClose >= THIN_CLOSE_WINDOW_SECONDS) {
+    return `last bar is ${toClose}s before the session close`;
+  }
+  if (daily === null) return "no 1d bar cached to check its volume against";
+  if (Math.abs(volume - daily) > daily * THIN_VOLUME_TOLERANCE) {
+    return `volume ${volume} vs ${daily} on the 1d bar`;
+  }
+  return undefined;
+}
+
+// Named one by one so the query below can seek on (symbol, timeframe, timestamp).
+const INTRADAY_TIMEFRAMES_SQL = Object.keys(SECONDS_PER_TIMEFRAME)
+  .map((tf) => `'${tf}'`)
+  .join(", ");
+
+function staleDailyDefect(db: Database, symbol: string, day: SessionDay): string | undefined {
+  const daily = sessionVolume(db, symbol, day, "1d");
+  if (daily === null) return undefined;
+  const row = db
+    .prepare(
+      `SELECT MAX(v) AS v FROM (
+         SELECT SUM(volume) AS v FROM candles
+          WHERE symbol = ? AND timeframe IN (${INTRADAY_TIMEFRAMES_SQL})
+            AND timestamp > ? AND timestamp <= ?
+          GROUP BY timeframe)`,
+    )
+    .get(symbol, day.startUnix, day.endUnix) as { v: number | null };
+  if (row.v !== null && overDailyBar(row.v, daily)) {
+    return `1d volume ${daily} is below the ${row.v} cached intraday — fetched before the close`;
+  }
+  return undefined;
+}
+
 /**
  * Expected bar count for one (session-day, timeframe) from pure session
  * geometry: full periods within (startUnix, endUnix] plus a trailing stub
@@ -133,12 +208,17 @@ export interface ValidationResult {
   extra: number[];
   status: ValidationStatus;
   skipReason?: string;
+  /** Why a day read off its daily bar failed that check. */
+  note?: string;
+  /** The cache holds no 1d bar to verify the day against, or one fetched before the close. */
+  needsDailyBar?: true;
 }
 
 /**
  * Structural validation of cached bars for one (session-day, timeframe).
  * Compares the bars actually in the DB against what the session-day
- * geometry says should be there. Does NOT check OHLCV values.
+ * geometry says should be there. Does NOT check OHLCV values, except the
+ * volume of a day read off its daily bar (see volumeDefect).
  *
  * Skip rule: in-progress session-days (endUnix > nowUnix) return
  * "skipped". Everything else is either "ok" or "mismatch".
@@ -216,12 +296,26 @@ export function validateSessionDay(
 
   // Sparseness is decided here so every consumer agrees without
   // re-deciding; `missing` stays populated for diagnostics.
-  const status: ValidationStatus =
-    missing.length === 0 && extra.length === 0
-      ? "ok"
-      : isAcceptableSparseMismatch({ timeframe, expected, missing, extra })
-        ? "ok"
-        : "mismatch";
+  const shape = { timeframe, expected, missing, extra };
+  let status: ValidationStatus;
+  let note: string | undefined;
+  let needsDailyBar = false;
+  if (extra.length > 0) {
+    status = "mismatch";
+  } else if (missing.length === 0) {
+    if (isThin(symbol) && isDaily(timeframe)) note = staleDailyDefect(db, symbol, sessionDay);
+    status = note === undefined ? "ok" : "mismatch";
+  } else if (!isThin(symbol) && isAcceptableSparseMismatch(shape)) {
+    status = "ok";
+  } else if (isThin(symbol) && actual.length > 0 && !isDaily(timeframe)) {
+    const daily = sessionVolume(db, symbol, sessionDay, "1d");
+    const volume = sessionVolume(db, symbol, sessionDay, timeframe) ?? 0;
+    note = volumeDefect(sessionDay, actual, volume, daily);
+    needsDailyBar = daily === null || overDailyBar(volume, daily);
+    status = note === undefined ? "ok" : "mismatch";
+  } else {
+    status = "mismatch";
+  }
 
   return {
     ...base,
@@ -230,5 +324,7 @@ export function validateSessionDay(
     missing,
     extra,
     status,
+    ...(note !== undefined && { note }),
+    ...(needsDailyBar && { needsDailyBar: true as const }),
   };
 }

@@ -4,7 +4,7 @@ import { initializeSchema } from "../../../db/schema.js";
 import { PrefetchManager, type BridgeRequest } from "../prefetch.js";
 import { recordContractEvent } from "../contracts.js";
 import { ingestCandles } from "../../../bridge/ingest.js";
-import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
+import { CME_FX_FUTURES_ETH, CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
 import type { SessionDay } from "../../sessions/types.js";
 
 const unix = (y: number, mo1: number, d: number, h: number): number =>
@@ -431,6 +431,73 @@ describe("PrefetchManager jobs", () => {
     expect(all.jobs.map((j) => j.jobId)).toEqual([b.job.jobId, a.job.jobId]);
 
     expect(m.status("pf-nope")).toMatchObject({ error: expect.stringMatching(/unknown/i) });
+  });
+});
+
+describe("the daily bar a day is verified against", () => {
+  // NT8 for a thin symbol: four empty 15m buckets, and a 1d bar matching each day's volume.
+  function thinFake(db: Database.Database) {
+    const calls: Array<Record<string, unknown>> = [];
+    const bar = db.prepare(
+      `INSERT OR REPLACE INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('M6E', ?, ?, 1, 2, 0.5, 1.5, ?)`,
+    );
+    const request: BridgeRequest = async (_type, payload) => {
+      calls.push(payload);
+      const from = payload.from as number;
+      const to = payload.to as number;
+      if (payload.timeframe === "1d") {
+        for (const d of [D1, D2, D3]) if (d.endUnix > from && d.endUnix <= to) bar.run("1d", d.endUnix, 880);
+      } else {
+        for (let t = from + 900, i = 0; t <= to; t += 900, i++) {
+          if (![0, 1, 2, 40].includes(i)) bar.run("15m", t, 10);
+        }
+      }
+      return {};
+    };
+    return { request, calls };
+  }
+
+  it("is fetched once for the whole job, after the first day's own bars", async () => {
+    const db = memDb();
+    const { request, calls } = thinFake(db);
+    const m = manager(db, request);
+    const res = m.startJob({ symbol: "M6E", rawTimeframe: "15m", days: [D1, D2], template: CME_FX_FUTURES_ETH });
+    if ("error" in res) throw new Error(res.error);
+    await m.whenSettled(res.job.jobId);
+
+    expect(m.status(res.job.jobId)).toMatchObject({
+      job: { state: "completed", fetched: 2, failed: 0 },
+    });
+    expect(calls.map((c) => [c.timeframe, c.from, c.to])).toEqual([
+      ["15m", D1.startUnix, D1.endUnix],
+      ["1d", D1.startUnix, D2.endUnix],
+      ["15m", D2.startUnix, D2.endUnix],
+    ]);
+  });
+
+  it("stops at a cancel that lands while the daily bar is being fetched", async () => {
+    const db = memDb();
+    const bar = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('M6E', '15m', ?, 1, 2, 0.5, 1.5, 10)`,
+    );
+    for (let t = D1.startUnix + 900, i = 0; t <= D1.endUnix; t += 900, i++) {
+      if (![0, 1, 2, 40].includes(i)) bar.run(t);
+    }
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    const res = m.startJob({ symbol: "M6E", rawTimeframe: "15m", days: [D1], template: CME_FX_FUTURES_ETH });
+    if ("error" in res) throw new Error(res.error);
+    await flush();
+    expect(calls.map((c) => c.payload.timeframe)).toEqual(["1d"]);
+
+    m.cancel(res.job.jobId);
+    calls[0].release();
+    await m.whenSettled(res.job.jobId);
+
+    expect(calls).toHaveLength(1);
+    expect(m.status(res.job.jobId)).toMatchObject({ job: { state: "cancelled", cancelled: 1 } });
   });
 });
 

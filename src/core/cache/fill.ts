@@ -3,6 +3,7 @@ import type { Timeframe } from "../types.js";
 import { isSubMinuteTimeframe } from "../constants.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDayRange, sessionDaysOverlapping } from "../sessions/session-day.js";
+import { tradingHoursFields } from "../sessions/nt8-hours.js";
 import {
   loadCalendar,
   recordObservedClose,
@@ -10,7 +11,7 @@ import {
 } from "../sessions/calendar.js";
 import { wallClockHHMM } from "../time.js";
 import { getInstrumentConfig, REGISTRY } from "../sessions/registry.js";
-import { mismatchIsEmpty, validateSessionDay } from "./validator.js";
+import { mayNeedDailyBar, mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
 import { frontContractFor, servesMixedContracts, soleAttestedContract } from "./contracts.js";
 import { UNATTESTED_CONTRACT } from "../../db/schema.js";
@@ -194,6 +195,49 @@ export interface EnsureCachedResult {
   simFeedRejected: boolean;
 }
 
+/** Best-effort. `through` widens the request so it also covers the rest of a batch. */
+export async function fetchMissingDailyBars(
+  db: Database,
+  symbol: string,
+  days: SessionDay[],
+  timeframe: Timeframe,
+  template: SessionTemplate,
+  request: EnsureCachedDeps["request"],
+  nowUnix: number,
+  through?: number,
+): Promise<void> {
+  // An imported day is never re-judged, so it is never waiting on a daily bar.
+  const waiting = days.filter(
+    (day) =>
+      !isImportedSource(sessionDaySource(db, symbol, day, timeframe)) &&
+      validateSessionDay(db, symbol, day, timeframe, nowUnix).needsDailyBar,
+  );
+  const windows = planFetchWindows(
+    waiting.map((day) => ({ day, class: "empty" as const })),
+    "1d",
+  );
+  for (const window of windows) {
+    try {
+      await request(
+        "request_candles",
+        {
+          symbol,
+          timeframe: "1d",
+          from: window.startUnix,
+          to: Math.max(window.endUnix, through ?? window.endUnix),
+          ...tradingHoursFields(template),
+        },
+        candleFetchTimeoutMs("1d"),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[fill] daily bar for ${symbol} ${window.labels[0]} → ${window.labels[window.labels.length - 1]} not fetched: ${msg}`,
+      );
+    }
+  }
+}
+
 /**
  * Validate → plan → fetch orchestrator for the raw timeframe that backs
  * a `get_candles` request. Called BEFORE the terminal SELECT so the
@@ -225,6 +269,11 @@ export async function ensureCached(
   // Calendar-aware enumeration: closed days don't exist; timed early-close
   // days carry adjusted geometry so they can classify complete.
   const days = sessionDaysOverlapping(startTs, endTs, template, calendar);
+  // A cached day waiting only on its daily bar is settled by that bar, not a refetch.
+  const wantsDailyBar = mayNeedDailyBar(symbol, rawTimeframe);
+  if (wantsDailyBar && deps.isConnected()) {
+    await fetchMissingDailyBars(db, symbol, days, rawTimeframe, template, deps.request, nowUnix);
+  }
   const classifications: DayClassification[] = days.map((day) => ({
     day,
     class: classifySessionDay(db, symbol, day, rawTimeframe, nowUnix),
@@ -281,7 +330,7 @@ export async function ensureCached(
           timeframe: rawTimeframe,
           from: window.startUnix,
           to: window.endUnix,
-          tradingHoursTemplate: template.name,
+          ...tradingHoursFields(template),
         },
         candleFetchTimeoutMs(rawTimeframe),
       );
@@ -346,6 +395,18 @@ export async function ensureCached(
         }
       }
     }
+  }
+
+  if (wantsDailyBar) {
+    await fetchMissingDailyBars(
+      db,
+      symbol,
+      fetchedWindows.flatMap((w) => w.days),
+      rawTimeframe,
+      template,
+      deps.request,
+      nowUnix,
+    );
   }
 
   return result;

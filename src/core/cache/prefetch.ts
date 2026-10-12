@@ -3,14 +3,16 @@ import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import type { Timeframe } from "../types.js";
 import { loadCalendar } from "../sessions/calendar.js";
 import { sessionDayRange } from "../sessions/session-day.js";
+import { tradingHoursFields } from "../sessions/nt8-hours.js";
 import {
   classifySessionDay,
   candleFetchTimeoutMs,
   DAILY_FETCH_BATCH_DAYS,
+  fetchMissingDailyBars,
   observeEarlyClose,
   withCandleTimeoutHint,
 } from "./fill.js";
-import { expectedBarCount } from "./validator.js";
+import { expectedBarCount, mayNeedDailyBar, validateSessionDay } from "./validator.js";
 import {
   contractEventsFor,
   describeContractEvent,
@@ -323,8 +325,29 @@ export class PrefetchManager {
       }
     };
 
+    const wantsDailyBar = mayNeedDailyBar(job.symbol, job.rawTimeframe);
+    const dailyBarFor = (nowSec: number): Promise<void> =>
+      fetchMissingDailyBars(
+        this.deps.db,
+        job.symbol,
+        [freshDay()],
+        job.rawTimeframe,
+        job.template,
+        this.deps.request,
+        nowSec,
+        this.dailyBatchEnd(job, d, nowSec),
+      );
+
     {
       const nowSec = Math.floor(this.nowMs() / 1000);
+      if (wantsDailyBar) {
+        await dailyBarFor(nowSec);
+        if (this.isCancelled(job)) {
+          d.state = "cancelled";
+          this.finalizeIfDone(job);
+          return;
+        }
+      }
       if (
         classifySessionDay(this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec) ===
         "complete"
@@ -350,7 +373,7 @@ export class PrefetchManager {
           timeframe: job.rawTimeframe,
           from: d.day.startUnix,
           to,
-          tradingHoursTemplate: job.template.name,
+          ...tradingHoursFields(job.template),
         },
         candleFetchTimeoutMs(job.rawTimeframe),
       );
@@ -359,6 +382,7 @@ export class PrefetchManager {
       // handler before this continuation resumes. Against current geometry,
       // since ingest stored the bars under the current calendar.
       const nowSec = Math.floor(this.nowMs() / 1000);
+      if (wantsDailyBar && !this.isCancelled(job)) await dailyBarFor(nowSec);
       const cls = classifySessionDay(this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec);
       if (cls === "complete") {
         d.state = "fetched";
@@ -371,9 +395,14 @@ export class PrefetchManager {
         d.state = "fetched";
       } else {
         d.state = "failed";
+        const { note } = validateSessionDay(
+          this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec,
+        );
         d.error = servesMixedContracts(this.deps.db, job.symbol, job.rawTimeframe, freshDay())
           ? "response received but the day still serves bars from two contracts — NinjaTrader sent no bars to assign its front contract; prefetch a timeframe not yet cached for that day to assign it"
-          : `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
+          : note !== undefined
+            ? `response received but the day does not verify — ${note}`
+            : `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
       }
       job.durationsMs.push(this.nowMs() - t0);
     } catch (err) {
@@ -383,16 +412,21 @@ export class PrefetchManager {
     this.finalizeIfDone(job);
   }
 
+  // A method, so a check made after an await is not narrowed away.
+  private isCancelled(job: Job): boolean {
+    return job.state === "cancelled";
+  }
+
   /** End of the batched daily request that starts at `d`: the end of the last
    *  of the next DAILY_FETCH_BATCH_DAYS still-pending days in this job. Never
-   *  reaches outside the job's own days. */
-  private dailyBatchEnd(job: Job, d: JobDay): number {
+   *  reaches outside the job's own days, nor past `closedBy` when given. */
+  private dailyBatchEnd(job: Job, d: JobDay, closedBy = Infinity): number {
     const from = job.days.indexOf(d);
     if (from < 0) return d.day.endUnix;
     let end = d.day.endUnix;
     let taken = 1;
     for (let i = from + 1; i < job.days.length && taken < DAILY_FETCH_BATCH_DAYS; i++) {
-      if (job.days[i].state !== "pending") continue;
+      if (job.days[i].state !== "pending" || job.days[i].day.endUnix > closedBy) continue;
       end = job.days[i].day.endUnix;
       taken++;
     }

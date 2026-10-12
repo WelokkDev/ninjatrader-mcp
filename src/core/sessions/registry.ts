@@ -1,4 +1,5 @@
 import {
+  CME_FX_FUTURES_ETH,
   CME_US_INDEX_FUTURES_ETH,
   COMEX_METALS_ETH,
   NYMEX_ENERGY_ETH,
@@ -9,10 +10,6 @@ import type { InstrumentConfig } from "./types.js";
 // callers do (`bridge/ingest.ts`, `tools/get-candles.ts`, `scripts/seed.ts`,
 // and the private test scripts) and pass the resolved config into
 // aggregateCandles.
-//
-// Schedules for cme_us_index_futures_eth, nymex_energy_eth, and
-// comex_metals_eth are pending user verification against actual NT8
-// templates.
 export const REGISTRY: Record<string, InstrumentConfig> = {
   // CME index futures (and micros)
   ES:  { session: CME_US_INDEX_FUTURES_ETH, alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
@@ -26,9 +23,16 @@ export const REGISTRY: Record<string, InstrumentConfig> = {
 
   // NYMEX energy
   CL:  { session: NYMEX_ENERGY_ETH,         alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
+  MCL: { session: NYMEX_ENERGY_ETH,         alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
 
   // COMEX metals
   GC:  { session: COMEX_METALS_ETH,         alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
+  MGC: { session: COMEX_METALS_ETH,         alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
+  SIL: { session: COMEX_METALS_ETH,         alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped" },
+
+  // CME FX. Thin: quiet hours leave empty 5m buckets.
+  M6A: { session: CME_FX_FUTURES_ETH,       alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped", density: "thin" },
+  M6E: { session: CME_FX_FUTURES_ETH,       alignment: "session_aligned_with_stubs", timestampConvention: "close-stamped", density: "thin" },
 };
 
 export function getInstrumentConfig(symbol: string): InstrumentConfig {

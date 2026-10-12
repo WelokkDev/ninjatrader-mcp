@@ -107,7 +107,7 @@ export function registerPrefetchTools(server: McpServer, session: SessionContext
     {
       symbol: z
         .string()
-        .describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
+        .describe(`Futures symbol (${SUPPORTED_SYMBOLS.join(", ")})`),
       timeframe: z
         .enum(RAW_TIMEFRAMES as unknown as [RawTimeframe, ...RawTimeframe[]])
         .describe(

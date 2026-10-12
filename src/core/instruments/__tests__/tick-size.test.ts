@@ -19,8 +19,6 @@ describe("instrument registry", () => {
   });
 
   it("carries the exchange-listed tick sizes", () => {
-    // 0.25 is right for four of the ten; the other six are why a hardcoded
-    // default is a defect.
     expect(getTickSize("ES")).toBe(0.25);
     expect(getTickSize("NQ")).toBe(0.25);
     expect(getTickSize("MES")).toBe(0.25);
@@ -30,7 +28,12 @@ describe("instrument registry", () => {
     expect(getTickSize("RTY")).toBe(0.1);
     expect(getTickSize("M2K")).toBe(0.1);
     expect(getTickSize("CL")).toBe(0.01);
+    expect(getTickSize("MCL")).toBe(0.01);
     expect(getTickSize("GC")).toBe(0.1);
+    expect(getTickSize("MGC")).toBe(0.1);
+    expect(getTickSize("SIL")).toBe(0.005);
+    expect(getTickSize("M6A")).toBe(0.0001);
+    expect(getTickSize("M6E")).toBe(0.0001);
   });
 
   it("carries the exchange-listed point values, micros at their divisor", () => {
@@ -45,6 +48,12 @@ describe("instrument registry", () => {
     expect(getPointValue("MNQ")).toBe(getPointValue("NQ") / 10);
     expect(getPointValue("MYM")).toBe(getPointValue("YM") / 10);
     expect(getPointValue("M2K")).toBe(getPointValue("RTY") / 10);
+    expect(getPointValue("MCL")).toBe(getPointValue("CL") / 10);
+    expect(getPointValue("MGC")).toBe(getPointValue("GC") / 10);
+    // No full-size parent registered: the contract's own units.
+    expect(getPointValue("SIL")).toBe(1000);
+    expect(getPointValue("M6A")).toBe(10000);
+    expect(getPointValue("M6E")).toBe(12500);
   });
 
   it("gives every symbol a whole-cent tick value", () => {

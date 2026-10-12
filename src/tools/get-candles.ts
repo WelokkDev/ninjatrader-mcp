@@ -79,6 +79,7 @@ interface ValidationIssue {
   extraCount: number;
   sampleMissing?: number[];
   sampleExtra?: number[];
+  note?: string;
 }
 
 interface ValidationSummary {
@@ -119,6 +120,7 @@ function validateRequestedRange(
         extraCount: r.extra.length,
         ...(r.missing.length > 0 && { sampleMissing: r.missing.slice(0, 6) }),
         ...(r.extra.length > 0 && { sampleExtra: r.extra.slice(0, 6) }),
+        ...(r.note !== undefined && { note: r.note }),
       });
     }
   }
@@ -536,7 +538,7 @@ export function registerGetCandles(server: McpServer): void {
     "get_candles",
     "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached. `contracts` names the contract(s) the bars came from; `contract_notes`, when present, lists contract disputes on those days (a front assignment that moved at a roll, bars arriving under another contract, a day still serving two contracts) — read it before trusting price levels across a roll.",
     {
-      symbol: z.string().describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC)"),
+      symbol: z.string().describe(`Futures symbol (${SUPPORTED_SYMBOLS.join(", ")})`),
       timeframe: z
         .enum(SUPPORTED_TIMEFRAMES as [Timeframe, ...Timeframe[]])
         .describe(

@@ -152,11 +152,14 @@ alerts that keep working when everything else here is down. See step 11.
    what registers that chart's symbol with the AddOn — without it, the server
    cannot draw on that chart.
 
-**Trading Hours templates.** The AddOn maps onto two stock NT8 templates that
-must exist under **Tools → Trading Hours**:
+**Trading Hours templates.** Each session template in
+`src/core/sessions/templates.ts` names the NT8 template its bars are fetched
+under (`nt8TradingHours`). Three stock ones must exist under
+**Tools → Trading Hours**:
 
 - `CME US Index Futures ETH` (for ES, NQ, YM, RTY, MES, MNQ, MYM, M2K)
-- `Nymex Metals - Energy ETH` (for CL and GC — NT8 ships one combined template)
+- `Nymex Metals - Energy ETH` (for CL, MCL, GC, MGC and SIL — NT8 ships one combined template)
+- `CME FX Futures ETH` (for M6A and M6E)
 
 These ship with NT8. If yours are named differently, step 5 will tell you.
 
@@ -192,17 +195,24 @@ Server-side (stderr), the same handshake looks like:
 
 (`NT NT8` is literal — the AddOn hardcodes its version string.)
 
-A **template warning** at startup is worth stopping for:
+A **template problem** is worth stopping for. On every connect the server asks
+NT8 about each session template and logs one line per template:
 
 ```
-[McpBridge] [startup] WARNING: mapping target NOT FOUND in NT8: nymex_energy_eth → 'Nymex Metals - Energy ETH' — fix TRADING_HOURS_MAP in mcp-bridge.cs
+[calendar-sync] cme_us_index_futures_eth: 31 closed, 112 modified date(s) synced; hours match NT8 'CME US Index Futures ETH'
 ```
 
-The AddOn **fails closed** on candle requests for that template — it never
-silently falls back to RTH, which would hand you wrong data. If the warning names
-a template you care about, fix `TRADING_HOURS_MAP` in `mcp-bridge.cs` to match
-your install's actual name and recompile. A warning for a template you don't
-trade (e.g. metals) is harmless.
+- `failed: NT8 has no TradingHours template named '…'` — your install names it
+  differently. Set that template's `nt8TradingHours` to the exact name shown
+  under Tools → Trading Hours and rebuild; no recompile. Until then the AddOn
+  **fails closed** on candle requests for it — it never silently falls back to
+  RTH, which would hand you wrong data.
+- `HOURS DIFFER from NT8 '…'` — NT8's template opens or closes a session-day at
+  other times than the server's. Bars still arrive, but session-days and
+  expected bar counts are suspect; `resolve_session_days` repeats the list
+  under `nt8Hours`.
+
+A problem with a template you don't trade (e.g. metals) is harmless.
 
 ## 6. Warm the candle cache
 
@@ -223,7 +233,7 @@ Restart your MCP client so it picks up the server, then:
 
    | Arg | Value |
    |---|---|
-   | `symbol` | ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC |
+   | `symbol` | ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, MCL, GC, MGC, SIL, M6A, M6E |
    | `timeframe` | `1s`, `5s`, `15s`, `5m`, `15m` or `1d` — the raw streams NT8 serves. `15m` also rebuilds derived 30m/1h/2h/4h; the rest are parallel streams. The sub-minute ones are dense (up to ~82,800 buckets/day at `1s`) and slow to fill — prefetch them a few days at a time. |
    | `start` | `YYYY-MM-DD` session day (close-date convention) |
    | `end` | `YYYY-MM-DD`, inclusive |

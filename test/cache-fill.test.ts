@@ -199,6 +199,7 @@ describe("ensureCached", () => {
     expect(requests[1].from).toBe(d3.startUnix);
     expect(requests[1].to).toBe(d3.endUnix);
     expect(requests[0].tradingHoursTemplate).toBe(CME_US_INDEX_FUTURES_ETH.name);
+    expect(requests[0].nt8TradingHours).toBe("CME US Index Futures ETH");
     expect(result.windowsFetched).toBe(2);
     expect(result.fetchedDays).toEqual([d2.label, d3.label]);
   });

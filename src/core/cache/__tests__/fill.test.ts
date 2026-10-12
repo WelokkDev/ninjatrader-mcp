@@ -13,7 +13,7 @@ import {
 } from "../fill.js";
 import { expectedCloseStamps } from "../validator.js";
 import { DERIVED_TIMEFRAMES, recomputeDerivedForSessionDay } from "../derived.js";
-import { CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
+import { CME_FX_FUTURES_ETH, CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
 import { getInstrumentConfig } from "../../sessions/registry.js";
 import type { SessionCalendar } from "../../sessions/calendar.js";
 import type { Timeframe } from "../../types.js";
@@ -170,6 +170,76 @@ describe("ensureCached fetch loop", () => {
     expect(result.windowsFailed).toBe(1);
     expect(result.errors).toEqual([{ window: "2026-05-05", message: "boom" }]);
     expect(result.fetchedDays).toEqual(["2026-05-04", "2026-05-06"]);
+  });
+
+  describe("the daily bar a day is verified against", () => {
+    // NT8 for a thin symbol: four empty 15m buckets, and a 1d bar of the same volume.
+    function thinFake(db: Database.Database) {
+      const bar = db.prepare(
+        `INSERT OR REPLACE INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+         VALUES ('M6E', ?, ?, 1, 2, 0.5, 1.5, ?)`,
+      );
+      return vi.fn(async (_type: string, payload: Record<string, unknown>) => {
+        const from = payload.from as number;
+        const to = payload.to as number;
+        if (payload.timeframe === "1d") {
+          for (const d of DAYS) if (d.endUnix > from && d.endUnix <= to) bar.run("1d", d.endUnix, 880);
+        } else {
+          expectedCloseStamps({ startUnix: from, endUnix: to }, "15m").forEach((t, i) => {
+            if (![0, 1, 2, 40].includes(i)) bar.run("15m", t, 10);
+          });
+        }
+        return {};
+      });
+    }
+    const fetchThinDay = (db: Database.Database, request: EnsureCachedDeps["request"]) =>
+      ensureCached(
+        db, "M6E", DAYS[0].startUnix, DAYS[0].endUnix, "15m", CME_FX_FUTURES_ETH,
+        { isConnected: () => true, request }, NOW,
+      );
+    const timeframesOf = (request: ReturnType<typeof thinFake>) =>
+      request.mock.calls.map((c) => c[1].timeframe);
+
+    it("is fetched after the day's own bars", async () => {
+      const db = new Database(":memory:");
+      initializeSchema(db);
+      const request = thinFake(db);
+      await fetchThinDay(db, request);
+      expect(timeframesOf(request)).toEqual(["15m", "1d"]);
+      expect(classifySessionDay(db, "M6E", DAYS[0], "15m", NOW)).toBe("complete");
+    });
+
+    it("settles a cached day that only lacked it, without refetching the day", async () => {
+      const db = new Database(":memory:");
+      initializeSchema(db);
+      const request = thinFake(db);
+      await request("request_candles", {
+        timeframe: "15m", from: DAYS[0].startUnix, to: DAYS[0].endUnix,
+      });
+      request.mockClear();
+      const result = await fetchThinDay(db, request);
+      expect(timeframesOf(request)).toEqual(["1d"]);
+      expect(result.classifications[0].class).toBe("complete");
+    });
+
+    it("is never requested for an imported day", async () => {
+      const db = new Database(":memory:");
+      initializeSchema(db);
+      const request = thinFake(db);
+      await request("request_candles", {
+        timeframe: "15m", from: DAYS[0].startUnix, to: DAYS[0].endUnix,
+      });
+      db.prepare(`UPDATE candles SET source = 'databento' WHERE symbol = 'M6E'`).run();
+      request.mockClear();
+      await fetchThinDay(db, request);
+      expect(request).not.toHaveBeenCalled();
+    });
+
+    it("is never requested for an instrument judged by its bars", async () => {
+      const request = vi.fn(async (_type: string, _payload: Record<string, unknown>) => ({}));
+      await harness(request)();
+      expect(request.mock.calls.map((c) => c[1].timeframe)).toEqual(["5m", "5m", "5m"]);
+    });
   });
 
   it("post-fetch reconcile spares a declared-but-untimed early-close day whose close could not be recorded", async () => {

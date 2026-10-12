@@ -120,6 +120,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private static readonly HashSet<string> ALLOWED_RAW_TIMEFRAMES =
 			new HashSet<string>(StringComparer.Ordinal) { "1s", "5s", "15s", "5m", "15m", "1d" };
 
+		// Fallback for servers that send no nt8TradingHours; a new template needs no entry here.
 		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
 			new Dictionary<string, string>(StringComparer.Ordinal)
 		{
@@ -161,6 +162,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 			public string      Symbol;     // roster symbol, e.g. "MNQ"
 			public string      Timeframe;  // "1s" | "5s" | "15s" | "5m" | "15m"
 			public string      TradingHoursTemplate; // internal key, for reconnect re-resolution
+			public string      Nt8TradingHours;      // NT8 name the server sent; null = use the map
 			public int         TfSeconds;
 			public Instrument  Instrument;
 			public string      Source;     // how Instrument was chosen — see Resolution
@@ -484,7 +486,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					{
 						Log("[startup] WARNING: mapping target NOT FOUND in NT8: "
 							+ kvp.Key + " → '" + nt8Name
-							+ "' — fix TRADING_HOURS_MAP in mcp-bridge.cs");
+							+ "' — name this install's template on the server (nt8TradingHours)");
 					}
 				}
 			}
@@ -1677,27 +1679,13 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return;
 			}
 
-			string nt8TemplateName;
-			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
-			{
-				SendErrorResponse(id, "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
-					+ "'. Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.");
-				return;
-			}
-
 			TradingHours nt8TradingHours;
-			try
+			string       nt8TemplateName;
+			string       thError;
+			if (!TryResolveTradingHours(tradingHoursTemplate, GetString(obj, "nt8TradingHours"),
+				out nt8TradingHours, out nt8TemplateName, out thError))
 			{
-				nt8TradingHours = TradingHours.Get(nt8TemplateName);
-			}
-			catch (Exception ex)
-			{
-				SendErrorResponse(id, "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message);
-				return;
-			}
-			if (nt8TradingHours == null)
-			{
-				SendErrorResponse(id, "NT8 has no TradingHours template named '" + nt8TemplateName + "'");
+				SendErrorResponse(id, thError);
 				return;
 			}
 
@@ -1736,9 +1724,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "v",               1 },
 				{ "id",              id },
 				{ "type",            "session_calendar_response" },
+				{ "template",        nt8TemplateName },
 				{ "holidays",        holidays },
 				{ "partialHolidays", partialHolidays },
 			};
+			AddSessionRows(nt8TradingHours, payload);
 			SendFireAndForget(Json.Serialize(payload),
 				"session_calendar_response id=" + id
 				+ " holidays=" + holidays.Count + " partial=" + partialHolidays.Count);
@@ -1780,12 +1770,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 			return true;
 		}
 
-		private static bool TryResolveTradingHours(string tradingHoursTemplate,
+		// NT8 must hold a template of exactly the resolved name: never fetch under other hours.
+		private static bool TryResolveTradingHours(string tradingHoursTemplate, string requestedNt8Name,
 			out TradingHours tradingHours, out string nt8TemplateName, out string error)
 		{
 			tradingHours    = null;
 			error           = null;
-			if (!TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
+			nt8TemplateName = requestedNt8Name;
+			if (string.IsNullOrEmpty(nt8TemplateName)
+				&& !TRADING_HOURS_MAP.TryGetValue(tradingHoursTemplate, out nt8TemplateName))
 			{
 				var knownKeys = new StringBuilder();
 				foreach (var k in TRADING_HOURS_MAP.Keys)
@@ -1794,8 +1787,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 					knownKeys.Append(k);
 				}
 				error = "Unknown tradingHoursTemplate: '" + tradingHoursTemplate
-					+ "'. Known: " + knownKeys.ToString()
-					+ ". Add the entry to TRADING_HOURS_MAP in mcp-bridge.cs.";
+					+ "' and the request names no NT8 template. Built in: " + knownKeys.ToString()
+					+ ". Set nt8TradingHours on the server's session template.";
 				return false;
 			}
 			try
@@ -1807,14 +1800,47 @@ namespace NinjaTrader.NinjaScript.AddOns
 				error = "TradingHours.Get('" + nt8TemplateName + "') threw: " + ex.Message;
 				return false;
 			}
-			if (tradingHours == null)
+			if (tradingHours == null
+				|| !string.Equals(tradingHours.Name, nt8TemplateName, StringComparison.Ordinal))
 			{
+				tradingHours = null;
 				error = "NT8 has no TradingHours template named '" + nt8TemplateName
-					+ "' (mapped from '" + tradingHoursTemplate
-					+ "'). Check 'Tools → Trading Hours' in NT8 and update TRADING_HOURS_MAP if NT8 uses a different name on this install.";
+					+ "' (for '" + tradingHoursTemplate
+					+ "'). Check 'Tools → Trading Hours' in NT8; the name must match exactly.";
 				return false;
 			}
 			return true;
+		}
+
+		// All or nothing: the server compares hours only when every field arrives.
+		private static void AddSessionRows(TradingHours tradingHours, Dictionary<string, object> payload)
+		{
+			try
+			{
+				var tz = tradingHours.TimeZoneInfo;
+				if (tz == null || tradingHours.Sessions == null) return;
+				var rows = new List<object>();
+				for (int i = 0; i < tradingHours.Sessions.Count; i++)
+				{
+					var s = tradingHours.Sessions[i];
+					rows.Add(new Dictionary<string, object>
+					{
+						{ "beginDay",   (int) s.BeginDay },
+						{ "beginTime",  s.BeginTime },
+						{ "endDay",     (int) s.EndDay },
+						{ "endTime",    s.EndTime },
+						{ "tradingDay", (int) s.TradingDay },
+					});
+				}
+				payload["timeZone"]         = tz.Id;
+				payload["utcOffsetMinutes"] = (int) tz.BaseUtcOffset.TotalMinutes;
+				payload["observesDst"]      = tz.SupportsDaylightSavingTime;
+				payload["sessions"]         = rows;
+			}
+			catch (Exception ex)
+			{
+				Log("session rows unreadable for '" + tradingHours.Name + "': " + ex.Message);
+			}
 		}
 
 		private void HandleRequestCandles(IDictionary<string, object> obj)
@@ -1857,8 +1883,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 			TradingHours nt8TradingHours;
 			string       nt8TemplateName;
 			string       thError;
-			if (!TryResolveTradingHours(tradingHoursTemplate, out nt8TradingHours,
-				out nt8TemplateName, out thError))
+			if (!TryResolveTradingHours(tradingHoursTemplate, GetString(obj, "nt8TradingHours"),
+				out nt8TradingHours, out nt8TemplateName, out thError))
 			{
 				SendErrorResponse(id, thError);
 				return;
@@ -2179,10 +2205,11 @@ namespace NinjaTrader.NinjaScript.AddOns
 				return;
 			}
 
+			var          requestedNt8Name = GetString(obj, "nt8TradingHours");
 			TradingHours tradingHours;
 			string       nt8TemplateName;
 			string       thError;
-			if (!TryResolveTradingHours(tradingHoursTemplate, out tradingHours,
+			if (!TryResolveTradingHours(tradingHoursTemplate, requestedNt8Name, out tradingHours,
 				out nt8TemplateName, out thError))
 			{
 				SendErrorResponse(id, thError);
@@ -2225,6 +2252,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					Symbol               = symbol,
 					Timeframe            = resolvedTf,
 					TradingHoursTemplate = tradingHoursTemplate,
+					Nt8TradingHours      = requestedNt8Name,
 					TfSeconds            = tfSeconds,
 					Instrument           = instrument,
 					Source               = resolution.Source,
@@ -2563,7 +2591,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 					TradingHours tradingHours;
 					string       nt8TemplateName;
 					string       thError;
-					if (!TryResolveTradingHours(sub.TradingHoursTemplate, out tradingHours,
+					if (!TryResolveTradingHours(sub.TradingHoursTemplate, sub.Nt8TradingHours, out tradingHours,
 						out nt8TemplateName, out thError))
 					{
 						Log("rebind " + sub.Key + " failed to re-resolve TradingHours: " + thError);
@@ -2611,7 +2639,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 				TradingHours tradingHours;
 				string       nt8TemplateName;
 				string       thError;
-				if (!TryResolveTradingHours(sub.TradingHoursTemplate, out tradingHours,
+				if (!TryResolveTradingHours(sub.TradingHoursTemplate, sub.Nt8TradingHours, out tradingHours,
 					out nt8TemplateName, out thError))
 				{
 					Log("recreate " + sub.Key + " failed to re-resolve TradingHours: " + thError);

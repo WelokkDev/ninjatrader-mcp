@@ -28,6 +28,8 @@ export interface SessionTemplate {
   timezone: string;
   spans: SessionSpan[];
   breaks?: SessionBreak[];
+  /** Exact NT8 Trading Hours template name. Unset: the AddOn maps `name` itself or refuses. */
+  nt8TradingHours?: string;
 }
 
 // One concrete materialized session-day with absolute unix-second
@@ -53,4 +55,5 @@ export interface InstrumentConfig {
   session: SessionTemplate;
   alignment: AlignmentStrategy;
   timestampConvention: "close-stamped";
+  density?: "thin";
 }

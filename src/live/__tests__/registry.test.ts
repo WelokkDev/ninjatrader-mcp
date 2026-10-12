@@ -100,6 +100,7 @@ describe("LiveSubscriptionRegistry.ensure", () => {
         symbol: "MNQ",
         timeframe: "5m",
         tradingHoursTemplate: "cme_us_index_futures_eth",
+        nt8TradingHours: "CME US Index Futures ETH",
       }),
       expect.any(Number),
     );

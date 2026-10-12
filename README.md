@@ -20,7 +20,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 > Placing orders *is* possible, but it ships **default-off** behind three independent safety gates and is deliberately not part of the zero-code path — see [TRADING.md](TRADING.md) only if you decide you want it.
 
-> **Trading something other than NQ?** Candle fetching is validated strictly and fails closed — it refuses rather than hand you partial or misaligned data. Those checks were tuned against NQ (one of the most liquid contracts), so a thinner symbol can trip them: pulling candles — especially the sub-minute `1s` / `5s` / `15s` — for CL, GC, or any less-liquid instrument may surface false `incomplete` / `empty` days, which show up as `get_candles` refusing or `prefetch_status` reporting failed days. The other liquid CME index futures (ES, YM, RTY, and the micros) behave just like NQ. If you hit this, the sparse-bar tolerances live in `src/core/cache/validator.ts`.
+> **Trading something other than NQ?** Candle fetching is validated strictly and fails closed — it refuses rather than hand you partial or misaligned data. An instrument that trades in every 5-minute bucket is held to having every bar. One that doesn't is marked `density: "thin"` in `src/core/sessions/registry.ts`, and its days are verified against the daily bar's volume instead. If a symbol you add shows false `incomplete` days at 5m or 15m, it needs that flag. The sub-minute timeframes (`1s`, `5s`, `15s`) tolerate a fixed share of empty buckets, measured on MNQ, so a quieter instrument's sub-minute days can still read `incomplete`; the tolerances are in `src/core/cache/validator.ts`.
 
 **Docs map:**
 
@@ -168,12 +168,13 @@ Symbols are defined in `src/core/sessions/registry.ts`, each bound to a session 
 | Symbols | Session template |
 |---|---|
 | ES, NQ, YM, RTY, MES, MNQ, MYM, M2K | CME US Index Futures ETH (Sun 18:00 → Fri 17:00 ET, daily 17:00–18:00 maintenance gap) |
-| CL | NYMEX Energy ETH |
-| GC | COMEX Metals ETH |
+| CL, MCL | NYMEX Energy ETH |
+| GC, MGC, SIL | COMEX Metals ETH |
+| M6A, M6E | CME FX Futures ETH |
 
 Timeframes: `1s`, `5s`, `15s`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `1d`. Raw streams from NT8 are `1s`, `5s`, `15s`, `5m`, `15m` and `1d` (seconds history is shallow provider-side, and shallower the finer the TF — subscribe/prefetch on demand); 30m–4h are derived from 15m per session day. `1d` is one bar per session-day, close-stamped, fetched but never streamed live. Timestamps are unix seconds, **close-stamped**, with `America/New_York` as the canonical exchange timezone (DST-safe math throughout).
 
-All bar-count and range logic goes through the session-day model (`src/core/sessions/`) — weekends and the maintenance break are handled structurally. Exchange holidays and early closes sync from NT8's own Trading Hours calendars on every AddOn `hello` (a bootstrap set of 2026–2027 CME holidays ships offline), and `resolve_session_days` reports `holidaysModeled` per template so calendar-blind math is never silent.
+All bar-count and range logic goes through the session-day model (`src/core/sessions/`) — weekends and the maintenance break are handled structurally. Exchange holidays and early closes sync from NT8's own Trading Hours calendars on every AddOn `hello` (a bootstrap set of 2026–2027 CME holidays ships offline), and `resolve_session_days` reports `holidaysModeled` per template so calendar-blind math is never silent. Each template also names the NT8 Trading Hours template its bars are fetched under (`nt8TradingHours` in `src/core/sessions/templates.ts`); the same `hello` compares the two sets of hours and reports any difference in the server log and under `nt8Hours` in `resolve_session_days`.
 
 ---
 

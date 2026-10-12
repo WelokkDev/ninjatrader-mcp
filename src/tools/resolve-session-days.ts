@@ -25,6 +25,7 @@ import type { SessionDay, SessionTemplate } from "../core/sessions/types.js";
 import type { Timeframe } from "../core/types.js";
 import { expectedBarCount } from "../core/cache/validator.js";
 import { formatLocalDateTime, tzParts } from "../core/time.js";
+import { nt8HoursCheck, type Nt8HoursCheck } from "../bridge/calendar-sync.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
 const RELATIVE_ANCHORS = [
@@ -50,6 +51,7 @@ export interface ResolveSessionDaysDeps {
   // Backing store for the session calendar (holidays / early closes).
   // Without it the tool runs calendar-blind and reports holidaysModeled:false.
   db?: Database;
+  nt8HoursCheck?: (templateName: string) => Nt8HoursCheck | undefined;
 }
 
 interface SessionDayOut {
@@ -129,6 +131,15 @@ function resolveEndpoint(
       reason: nonSessionReason(label, calendar),
       nearest: fmtNearest(nearestSessionDays(label, template, calendar)),
     },
+  };
+}
+
+function nt8HoursNote(check: Nt8HoursCheck | undefined) {
+  if (check === undefined || check.differences.length === 0) return undefined;
+  return {
+    nt8Template: check.nt8Template,
+    nt8Sessions: check.nt8Sessions,
+    differences: check.differences,
   };
 }
 
@@ -282,6 +293,8 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
       ]),
     );
 
+    const nt8Hours = nt8HoursNote(deps.nt8HoursCheck?.(template.name));
+
     return jsonResult({
       today,
       requested,
@@ -290,21 +303,22 @@ export function createResolveSessionDaysHandler(deps: ResolveSessionDaysDeps = {
       // False = calendar-blind for this template: holidays may
       // appear as normal session-days.
       holidaysModeled: calendar.size > 0,
+      ...(nt8Hours !== undefined && { nt8Hours }),
       barCountEstimate,
     });
   };
 }
 
 export function registerResolveSessionDays(server: McpServer): void {
-  const handler = createResolveSessionDaysHandler({ db: defaultDb });
+  const handler = createResolveSessionDaysHandler({ db: defaultDb, nt8HoursCheck });
 
   server.tool(
     "resolve_session_days",
-    "Resolve date intent into exact session-days for an instrument — pure calendar math, zero data fetching, free to call anytime. The server's wall clock is authoritative: use this instead of doing relative-date arithmetic yourself. Returns the server's `today`, the resolved session-days (label, weekday, ET span, startUnix/endUnix), flags for weekend/non-session inputs with the nearest real session-days, and per-timeframe expected bar counts (use these to size get_candles `limit` and avoid its over-limit refusal). Whether exchange holidays are modeled depends on whether this machine's calendar has been synced, so the answer is reported per call as `holidaysModeled` — read that field rather than assuming. When it is false the tool is calendar-blind for that template and a holiday can look like a normal session-day; verify holiday weeks against the exchange calendar. Convention: for a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve here and confirm the labels + ET spans with the operator BEFORE fetching. For exploratory reads, prefer over-fetching (pad the range) over precision.",
+    "Resolve date intent into exact session-days for an instrument — pure calendar math, zero data fetching, free to call anytime. The server's wall clock is authoritative: use this instead of doing relative-date arithmetic yourself. Returns the server's `today`, the resolved session-days (label, weekday, ET span, startUnix/endUnix), flags for weekend/non-session inputs with the nearest real session-days, and per-timeframe expected bar counts (use these to size get_candles `limit` and avoid its over-limit refusal). Whether exchange holidays are modeled depends on whether this machine's calendar has been synced, so the answer is reported per call as `holidaysModeled` — read that field rather than assuming. When it is false the tool is calendar-blind for that template and a holiday can look like a normal session-day; verify holiday weeks against the exchange calendar. `nt8Hours` appears only when NinjaTrader's own Trading Hours template opens or closes a session-day at other times than these (see `differences`); the spans and bar counts here may then not match what NT8 returns. Convention: for a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve here and confirm the labels + ET spans with the operator BEFORE fetching. For exploratory reads, prefer over-fetching (pad the range) over precision.",
     {
       symbol: z
         .string()
-        .describe("Futures symbol (ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, GC) — picks the session template."),
+        .describe(`Futures symbol (${SUPPORTED_SYMBOLS.join(", ")}) — picks the session template.`),
       start: z
         .string()
         .optional()

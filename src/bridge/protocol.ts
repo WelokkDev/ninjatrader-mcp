@@ -144,6 +144,8 @@ export const requestCandlesMessageSchema = reqMsg("request_candles", {
   to: z.number(),
   // Session-template name; AddOn fails the request closed on a missing/unknown template.
   tradingHoursTemplate: z.string(),
+  // NT8's own name for it; overrides the AddOn's built-in map.
+  nt8TradingHours: z.string().optional(),
 });
 export type RequestCandlesMessage = z.infer<typeof requestCandlesMessageSchema>;
 
@@ -199,6 +201,7 @@ export const subscribeBarsMessageSchema = reqMsg("subscribe_bars", {
   timeframe: z.string(),
   // Same fail-closed template contract as request_candles.
   tradingHoursTemplate: z.string(),
+  nt8TradingHours: z.string().optional(),
 });
 export type SubscribeBarsMessage = z.infer<typeof subscribeBarsMessageSchema>;
 
@@ -244,6 +247,7 @@ export type ResolveInstrumentResultMessage = z.infer<typeof resolveInstrumentRes
 
 export const requestSessionCalendarMessageSchema = reqMsg("request_session_calendar", {
   tradingHoursTemplate: z.string(),
+  nt8TradingHours: z.string().optional(),
 });
 export type RequestSessionCalendarMessage = z.infer<typeof requestSessionCalendarMessageSchema>;
 
@@ -259,6 +263,22 @@ export const sessionCalendarResponseMessageSchema = reqMsg("session_calendar_res
       description: z.string(),
     }),
   ),
+  // The template's own definition (core/sessions/nt8-hours.ts); older AddOns omit all five.
+  template: z.string().optional(),
+  timeZone: z.string().optional(),
+  utcOffsetMinutes: z.number().optional(),
+  observesDst: z.boolean().optional(),
+  sessions: z
+    .array(
+      z.object({
+        beginDay: z.number(),
+        beginTime: z.number(),
+        endDay: z.number(),
+        endTime: z.number(),
+        tradingDay: z.number(),
+      }),
+    )
+    .optional(),
 });
 export type SessionCalendarResponseMessage = z.infer<typeof sessionCalendarResponseMessageSchema>;
 
