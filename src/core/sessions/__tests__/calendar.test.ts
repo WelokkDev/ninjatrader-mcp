@@ -4,7 +4,7 @@ import { initializeSchema } from "../../../db/schema.js";
 import {
   EMPTY_CALENDAR,
   loadCalendar,
-  recordObservedClose,
+  recordNt8Close,
   upsertFromSync,
 } from "../calendar.js";
 
@@ -58,45 +58,51 @@ describe("loadCalendar + bootstrap", () => {
   });
 });
 
-describe("recordObservedClose", () => {
-  it("records onto a declared, untimed, non-manual row and stamps the source", () => {
+describe("recordNt8Close", () => {
+  it("times a declared, untimed row as nt8", () => {
     const db = memDb();
     loadCalendar(db, TPL);
-    expect(recordObservedClose(db, TPL, "2026-01-19", "13:00")).toBe(true);
-    const cal = loadCalendar(db, TPL);
-    expect(cal.get("2026-01-19")).toMatchObject({
-      closeTime: "13:00",
-      source: "nt8-observed",
+    expect(recordNt8Close(db, TPL, "2026-01-19", "13:00")).toEqual({ status: "recorded" });
+    expect(loadCalendar(db, TPL).get("2026-01-19")).toMatchObject({
       kind: "modified",
+      closeTime: "13:00",
+      source: "nt8",
     });
+    expect(recordNt8Close(db, TPL, "2026-01-19", "13:00")).toEqual({ status: "unchanged" });
   });
 
-  it("refuses undeclared dates", () => {
+  it("replaces a seeded time and says what it was", () => {
     const db = memDb();
     loadCalendar(db, TPL);
-    expect(recordObservedClose(db, TPL, "2026-03-11", "13:00")).toBe(false);
+    expect(recordNt8Close(db, TPL, "2026-02-16", "12:00")).toEqual({
+      status: "replaced",
+      previous: "13:00",
+      previousSource: "bootstrap",
+    });
+    expect(loadCalendar(db, TPL).get("2026-02-16")).toMatchObject({ closeTime: "12:00", source: "nt8" });
   });
 
-  it("refuses closed days", () => {
+  it("never times an undeclared or closed date", () => {
     const db = memDb();
     loadCalendar(db, TPL);
-    expect(recordObservedClose(db, TPL, "2026-12-25", "13:00")).toBe(false);
+    expect(recordNt8Close(db, TPL, "2026-03-11", "13:00")).toEqual({ status: "unchanged" });
+    expect(recordNt8Close(db, TPL, "2026-12-25", "13:00")).toEqual({ status: "unchanged" });
+    const cal = loadCalendar(db, TPL);
+    expect(cal.has("2026-03-11")).toBe(false);
+    expect(cal.get("2026-12-25")!.closeTime).toBeUndefined();
   });
 
-  it("refuses rows that already carry a time", () => {
-    const db = memDb();
-    loadCalendar(db, TPL);
-    expect(recordObservedClose(db, TPL, "2026-02-16", "12:00")).toBe(false);
-    expect(loadCalendar(db, TPL).get("2026-02-16")!.closeTime).toBe("13:00");
-  });
-
-  it("refuses manual rows", () => {
+  it("never touches a manual row, and reports what it holds", () => {
     const db = memDb();
     db.prepare(
       `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-08-14', 'modified', 'manual')`,
     ).run(TPL);
-    expect(recordObservedClose(db, TPL, "2026-08-14", "13:00")).toBe(false);
-    expect(loadCalendar(db, TPL).get("2026-08-14")!.source).toBe("manual");
+    expect(recordNt8Close(db, TPL, "2026-08-14", "13:00")).toEqual({
+      status: "kept-manual",
+      manual: "untimed",
+    });
+    expect(loadCalendar(db, TPL).get("2026-08-14")).toMatchObject({ source: "manual" });
+    expect(loadCalendar(db, TPL).get("2026-08-14")!.closeTime).toBeUndefined();
   });
 });
 
@@ -114,11 +120,11 @@ describe("upsertFromSync", () => {
   it("updates kind/description on existing rows but preserves times and source", () => {
     const db = memDb();
     loadCalendar(db, TPL);
-    recordObservedClose(db, TPL, "2026-01-19", "13:00");
+    recordNt8Close(db, TPL, "2026-01-19", "13:00");
     upsertFromSync(db, TPL, { date: "2026-01-19", kind: "modified", description: "MLK Day (synced)" });
     const e = loadCalendar(db, TPL).get("2026-01-19")!;
     expect(e.closeTime).toBe("13:00");
-    expect(e.source).toBe("nt8-observed"); // observation provenance survives sync
+    expect(e.source).toBe("nt8");
     expect(e.description).toBe("MLK Day (synced)");
   });
 

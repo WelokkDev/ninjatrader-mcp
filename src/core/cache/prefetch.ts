@@ -9,7 +9,6 @@ import {
   candleFetchTimeoutMs,
   DAILY_FETCH_BATCH_DAYS,
   fetchMissingDailyBars,
-  observeEarlyClose,
   withCandleTimeoutHint,
 } from "./fill.js";
 import { expectedBarCount, mayNeedDailyBar, validateSessionDay } from "./validator.js";
@@ -389,20 +388,20 @@ export class PrefetchManager {
       } else if (cls === "in_progress") {
         d.state = "fetched";
         d.inProgress = true;
-      } else if (this.observedEarlyCloseHealed(job, d.day, nowSec)) {
-        // Declared-but-untimed early close — observed, recorded, and
-        // re-verified against the adjusted geometry.
-        d.state = "fetched";
       } else {
         d.state = "failed";
         const { note } = validateSessionDay(
           this.deps.db, job.symbol, freshDay(), job.rawTimeframe, nowSec,
         );
-        d.error = servesMixedContracts(this.deps.db, job.symbol, job.rawTimeframe, freshDay())
-          ? "response received but the day still serves bars from two contracts — NinjaTrader sent no bars to assign its front contract; prefetch a timeframe not yet cached for that day to assign it"
-          : note !== undefined
-            ? `response received but the day does not verify — ${note}`
-            : `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
+        const entry = loadCalendar(this.deps.db, job.template.name).get(d.day.label);
+        d.error =
+          entry?.kind === "modified" && !entry.closeTime && !entry.openTime
+            ? "response received but the day is a declared half-day with no close time, so its bars can't be judged — NinjaTrader's calendar sync gave none; recompile the McpBridge AddOn on this machine and reconnect, or enter the close time manually"
+            : servesMixedContracts(this.deps.db, job.symbol, job.rawTimeframe, freshDay())
+              ? "response received but the day still serves bars from two contracts — NinjaTrader sent no bars to assign its front contract; prefetch a timeframe not yet cached for that day to assign it"
+              : note !== undefined
+                ? `response received but the day does not verify — ${note}`
+                : `response received but the day is still ${cls} in the cache — bars were dropped, never sent, or this is an undeclared holiday early close (check the session calendar and server logs)`;
       }
       job.durationsMs.push(this.nowMs() - t0);
     } catch (err) {
@@ -431,33 +430,6 @@ export class PrefetchManager {
       taken++;
     }
     return end;
-  }
-
-  /** Try the observed-close interlock for a day that failed verification;
-   *  returns true iff a close was recorded AND the day re-verifies complete
-   *  under the adjusted geometry. */
-  private observedEarlyCloseHealed(job: Job, day: SessionDay, nowSec: number): boolean {
-    const calendar = loadCalendar(this.deps.db, job.template.name);
-    if (
-      !observeEarlyClose(this.deps.db, job.symbol, job.rawTimeframe, day, job.template, calendar, nowSec)
-    ) {
-      return false;
-    }
-    try {
-      const fresh = loadCalendar(this.deps.db, job.template.name);
-      const adjusted = sessionDayRange(day.label, job.template, fresh);
-      return (
-        classifySessionDay(
-          this.deps.db,
-          job.symbol,
-          { label: day.label, ...adjusted },
-          job.rawTimeframe,
-          nowSec,
-        ) === "complete"
-      );
-    } catch {
-      return false;
-    }
   }
 
   private finalizeIfDone(job: Job): void {

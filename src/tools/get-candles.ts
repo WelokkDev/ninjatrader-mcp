@@ -149,7 +149,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     // Resolve start/end as session-days in the instrument's session
     // timezone. startUnix is exclusive; endUnix is inclusive (D.2).
     const config = getInstrumentConfig(symbol);
-    let calendar = loadCalendar(deps.db, config.session.name);
+    const calendar = loadCalendar(deps.db, config.session.name);
     let startTs: number;
     let endTs: number;
     try {
@@ -172,7 +172,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     }
 
     const requestedDays = sessionDaysOverlapping(startTs, endTs, config.session, calendar);
-    let matched = requestedDays.reduce(
+    const matched = requestedDays.reduce(
       (acc, day) => acc + expectedBarCount(day, timeframe),
       0,
     );
@@ -236,21 +236,12 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       );
     }
 
-    // If the fill recorded a new early close, reload the calendar so
-    // validation and `matched` use the adjusted geometry this same call.
-    let finalDays: SessionDay[] = requestedDays;
-    if (fillResult.calendarUpdated) {
-      calendar = loadCalendar(deps.db, config.session.name);
-      finalDays = sessionDaysOverlapping(startTs, endTs, config.session, calendar);
-      matched = finalDays.reduce((acc, day) => acc + expectedBarCount(day, timeframe), 0);
-    }
-
     const isDerived = !isRawTimeframe(timeframe);
 
     let validation = validateRequestedRange(
       deps.db,
       symbol,
-      finalDays,
+      requestedDays,
       timeframe,
       nowUnix,
     );
@@ -264,7 +255,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         `SELECT COUNT(*) AS c FROM candles
           WHERE symbol = ? AND timeframe = '15m' AND timestamp > ? AND timestamp <= ?`,
       );
-      const healable = finalDays.filter(
+      const healable = requestedDays.filter(
         (day) =>
           day.endUnix <= nowUnix &&
           validation.issues!.some((i) => i.sessionDay === day.label) &&
@@ -307,7 +298,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
           console.error(
             `[get_candles] re-derived ${healed.length} day(s) whose derived rows diverged from their 15m backing for ${symbol}: ${healed.join(",")}`,
           );
-          validation = validateRequestedRange(deps.db, symbol, finalDays, timeframe, nowUnix);
+          validation = validateRequestedRange(deps.db, symbol, requestedDays, timeframe, nowUnix);
         }
       }
     }
@@ -321,7 +312,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     // be real bars orphaned by a calendar edit. LIMIT applies pre-filter, so
     // heavy residue can push canonical rows out; `truncated` keeps that loud.
     const rows = rowsRaw.filter((r) =>
-      finalDays.some((d) => r.timestamp > d.startUnix && r.timestamp <= d.endUnix),
+      requestedDays.some((d) => r.timestamp > d.startUnix && r.timestamp <= d.endUnix),
     );
 
     // The geometry gate keys on expected bars, but actual rows can exceed it
@@ -331,7 +322,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       `SELECT COUNT(*) AS c FROM candles
         WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
     );
-    const totalInRange = finalDays.reduce(
+    const totalInRange = requestedDays.reduce(
       (acc, d) =>
         acc + (dayCountStmt.get(symbol, timeframe, d.startUnix, d.endUnix) as { c: number }).c,
       0,
@@ -345,8 +336,8 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     };
     const interSessionExcluded = flatInRange - totalInRange;
 
-    const served = servedContracts(deps.db, symbol, timeframe, finalDays);
-    const labels = finalDays.map((d) => d.label).sort();
+    const served = servedContracts(deps.db, symbol, timeframe, requestedDays);
+    const labels = requestedDays.map((d) => d.label).sort();
     const contractEvents =
       labels.length > 0
         ? contractEventsFor(deps.db, symbol, labels[0], labels[labels.length - 1])
@@ -391,7 +382,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         `SELECT timestamp FROM candles
           WHERE symbol = ? AND timeframe = '15m' AND timestamp > ? AND timestamp <= ?`,
       );
-      for (const day of finalDays) {
+      for (const day of requestedDays) {
         if (day.endUnix <= nowUnix) continue;
         const expected = expectedCloseStamps(day, timeframe);
         const expectedSet = new Set(expected);
@@ -432,7 +423,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       const summary = validateRequestedRange(
         deps.db,
         symbol,
-        finalDays.filter((d) => !flagged.has(d.label)),
+        requestedDays.filter((d) => !flagged.has(d.label)),
         "15m",
         nowUnix,
       );
@@ -536,7 +527,7 @@ export function registerGetCandles(server: McpServer): void {
 
   server.tool(
     "get_candles",
-    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time hasn't been observed yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached. `contracts` names the contract(s) the bars came from; `contract_notes`, when present, lists contract disputes on those days (a front assignment that moved at a roll, bars arriving under another contract, a day still serving two contracts) — read it before trusting price levels across a roll.",
+    "Fetch OHLCV candlestick data for a futures symbol. Returns bars from a local SQLite cache; on any gap in the requested [start, end] range, the missing session-day(s) are auto-fetched from NinjaTrader at the raw timeframe (1s/5s/15s/5m/1d direct, all other TFs from 15m), ingested with day-aligned overwrites, then served. In-progress (today's) session-days are always refetched; on derived TFs (30m-4h) the still-forming bar of an in-progress session carries `partial: true`, as does any in-progress-session bar whose 15m backing has a gap (`partial_bars` counts them) — do NOT use partial bars for pattern detection. Note: on a declared holiday whose early-close time isn't known yet, the real final bar may stay flagged partial until the template close passes. Fails closed when the range's session geometry holds more bars than `limit` — it never silently truncates; pass a larger `limit` explicitly for big pulls. For a bounded/specific date range (backtest windows, batch pulls, exact dates), resolve and confirm the dates via resolve_session_days BEFORE fetching (its barCountEstimate sizes `limit`); for exploratory reads, prefer over-fetching (pad the range) over precision. Cold multi-day fills are capped: a call needing more than 10 uncached session-days is refused — start a background prefetch_candles job for those, then read from here once cached. `contracts` names the contract(s) the bars came from; `contract_notes`, when present, lists contract disputes on those days (a front assignment that moved at a roll, bars arriving under another contract, a day still serving two contracts) — read it before trusting price levels across a roll.",
     {
       symbol: z.string().describe(`Futures symbol (${SUPPORTED_SYMBOLS.join(", ")})`),
       timeframe: z

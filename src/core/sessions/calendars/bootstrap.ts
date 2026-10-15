@@ -1,8 +1,7 @@
 // Bootstrap session-calendar entries, seeded idempotently on every
 // loadCalendar. Times appear only where verified against real cached data;
-// untimed `modified` entries get their close from the observed-close
-// interlock (core/cache/fill.ts). NT8 sync (bridge/calendar-sync.ts)
-// extends this list. Scope: cme_us_index_futures_eth only — other
+// NT8 sync (bridge/calendar-sync.ts) extends this list and replaces these
+// times with NT8's own. Scope: cme_us_index_futures_eth only — other
 // templates' calendars arrive via sync.
 
 export interface BootstrapEntry {

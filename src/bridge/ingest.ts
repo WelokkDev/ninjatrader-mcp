@@ -290,9 +290,8 @@ export function ingestCandles(
         const day: SessionDay = { label, ...range };
         if (range.endUnix > nowUnix) continue; // in-progress: never delete
         // Close time unknown, so the day's true grid is too. Purging against
-        // the template close would delete the genuine early-close stub bar
-        // that observeEarlyClose still needs to see. Converges once a close
-        // time is recorded.
+        // the template close would delete the genuine early-close stub bar.
+        // Converges once a close time is recorded.
         const calEntry = calendar.get(label);
         if (calEntry?.kind === "modified" && !calEntry.closeTime) {
           continue;

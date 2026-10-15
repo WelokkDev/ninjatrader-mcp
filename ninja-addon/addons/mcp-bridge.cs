@@ -1661,8 +1661,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		}
 
 		// Serialize a template's NT8-declared holidays (fully closed) and
-		// partial holidays (early close / late begin). NT8 exposes dates
-		// only, never times — the server observes those from real fetches.
+		// partial holidays (early close / late begin).
 		private void HandleRequestSessionCalendar(IDictionary<string, object> obj)
 		{
 			var id                   = GetString(obj, "id");
@@ -1709,13 +1708,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 				foreach (var kvp in nt8TradingHours.PartialHolidays)
 				{
 					var partial = kvp.Value;
-					partialHolidays.Add(new Dictionary<string, object>
+					var entry = new Dictionary<string, object>
 					{
 						{ "date",         kvp.Key.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) },
 						{ "isEarlyClose", partial != null && partial.IsEarlyEnd },
 						{ "isLateBegin",  partial != null && partial.IsLateBegin },
 						{ "description",  partial != null && partial.Description != null ? partial.Description : "" },
-					});
+					};
+					AddPartialHolidayTimes(entry, kvp.Key, partial, nt8TradingHours.TimeZoneInfo);
+					partialHolidays.Add(entry);
 				}
 			}
 
@@ -1841,6 +1842,41 @@ namespace NinjaTrader.NinjaScript.AddOns
 			{
 				Log("session rows unreadable for '" + tradingHours.Name + "': " + ex.Message);
 			}
+		}
+
+		// An early close ends on the holiday's own date; a late begin may start the evening before.
+		private static void AddPartialHolidayTimes(Dictionary<string, object> entry, DateTime date,
+			PartialHoliday partial, TimeZoneInfo tz)
+		{
+			if (partial == null || partial.Constraint == null || tz == null) return;
+			try
+			{
+				var c = partial.Constraint;
+				if (partial.IsEarlyEnd && c.EndDay == date.DayOfWeek)
+				{
+					var closeUnix = ConstraintUnixSeconds(date, c.EndTime, tz);
+					if (closeUnix.HasValue) entry["closeUnix"] = closeUnix.Value;
+				}
+				if (partial.IsLateBegin)
+				{
+					var beginDate = date.AddDays(-(((int) date.DayOfWeek - (int) c.BeginDay + 7) % 7));
+					var openUnix  = ConstraintUnixSeconds(beginDate, c.BeginTime, tz);
+					if (openUnix.HasValue) entry["openUnix"] = openUnix.Value;
+				}
+			}
+			catch (Exception ex)
+			{
+				Log("partial holiday times unreadable for " + date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) + ": " + ex.Message);
+			}
+		}
+
+		// Constraint times are HHMM in the template's own time zone.
+		private static long? ConstraintUnixSeconds(DateTime day, int hhmm, TimeZoneInfo tz)
+		{
+			int hours = hhmm / 100, minutes = hhmm % 100;
+			if (hhmm < 0 || hours > 24 || minutes > 59 || (hours == 24 && minutes != 0)) return null;
+			var local = DateTime.SpecifyKind(day.Date, DateTimeKind.Unspecified).AddHours(hours).AddMinutes(minutes);
+			return (long) (TimeZoneInfo.ConvertTimeToUtc(local, tz) - UnixEpoch).TotalSeconds;
 		}
 
 		private void HandleRequestCandles(IDictionary<string, object> obj)

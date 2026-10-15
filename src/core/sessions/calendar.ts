@@ -3,12 +3,13 @@ import { BOOTSTRAP_CALENDARS } from "./calendars/bootstrap.js";
 
 // Session-calendar access layer over the session_calendar table.
 //
-// NT8 declares WHICH dates are exceptions; the TIME of an early close is
-// only ever recorded from a real fetch of a DECLARED date. Undeclared
-// short days stay loud validation mismatches — never auto-blessed.
+// NT8 declares which dates are exceptions and the time of each early close.
+// Nothing infers a time from bars: an untimed declared date and an undeclared
+// short day both stay loud validation mismatches.
 // No module cache: loadCalendar is one idempotent bootstrap pass plus one
 // indexed SELECT; caching would add a stale-calendar bug class.
 
+// Legacy: nothing writes "nt8-observed" now, but older databases still hold it.
 export type CalendarSource = "bootstrap" | "nt8" | "nt8-observed" | "manual";
 
 export interface CalendarEntry {
@@ -73,29 +74,41 @@ export function loadCalendar(db: Database, templateName: string): SessionCalenda
   return map;
 }
 
-/**
- * Record an observed early close. Writes only when the row exists, is
- * `modified`, carries no time yet, and is not `manual` — undeclared dates
- * never receive times; operator overrides are never touched. Returns true
- * iff a row was updated.
- */
-export function recordObservedClose(
+export type Nt8CloseOutcome =
+  | { status: "recorded" | "unchanged" }
+  | { status: "replaced"; previous: string; previousSource: CalendarSource }
+  | { status: "kept-manual"; manual: string };
+
+// NT8 cuts its bars at this time, so it outranks a bootstrap or observed
+// time; a manual row is reported, never changed.
+export function recordNt8Close(
   db: Database,
   templateName: string,
   date: string,
   closeTime: string,
-): boolean {
-  const res = db
+): Nt8CloseOutcome {
+  const row = db
     .prepare(
-      `UPDATE session_calendar
-          SET close_time = ?, source = 'nt8-observed'
-        WHERE template = ? AND date = ?
-          AND kind = 'modified'
-          AND close_time IS NULL
-          AND source != 'manual'`,
+      `SELECT kind, close_time, source FROM session_calendar WHERE template = ? AND date = ?`,
     )
-    .run(closeTime, templateName, date);
-  return res.changes === 1;
+    .get(templateName, date) as
+    | { kind: "closed" | "modified"; close_time: string | null; source: CalendarSource }
+    | undefined;
+  if (row === undefined) return { status: "unchanged" };
+  if (row.source === "manual") {
+    return row.kind === "modified" && row.close_time === closeTime
+      ? { status: "unchanged" }
+      : { status: "kept-manual", manual: row.kind === "closed" ? "closed" : (row.close_time ?? "untimed") };
+  }
+  if (row.kind !== "modified" || (row.close_time === closeTime && row.source === "nt8")) {
+    return { status: "unchanged" };
+  }
+  db.prepare(
+    `UPDATE session_calendar SET close_time = ?, source = 'nt8' WHERE template = ? AND date = ?`,
+  ).run(closeTime, templateName, date);
+  if (row.close_time === null) return { status: "recorded" };
+  if (row.close_time === closeTime) return { status: "unchanged" };
+  return { status: "replaced", previous: row.close_time, previousSource: row.source };
 }
 
 /**

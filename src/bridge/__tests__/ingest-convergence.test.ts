@@ -216,9 +216,8 @@ describe("ingest convergence", () => {
   it("neither purges nor screens a declared-but-untimed early-close day (geometry unknown)", () => {
     const db = memDb();
     // Declared modified, no close time recorded yet: the day's true grid is
-    // unknown until observeEarlyClose sees the trimmed series. Screening or
-    // purging against the template grid would delete the genuine stub bar
-    // and let a wrong (grid-truncated) close be recorded.
+    // unknown. Screening or purging against the template grid would delete
+    // the genuine stub bar.
     db.prepare(
       `INSERT INTO session_calendar (template, date, kind, source)
        VALUES ('cme_us_index_futures_eth', '2026-05-01', 'modified', 'nt8')`,
@@ -239,9 +238,8 @@ describe("ingest convergence", () => {
   it("spares the stub on a modified day with an open override but an unknown close", () => {
     const db = memDb();
     // Open side overridden (the Good-Friday '24:00' practice), close side
-    // unknown: observeEarlyClose categorically refuses openTime days, so if
-    // the purge/screen ran here against the template close, a genuine
-    // off-grid early-close stub would be destroyed with no recording path.
+    // unknown: if the purge/screen ran here against the template close, a
+    // genuine off-grid early-close stub would be destroyed.
     db.prepare(
       `INSERT INTO session_calendar (template, date, kind, open_time, source)
        VALUES ('cme_us_index_futures_eth', '2026-05-01', 'modified', '24:00', 'manual')`,

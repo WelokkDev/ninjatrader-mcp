@@ -4,12 +4,7 @@ import { isSubMinuteTimeframe } from "../constants.js";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
 import { sessionDayRange, sessionDaysOverlapping } from "../sessions/session-day.js";
 import { tradingHoursFields } from "../sessions/nt8-hours.js";
-import {
-  loadCalendar,
-  recordObservedClose,
-  type SessionCalendar,
-} from "../sessions/calendar.js";
-import { wallClockHHMM } from "../time.js";
+import { loadCalendar, type SessionCalendar } from "../sessions/calendar.js";
 import { getInstrumentConfig, REGISTRY } from "../sessions/registry.js";
 import { mayNeedDailyBar, mismatchIsEmpty, validateSessionDay } from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
@@ -187,9 +182,6 @@ export interface EnsureCachedResult {
   // disconnected. Callers use this to surface the canonical "start
   // NT8 with the McpBridge addon" guidance in the response warning.
   bridgeDisconnected: boolean;
-  // True iff a new early-close time was recorded in session_calendar this
-  // call — callers must reload the calendar before validating geometry.
-  calendarUpdated: boolean;
   // True iff a fetch this call was served by (and rejected for) the Simulated
   // Data Feed, so nothing was cached. get_candles surfaces it as a warning.
   simFeedRejected: boolean;
@@ -287,7 +279,6 @@ export async function ensureCached(
     fetchedDays: [],
     errors: [],
     bridgeDisconnected: false,
-    calendarUpdated: false,
     simFeedRejected: false,
   };
 
@@ -351,21 +342,13 @@ export async function ensureCached(
     }
   }
 
-  // Record an early close before purging, so a genuine non-grid-aligned stub
-  // isn't deleted before its close time is known. Reconcile here rather than
-  // in ingest: only this side knows which window was fetched, so a zero-bar
-  // response's leftovers converge to honest-empty instead of refetch-looping.
+  // Reconcile here rather than in ingest: only this side knows which window
+  // was fetched, so a zero-bar response's leftovers converge to honest-empty
+  // instead of refetch-looping.
   for (const window of fetchedWindows) {
     for (const day of window.days) {
-      if (
-        calendar &&
-        observeEarlyClose(db, symbol, rawTimeframe, day, template, calendar, nowUnix)
-      ) {
-        result.calendarUpdated = true;
-        continue;
-      }
-      // Close time unrecorded, so the day's true grid is unknown: purging
-      // against template geometry would delete the genuine stub bar.
+      // Close time unknown, so the day's true grid is too: purging against
+      // template geometry could delete genuine bars.
       const calEntry = calendar?.get(day.label);
       if (calEntry?.kind === "modified" && !calEntry.closeTime) {
         continue;
@@ -412,65 +395,9 @@ export async function ensureCached(
   return result;
 }
 
-/**
- * Record an observed early close for a declared-but-untimed modified day
- * whose cached bars end before the template close. Only declared dates,
- * only closed sessions, only a structurally clean prefix — internal gaps
- * stay loud mismatches. Returns true iff a time was recorded; callers must
- * then reload the calendar before re-deriving geometry.
- */
-export function observeEarlyClose(
-  db: Database,
-  symbol: string,
-  rawTimeframe: Timeframe,
-  day: SessionDay,
-  template: SessionTemplate,
-  calendar: SessionCalendar,
-  nowUnix: number,
-): boolean {
-  // A daily bar is one stamp per session and carries no intra-session
-  // structure, so it can never evidence WHEN a session closed early. Inferring
-  // a close time from it would be fabrication.
-  if (rawTimeframe === "1d") return false;
-
-  const entry = calendar.get(day.label);
-  if (
-    entry?.kind !== "modified" ||
-    entry.closeTime ||
-    entry.openTime ||
-    day.endUnix > nowUnix
-  ) {
-    return false;
-  }
-  const { m } = db
-    .prepare(
-      `SELECT MAX(timestamp) AS m FROM candles
-        WHERE symbol = ? AND timeframe = ? AND timestamp > ? AND timestamp <= ?`,
-    )
-    .get(symbol, rawTimeframe, day.startUnix, day.endUnix) as { m: number | null };
-  if (m === null || m >= day.endUnix) return false; // empty or normal-length
-  const probe = validateSessionDay(
-    db,
-    symbol,
-    { label: day.label, startUnix: day.startUnix, endUnix: m },
-    rawTimeframe,
-    nowUnix,
-  );
-  if (probe.status !== "ok") return false; // gap-riddled prefix — stay loud
-  const closeHHMM = wallClockHHMM(m, template.timezone);
-  const recorded = recordObservedClose(db, template.name, day.label, closeHHMM);
-  if (recorded) {
-    console.error(
-      `[fill] observed early close for ${template.name} ${day.label}: ${closeHHMM} (recorded)`,
-    );
-    rederiveSessionDay(db, template, day.label, nowUnix);
-  }
-  return recorded;
-}
-
-// A recorded close shortens the day for every symbol on the template, and
+// A changed close moves the day's bounds for every symbol on the template, and
 // their derived rows were stamped against the bounds it had before.
-function rederiveSessionDay(
+export function rederiveSessionDay(
   db: Database,
   template: SessionTemplate,
   label: string,

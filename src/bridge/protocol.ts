@@ -254,13 +254,16 @@ export type RequestSessionCalendarMessage = z.infer<typeof requestSessionCalenda
 export const sessionCalendarResponseMessageSchema = reqMsg("session_calendar_response", {
   // NT8 TradingHours.Holidays — fully-closed dates (YYYY-MM-DD).
   holidays: z.array(z.object({ date: z.string(), description: z.string() })),
-  // NT8 TradingHours.PartialHolidays — dates only; NT8 exposes no times.
+  // NT8 TradingHours.PartialHolidays.
   partialHolidays: z.array(
     z.object({
       date: z.string(),
       isEarlyClose: z.boolean(),
       isLateBegin: z.boolean(),
       description: z.string(),
+      // Older AddOns send dates only.
+      closeUnix: z.number().int().optional(),
+      openUnix: z.number().int().optional(),
     }),
   ),
   // The template's own definition (core/sessions/nt8-hours.ts); older AddOns omit all five.

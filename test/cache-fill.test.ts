@@ -314,7 +314,7 @@ describe("ensureCached", () => {
   });
 });
 
-describe("calendar-aware ensureCached (holidays + observed close)", () => {
+describe("calendar-aware ensureCached (holidays + early closes)", () => {
   const d1 = dayFor("2026-05-04");
   const d2 = dayFor("2026-05-05");
   const d3 = dayFor("2026-05-06");
@@ -348,7 +348,7 @@ describe("calendar-aware ensureCached (holidays + observed close)", () => {
   it("a declared early-close day with a recorded time classifies complete (refetch loop ends)", async () => {
     const db = makeDb();
     db.prepare(
-      `INSERT INTO session_calendar (template, date, kind, close_time, source) VALUES (?, '2026-05-05', 'modified', '13:00', 'nt8-observed')`,
+      `INSERT INTO session_calendar (template, date, kind, close_time, source) VALUES (?, '2026-05-05', 'modified', '13:00', 'nt8')`,
     ).run(TPL);
     const cal = calFor(db);
     const adjusted = { label: "2026-05-05", ...sessionDayRange("2026-05-05", CME_US_INDEX_FUTURES_ETH, cal) };
@@ -390,7 +390,7 @@ describe("calendar-aware ensureCached (holidays + observed close)", () => {
     expect(result.windowsFailed).toBe(0);
   });
 
-  it("observed-close interlock records the close from a trimmed fetch of a declared untimed day", async () => {
+  it("infers no close time from a trimmed fetch of a declared untimed day, and keeps its bars", async () => {
     const db = makeDb();
     db.prepare(
       `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-05', 'modified', 'nt8')`,
@@ -410,44 +410,11 @@ describe("calendar-aware ensureCached (holidays + observed close)", () => {
       NOW_FUTURE,
       cal,
     );
-    expect(result.calendarUpdated).toBe(true);
-    const after = loadCalendar(db, TPL).get("2026-05-05");
-    expect(after).toMatchObject({ closeTime: "13:00", source: "nt8-observed" });
-  });
-
-  it("interlock refuses a gap-riddled prefix and a normal-length day", async () => {
-    const db = makeDb();
-    db.prepare(
-      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-04', 'modified', 'nt8')`,
-    ).run(TPL);
-    db.prepare(
-      `INSERT INTO session_calendar (template, date, kind, source) VALUES (?, '2026-05-05', 'modified', 'nt8')`,
-    ).run(TPL);
-    const cal = calFor(db);
-    const trimmedEnd = d1.startUnix + 76 * 900;
-    const result = await ensureCached(
-      db, "NQ", d1.startUnix, d2.endUnix, "15m", CME_US_INDEX_FUTURES_ETH,
-      {
-        isConnected: () => true,
-        request: async (_t, p) => {
-          const from = (p as Record<string, unknown>).from;
-          if (from === d1.startUnix) {
-            // Trimmed prefix WITH an internal gap → must not be blessed.
-            seedFull(db, "NQ", "15m", { ...d1, endUnix: trimmedEnd });
-            db.prepare(`DELETE FROM candles WHERE symbol='NQ' AND timeframe='15m' AND timestamp = ?`).run(d1.startUnix + 10 * 900);
-          } else {
-            // Full normal session → observed close == template close → no write.
-            seedFull(db, "NQ", "15m", d2);
-          }
-          return {};
-        },
-      },
-      NOW_FUTURE,
-      cal,
-    );
-    expect(result.calendarUpdated).toBe(false);
-    const after = loadCalendar(db, TPL);
-    expect(after.get("2026-05-04")!.closeTime).toBeUndefined();
-    expect(after.get("2026-05-05")!.closeTime).toBeUndefined();
+    expect(result.windowsFetched).toBe(1);
+    expect(loadCalendar(db, TPL).get("2026-05-05")!.closeTime).toBeUndefined();
+    const { n } = db
+      .prepare(`SELECT COUNT(*) AS n FROM candles WHERE symbol = 'NQ' AND timeframe = '15m'`)
+      .get() as { n: number };
+    expect(n).toBe(76);
   });
 });

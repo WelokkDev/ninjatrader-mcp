@@ -162,12 +162,12 @@ describe("PrefetchManager jobs", () => {
     await flush();
     expect(calls).toHaveLength(1); // D1 in flight, D2 queued
 
-    // While D2 waits, a hi-lane inline fill completes it AND records the
-    // 13:00 close — the cache is complete under the ADJUSTED geometry.
+    // While D2 waits, an inline fill completes it and a calendar sync records
+    // the 13:00 close — the cache is complete under the ADJUSTED geometry.
     const trimmedEnd = D2.startUnix + 76 * 900;
     seed15m(db, { label: "trim", startUnix: D2.startUnix, endUnix: trimmedEnd });
-    const { recordObservedClose } = await import("../../sessions/calendar.js");
-    recordObservedClose(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
+    const { recordNt8Close } = await import("../../sessions/calendar.js");
+    recordNt8Close(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
 
     calls[0].release(() => seed15m(db, D1));
     await flush();
@@ -175,7 +175,7 @@ describe("PrefetchManager jobs", () => {
     await m.whenSettled(started.job.jobId);
 
     // Classifying D2 with its frozen template-close geometry would refetch
-    // it and then mark it FAILED (observeEarlyClose refuses recorded days).
+    // it and then mark it FAILED.
     expect(calls).toHaveLength(1);
     const after = m.status(started.job.jobId);
     if ("error" in after) throw new Error(after.error);
@@ -198,8 +198,8 @@ describe("PrefetchManager jobs", () => {
 
     // The close is recorded while D2 waits — but its 15m cache stays EMPTY,
     // so the pre-fire re-classify still (correctly) fetches it.
-    const { recordObservedClose } = await import("../../sessions/calendar.js");
-    recordObservedClose(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
+    const { recordNt8Close } = await import("../../sessions/calendar.js");
+    recordNt8Close(db, "cme_us_index_futures_eth", "2026-05-05", "13:00");
 
     calls[0].release(() => seed15m(db, D1));
     await flush();
@@ -211,8 +211,7 @@ describe("PrefetchManager jobs", () => {
     await m.whenSettled(started.job.jobId);
 
     // Verifying against the frozen template-close window would call the
-    // complete day 'partial' and mark it failed (observeEarlyClose refuses
-    // days whose close is already recorded).
+    // complete day 'partial' and mark it failed.
     const after = m.status(started.job.jobId);
     if ("error" in after) throw new Error(after.error);
     expect(after.job.state).toBe("completed");
@@ -357,7 +356,7 @@ describe("PrefetchManager jobs", () => {
     await m.whenSettled(started.job.jobId);
   });
 
-  it("observes the early close of a declared untimed day and converges to fetched", async () => {
+  it("fails a declared half-day with no close time, and says why", async () => {
     const db = memDb();
     db.prepare(
       `INSERT INTO session_calendar (template, date, kind, source)
@@ -379,13 +378,8 @@ describe("PrefetchManager jobs", () => {
 
     const status = m.status(started.job.jobId);
     if ("error" in status) throw new Error(status.error);
-    expect(status.job).toMatchObject({ state: "completed", fetched: 1, failed: 0 });
-
-    const { loadCalendar } = await import("../../sessions/calendar.js");
-    expect(loadCalendar(db, "cme_us_index_futures_eth").get("2026-05-04")).toMatchObject({
-      closeTime: "13:00",
-      source: "nt8-observed",
-    });
+    expect(status.job).toMatchObject({ state: "completed_with_failures", fetched: 0, failed: 1 });
+    expect(status.job.failures[0].error).toMatch(/declared half-day with no close time/);
   });
 
   it("never prunes a cancelled job while its day-tasks are still draining", async () => {

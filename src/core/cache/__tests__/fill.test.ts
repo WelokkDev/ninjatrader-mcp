@@ -6,16 +6,12 @@ import {
   classifySessionDay,
   DAILY_FETCH_BATCH_DAYS,
   ensureCached,
-  observeEarlyClose,
   planFetchWindows,
   type DayClassification,
   type EnsureCachedDeps,
 } from "../fill.js";
 import { expectedCloseStamps } from "../validator.js";
-import { DERIVED_TIMEFRAMES, recomputeDerivedForSessionDay } from "../derived.js";
 import { CME_FX_FUTURES_ETH, CME_US_INDEX_FUTURES_ETH } from "../../sessions/templates.js";
-import { getInstrumentConfig } from "../../sessions/registry.js";
-import type { SessionCalendar } from "../../sessions/calendar.js";
 import type { Timeframe } from "../../types.js";
 
 const unix = (y: number, mo1: number, d: number, h: number): number =>
@@ -250,10 +246,9 @@ describe("ensureCached fetch loop", () => {
       `INSERT INTO session_calendar (template, date, kind, source)
        VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
     ).run();
-    // The fetch "heals" a trimmed series with a GAP in the prefix (bar 3
-    // missing) and a stub off the template grid: observeEarlyClose refuses
-    // the gap-riddled prefix, so no close is recorded — the purge must not
-    // then delete the genuine stub against template geometry.
+    // The fetch "heals" a trimmed series ending in a stub off the template
+    // grid. With the close time unknown, the purge must not delete the
+    // genuine stub against template geometry.
     const stub = DAYS[0].startUnix + 74 * 900 + 420;
     const ins = db.prepare(
       `INSERT OR REPLACE INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
@@ -362,75 +357,5 @@ describe("sparse 15s days through classify and early-close observation", () => {
     // now < endUnix: the live stream owns today, so the guard must not fire.
     const during = DAYS[0].endUnix - 3600;
     expect(classifySessionDay(db, "NQ", DAYS[0], "15s", during)).toBe("in_progress");
-  });
-
-  it("records an observed early close over a sparse 15s prefix", () => {
-    const db = new Database(":memory:");
-    initializeSchema(db);
-    db.prepare(
-      `INSERT INTO session_calendar (template, date, kind, source)
-       VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
-    ).run();
-    // Bars end at a 13:00 ET early close (4h before template close), with
-    // scattered zero-tick gaps in the prefix — the Juneteenth shape.
-    const earlyClose = DAYS[0].endUnix - 4 * 3600;
-    const prefix = { startUnix: DAYS[0].startUnix, endUnix: earlyClose };
-    const all = expectedCloseStamps(prefix, "15s");
-    seed15s(db, prefix, all.filter((_, i) => i % 150 === 149 && i < all.length - 1));
-    const cal: SessionCalendar = new Map([
-      ["2026-05-04", { date: "2026-05-04", kind: "modified" as const, source: "nt8" as const }],
-    ]);
-    expect(observeEarlyClose(db, "NQ", "15s", DAYS[0], CME_US_INDEX_FUTURES_ETH, cal, NOW)).toBe(true);
-    const row = db
-      .prepare(`SELECT close_time, source FROM session_calendar WHERE date = '2026-05-04'`)
-      .get() as { close_time: string; source: string };
-    expect(row.close_time).toBe("13:00");
-    expect(row.source).toBe("nt8-observed");
-    // Under the adjusted geometry the sparse day now classifies complete.
-    expect(
-      classifySessionDay(db, "NQ", { label: "2026-05-04", ...prefix }, "15s", NOW),
-    ).toBe("complete");
-  });
-});
-
-describe("observed early close and derived rows", () => {
-  it("re-derives the day for every symbol on the template, leaving no row past the close", () => {
-    const db = new Database(":memory:");
-    initializeSchema(db);
-    db.prepare(
-      `INSERT INTO session_calendar (template, date, kind, source)
-       VALUES ('cme_us_index_futures_eth', '2026-05-04', 'modified', 'nt8')`,
-    ).run();
-    const untimed: SessionCalendar = new Map([
-      ["2026-05-04", { date: "2026-05-04", kind: "modified" as const, source: "nt8" as const }],
-    ]);
-    // 15m bars through a 13:00 ET close, derived while the close time is
-    // unknown: the 2h and 4h buckets holding 13:00 end on the template grid.
-    const earlyClose = DAYS[0].endUnix - 4 * 3600;
-    const insert15m = db.prepare(
-      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
-       VALUES (?, '15m', ?, 1, 2, 0.5, 1.5, 10)`,
-    );
-    const lastStamp = (symbol: string, tf: Timeframe): number =>
-      (
-        db
-          .prepare(`SELECT MAX(timestamp) AS m FROM candles WHERE symbol = ? AND timeframe = ?`)
-          .get(symbol, tf) as { m: number }
-      ).m;
-    for (const symbol of ["NQ", "MNQ"]) {
-      for (const t of expectedCloseStamps({ startUnix: DAYS[0].startUnix, endUnix: earlyClose }, "15m")) {
-        insert15m.run(symbol, t);
-      }
-      recomputeDerivedForSessionDay(db, symbol, DAYS[0], getInstrumentConfig(symbol), untimed, NOW);
-      expect(lastStamp(symbol, "4h")).toBe(earlyClose + 3600);
-    }
-
-    expect(observeEarlyClose(db, "NQ", "15m", DAYS[0], CME_US_INDEX_FUTURES_ETH, untimed, NOW)).toBe(true);
-
-    for (const symbol of ["NQ", "MNQ"]) {
-      for (const tf of DERIVED_TIMEFRAMES) {
-        expect(lastStamp(symbol, tf), `${symbol} ${tf}`).toBe(earlyClose);
-      }
-    }
   });
 });

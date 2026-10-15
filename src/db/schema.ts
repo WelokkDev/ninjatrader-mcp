@@ -148,7 +148,7 @@ export function initializeSchema(db: Database.Database): void {
     -- Session-calendar exceptions per template. 'closed' = no session that
     -- date; 'modified' = non-template close_time/open_time (wall-clock
     -- HH:MM in the template tz). Times may be NULL on 'modified' rows —
-    -- declared but not yet observed from a real fetch.
+    -- declared, but no time yet from NT8.
     CREATE TABLE IF NOT EXISTS session_calendar (
       template    TEXT NOT NULL,
       date        TEXT NOT NULL,

@@ -233,6 +233,26 @@ describe("resolve_session_days nt8Hours", () => {
   });
 });
 
+describe("resolve_session_days nt8Calendar", () => {
+  const kept = { date: "2026-07-03", difference: "closes 13:15 in NT8, 13:00 here (manual, kept)" };
+
+  async function nq(start: string, end: string) {
+    const handler = createResolveSessionDaysHandler({
+      now: () => WED_1500_ET,
+      nt8CalendarDifferences: () => [kept],
+    });
+    const res = await handler({ symbol: "NQ", start, end } as never);
+    return JSON.parse(res.content[0].text);
+  }
+
+  it("lists a disagreement only for a range that holds its date, apart from the hours note", async () => {
+    const out = await nq("2026-06-29", "2026-07-03");
+    expect(out.nt8Calendar).toEqual([kept]);
+    expect(out).not.toHaveProperty("nt8Hours");
+    expect(await nq("2026-07-06", "2026-07-08")).not.toHaveProperty("nt8Calendar");
+  });
+});
+
 describe("resolve_session_days input validation", () => {
   it("requires exactly one of explicit range or relative", async () => {
     expect(await resolve(WED_1500_ET, {})).toMatch(/either/i);

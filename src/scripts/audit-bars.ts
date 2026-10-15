@@ -261,10 +261,10 @@ function main(): void {
       "NOTE: The session calendar models holidays/early closes — a mismatch",
     );
     console.log(
-      "      is a REAL finding. Declared-untimed early closes heal on the",
+      "      is a REAL finding. A declared early close with no time gets one",
     );
     console.log(
-      "      next get_candles/prefetch of that day (observed-close interlock).",
+      "      from NT8's calendar sync once the McpBridge AddOn sends times.",
     );
     console.log("      Audit only covers session-days that have ≥1 cached bar.");
   }
