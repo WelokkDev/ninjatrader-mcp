@@ -363,7 +363,7 @@ export function registerGetPositions(server: McpServer): void {
 export function registerSubscribeLivePositions(server: McpServer): void {
   server.tool(
     "subscribe_live_positions",
-    "Turn ON account-wide live position tracking: the NT8 AddOn streams position/order/execution events for ALL accounts (sparse events, not a P&L ticker), self-healing via full snapshots on subscribe/reconnect. Enables live-trade context in get_positions (entry time, fills, MAE/MFE — granularity follows active live bar feeds) and closed-trade summaries. Persists across restarts and replays on every NT8 reconnect. Events also broadcast on ws://127.0.0.1:9472/feed (send {type:'subscribe_positions'}); health in live_feed_status under 'positions'. Read-only.",
+    "Turn ON account-wide live position tracking: the NT8 AddOn streams position/order/execution events for ALL accounts (sparse events, not a P&L ticker), self-healing via full snapshots on subscribe/reconnect. Enables live-trade context in get_positions (entry time, fills, MAE/MFE — granularity follows active live bar feeds) and closed-trade summaries. Persists across restarts and replays on every NT8 reconnect. Health in live_feed_status under 'positions'. Read-only.",
     {},
     createSubscribeLivePositionsHandler(defaultDeps),
   );

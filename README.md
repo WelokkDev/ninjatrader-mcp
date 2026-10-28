@@ -99,6 +99,8 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: `list_sessions` is hub-only). The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable).
 
+**Toolsets.** The surface is chosen once at startup with `NT_TOOLSETS` (comma-separated; unset or `all` registers everything). `core` is always on. `live-feeds` holds `subscribe_live_bars` / `unsubscribe_live_bars` / `live_feed_status` / `subscribe_live_positions` / `unsubscribe_live_positions`, which bots and algo work need. A discretionary trader on Claude Desktop can set `NT_TOOLSETS=core` and lose nothing: `get_candles` refetches the forming session on its own and `get_positions` works without the position feed. An unknown name serves everything and logs a warning with the valid list, so a typo never hides tools.
+
 ### Market data
 
 | Tool | Summary |
@@ -108,6 +110,8 @@ The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: 
 | `prefetch_candles` / `prefetch_status` / `prefetch_cancel` | Bulk history pull in the background, one NT8 request at a time, verifying each day against the cache. Already-complete days are skipped, so re-issuing resumes rather than redoes. Jobs live in server memory and don't survive a restart — check `prefetch_status` for failed days. |
 
 ### Live streaming
+
+The three bar-feed tools and the two position-feed tools form the `live-feeds` toolset; `get_positions` and `list_sessions` are `core`.
 
 | Tool | Summary |
 |---|---|

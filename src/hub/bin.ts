@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateToken } from "../bridge/auth.js";
-import { endSession, startRuntime, stopRuntime } from "../server.js";
+import { endSession, processToolsets, startRuntime, stopRuntime } from "../server.js";
 import { registerListSessions } from "../tools/list-sessions.js";
 import { STDIO_SESSION, type SessionContext } from "../tools/session.js";
 import { HUB_HOST, HUB_IDLE_EXIT_MS, HUB_TOKEN_KEY, buildFingerprint, hubPort } from "./config.js";
@@ -18,6 +18,7 @@ export interface BinSpec {
 }
 
 export async function runBin(spec: BinSpec, argv: string[] = process.argv.slice(2)): Promise<void> {
+  processToolsets();
   if (argv.includes("--hub")) await runHub(spec, argv.includes("--resident"));
   else await runStdio(spec);
 }

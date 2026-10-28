@@ -164,7 +164,7 @@ export function registerSubscribeLiveBars(
 ): void {
   server.tool(
     "subscribe_live_bars",
-    "Start streaming live CLOSED bars for a futures symbol from NinjaTrader into the local candle cache — the same store get_candles reads, so live questions (latest close, current session bars) are answered by get_candles moments after each bar boundary. Returns the TRUTHFUL NT8-side result: ok/acked only when the AddOn confirmed the stream (with the resolved contract). Raw TFs only (5m default; 15m; 15s/5s/1s on demand — seconds history is shallow and the sub-minute streams are heavy, so use them deliberately and unsubscribe when done); 30m-4h derive automatically on 15m closes and are served by get_candles with forming bars marked partial. Subscriptions persist across server restarts and replay on every NT8 reconnect. Local bots can consume the same stream over ws://127.0.0.1:9472/feed.",
+    "Start streaming live CLOSED bars for a futures symbol from NinjaTrader into the local candle cache — the same store get_candles reads, so live questions (latest close, current session bars) are answered by get_candles moments after each bar boundary. Returns the TRUTHFUL NT8-side result: ok/acked only when the AddOn confirmed the stream (with the resolved contract). Raw TFs only (5m default; 15m; 15s/5s/1s on demand — seconds history is shallow and the sub-minute streams are heavy, so use them deliberately and unsubscribe when done); 30m-4h derive automatically on 15m closes and are served by get_candles with forming bars marked partial. Subscriptions persist across server restarts and replay on every NT8 reconnect.",
     {
       symbol: z.string().min(1).describe("Futures symbol, e.g. MNQ, NQ, ES"),
       timeframe: LIVE_TF.default("5m").describe(

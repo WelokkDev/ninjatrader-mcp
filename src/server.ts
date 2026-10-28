@@ -51,6 +51,7 @@ import {
   isRiskReducingRegistrationEnabled,
 } from "./execution/config.js";
 import { STDIO_SESSION, type SessionContext } from "./tools/session.js";
+import { envSetting } from "./core/env-local.js";
 
 export { createSession, STDIO_SESSION, type SessionContext } from "./tools/session.js";
 
@@ -60,6 +61,49 @@ export { createSession, STDIO_SESSION, type SessionContext } from "./tools/sessi
 
 const RISK_ADDING_TOOLS = ["place_order", "place_oco", "change_order"];
 const RISK_REDUCING_TOOLS = ["cancel_order", "cancel_all", "flatten"];
+
+export const TOOLSETS = ["core", "live-feeds"] as const;
+export type Toolset = (typeof TOOLSETS)[number];
+
+/** Unknown names serve everything: a typo must not hide tools or take down flatten/cancel_all. */
+export function resolveToolsets(raw: string | undefined): { toolsets: Set<Toolset>; unknown: string[] } {
+  const names = (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const known = TOOLSETS as readonly string[];
+  const unknown = names.filter((n) => n !== "all" && !known.includes(n));
+  if (names.length === 0 || names.includes("all") || unknown.length > 0) {
+    return { toolsets: new Set<Toolset>(TOOLSETS), unknown };
+  }
+  return { toolsets: new Set<Toolset>(["core", ...(names as Toolset[])]), unknown };
+}
+
+export function announceToolsets(raw: string | undefined, log: (line: string) => void = console.error): Set<Toolset> {
+  const { toolsets, unknown } = resolveToolsets(raw);
+  const hidden = TOOLSETS.filter((t) => !toolsets.has(t));
+  if (unknown.length > 0) {
+    const names = unknown.map((n) => `"${n}"`).join(", ");
+    log(
+      `[server] WARNING NT_TOOLSETS="${raw}": unknown toolset ${names} (valid: ${TOOLSETS.join(", ")}, all) — serving all tools`,
+    );
+  } else {
+    log(
+      hidden.length === 0
+        ? "[server] toolsets: all"
+        : `[server] toolsets: ${[...toolsets].join(", ")} (NT_TOOLSETS leaves out: ${hidden.join(", ")})`,
+    );
+  }
+  return toolsets;
+}
+
+let processChoice: Set<Toolset> | undefined;
+
+/** Cached so every conversation gets the surface the startup log names. */
+export function processToolsets(log: (line: string) => void = console.error): Set<Toolset> {
+  processChoice ??= announceToolsets(envSetting("NT_TOOLSETS"), log);
+  return processChoice;
+}
 
 /** Logged once by the bin, since a hub composes per session; pass registerGenericTools' `except`. */
 export function announceToolGating(
@@ -95,12 +139,13 @@ export function announceToolGating(
  */
 export function registerGenericTools(
   server: McpServer,
-  opts: { except?: string[]; session?: SessionContext } = {},
+  opts: { except?: string[]; session?: SessionContext; toolsets?: ReadonlySet<Toolset> } = {},
 ): void {
   const skip = new Set(opts.except ?? []);
   const session = opts.session ?? STDIO_SESSION;
-  const unless = (names: string[], register: () => void): void => {
-    if (names.some((n) => skip.has(n))) return;
+  const toolsets = opts.toolsets ?? processToolsets();
+  const unless = (names: string[], register: () => void, toolset: Toolset = "core"): void => {
+    if (!toolsets.has(toolset) || names.some((n) => skip.has(n))) return;
     register();
   };
   unless(["get_candles"], () => registerGetCandles(server));
@@ -117,12 +162,12 @@ export function registerGenericTools(
   unless(["read_indicator_values"], () => registerReadIndicatorValues(server));
   // Chart configuration, not orders, so not behind the trading gate.
   unless(["set_indicator_params"], () => registerSetIndicatorParams(server));
-  unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server, session));
-  unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server, session));
-  unless(["live_feed_status"], () => registerLiveFeedStatus(server));
   unless(["get_positions"], () => registerGetPositions(server));
-  unless(["subscribe_live_positions"], () => registerSubscribeLivePositions(server));
-  unless(["unsubscribe_live_positions"], () => registerUnsubscribeLivePositions(server));
+  unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server, session), "live-feeds");
+  unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server, session), "live-feeds");
+  unless(["live_feed_status"], () => registerLiveFeedStatus(server), "live-feeds");
+  unless(["subscribe_live_positions"], () => registerSubscribeLivePositions(server), "live-feeds");
+  unless(["unsubscribe_live_positions"], () => registerUnsubscribeLivePositions(server), "live-feeds");
   unless(["get_trades"], () => registerGetTrades(server));
   unless(["sync_trades"], () => registerSyncTrades(server));
   // Risk-ADDING write tools — registered ONLY when trading is enabled at
