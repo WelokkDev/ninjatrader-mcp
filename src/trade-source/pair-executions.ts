@@ -55,6 +55,7 @@ const isFlat = (p: number): boolean => Math.abs(p) < POSITION_EPSILON;
 interface OpenSegment {
   externalId: string;
   symbol: string;
+  account: string | null;
   direction: "long" | "short";
   entryTime: number;
   /** Σ(price × qty) for all fills that extended the position (denominator = entryQty). */
@@ -87,6 +88,7 @@ function createSegment(
   return {
     externalId: fill.externalId,
     symbol: fill.symbol,
+    account: fill.account,
     direction: fill.side === "buy" ? "long" : "short",
     entryTime: fill.time,
     entryPriceSum: fill.price * qty,
@@ -112,7 +114,9 @@ function closeSegment(seg: OpenSegment, exitTime: number | null): RawTrade {
     // seg.exitQty > 0 is a deliberate div-by-zero guard (defensive; keep it).
     exitPrice: closed && seg.exitQty > 0 ? seg.exitPriceSum / seg.exitQty : null,
     quantity: seg.peakAbs,
+    filledQuantity: seg.entryQty,
     commission: seg.commissionSum,
+    account: seg.account,
   };
 }
 

@@ -73,6 +73,30 @@ describe("pairExecutions", () => {
     expect(trades[0].exitTime).toBe(300);
   });
 
+  it("scaling out and back in: quantity is the peak, filledQuantity what P&L multiplies by", () => {
+    const trades = pairExecutions([
+      fill("E1", "buy", 100, 5000, 2),
+      fill("E2", "sell", 200, 5010),
+      fill("E3", "buy", 300, 5004),
+      fill("E4", "sell", 400, 5020, 2),
+    ]);
+    expect(trades).toHaveLength(1);
+    const t = trades[0];
+    expect(t.quantity).toBe(2);
+    expect(t.filledQuantity).toBe(3);
+    // Fill by fill: −2·5000 + 5010 − 5004 + 2·5020 = +46 points.
+    expect((t.exitPrice! - t.entryPrice) * t.filledQuantity).toBeCloseTo(46, 9);
+    expect((t.exitPrice! - t.entryPrice) * t.quantity).not.toBeCloseTo(46, 9);
+  });
+
+  it("carries the account onto each trade", () => {
+    const trades = pairExecutions([
+      fill("E1", "buy", 100, 5000, 1, { account: "Sim101" }),
+      fill("E2", "sell", 200, 5010, 1, { account: "Sim101" }),
+    ]);
+    expect(trades[0].account).toBe("Sim101");
+  });
+
   it("partial exits: weighted exit average, closes on the last fill", () => {
     const trades = pairExecutions([
       fill("E1", "buy", 100, 5000, 2),
@@ -99,6 +123,7 @@ describe("pairExecutions", () => {
     expect(long.exitTime).toBe(200);
     expect(long.exitPrice).toBe(5010);
     expect(long.commission).toBe(4); // 2 (entry) + half of the flip fill's 4
+    expect(long.filledQuantity).toBe(1);
 
     expect(short.direction).toBe("short");
     expect(short.externalId).toBe("E2"); // remainder opens at the flip fill
@@ -107,6 +132,7 @@ describe("pairExecutions", () => {
     expect(short.exitTime).toBe(300);
     expect(short.exitPrice).toBe(5005);
     expect(short.commission).toBe(4); // other half of the flip + 2 (cover)
+    expect(short.filledQuantity).toBe(1);
 
     const totalFills = 2 + 4 + 2;
     expect(long.commission! + short.commission!).toBe(totalFills);

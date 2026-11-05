@@ -109,7 +109,9 @@ const TRADES_TABLE_SQL = `
       exit_time   INTEGER,
       exit_price  REAL,
       commission  REAL,
-      created_at  INTEGER NOT NULL
+      created_at  INTEGER NOT NULL,
+      account     TEXT,
+      filled_quantity REAL              -- contracts traded each way
     );
 
     CREATE INDEX IF NOT EXISTS idx_trades_external_id ON trades (external_id);
@@ -296,6 +298,8 @@ export function initializeSchema(db: Database.Database): void {
     );
   })();
   ensureColumn(db, "order_submissions", "oco_group", "TEXT");
+  ensureColumn(db, "trades", "account", "TEXT");
+  ensureColumn(db, "trades", "filled_quantity", "REAL");
 }
 
 // The table once also held a backtest engine's trades, in columns the import

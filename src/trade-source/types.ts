@@ -21,7 +21,9 @@ export interface RawTrade {
   exitTime: number | null;
   exitPrice: number | null;    // size-weighted avg if scaled out; null while open
   quantity: number;            // max position size during the trade
+  filledQuantity: number;      // contracts traded each way
   commission: number | null;   // summed across fills
+  account: string | null;
 }
 
 // The fetch-only port. Every adapter implements this.

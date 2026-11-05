@@ -196,9 +196,9 @@ describe("NinjaTraderSource.fetchTrades", () => {
       { execId: "B2", symbol: "NQ", account: "Live", time: 1_300, price: 5006, qty: 1, orderAction: 1 },
     ]);
     const trades = await new NinjaTraderSource({ dbPath }).fetchTrades(FULL);
-    expect(trades.map((t) => [t.externalId, t.quantity, t.entryTime, t.exitTime])).toEqual([
-      ["A1", 1, 1_000, 1_200],
-      ["B1", 1, 1_100, 1_300],
+    expect(trades.map((t) => [t.externalId, t.account, t.quantity, t.entryTime, t.exitTime])).toEqual([
+      ["A1", "Sim101", 1, 1_000, 1_200],
+      ["B1", "Live", 1, 1_100, 1_300],
     ]);
   });
 

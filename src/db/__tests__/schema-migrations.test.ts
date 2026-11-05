@@ -160,6 +160,7 @@ describe("trades table", () => {
   const CURRENT_COLUMNS = [
     "trade_id", "source", "external_id", "symbol", "direction", "quantity",
     "entry_time", "entry_price", "exit_time", "exit_price", "commission", "created_at",
+    "account", "filled_quantity",
   ];
 
   /** The table as it was when it also held the backtest engine's trades. */
@@ -243,6 +244,7 @@ describe("trades table", () => {
         trade_id: "ninjatrader:A", source: "ninjatrader", external_id: "A", symbol: "NQ",
         direction: "long", quantity: null, entry_time: 1000, entry_price: 5000,
         exit_time: 2000, exit_price: 5010, commission: null, created_at: 3000,
+        account: null, filled_quantity: null,
       },
     ]);
     expect(columns(db, "trades_legacy")).toEqual([]);
@@ -299,6 +301,24 @@ describe("trades table", () => {
     filled.exec("INSERT INTO positions (symbol, qty, avg_price, updated_at) VALUES ('NQ', 1, 5000, 0)");
     initializeSchema(filled);
     expect(count(filled, "positions")).toBe(1);
+  });
+
+  it("adds account and filled_quantity to a current-shape table that lacks them, keeping its rows", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    db.exec("ALTER TABLE trades DROP COLUMN filled_quantity; ALTER TABLE trades DROP COLUMN account;");
+    db.exec(
+      `INSERT INTO trades (trade_id, source, external_id, symbol, direction, quantity, entry_time,
+         entry_price, exit_time, exit_price, commission, created_at)
+       VALUES ('ninjatrader:A', 'ninjatrader', 'A', 'NQ', 'long', 1, 1000, 5000, 2000, 5010, 2, 3000)`,
+    );
+
+    initializeSchema(db);
+
+    expect(columns(db, "trades")).toEqual(CURRENT_COLUMNS);
+    expect(db.prepare("SELECT account, filled_quantity, quantity FROM trades").all()).toEqual([
+      { account: null, filled_quantity: null, quantity: 1 },
+    ]);
   });
 
   it("creates only the current shape on a fresh database", () => {

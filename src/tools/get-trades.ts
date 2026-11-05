@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ledger as defaultLedger, type Ledger } from "../db/ledger.js";
+import { ledger as defaultLedger, type Ledger, type Trade } from "../db/ledger.js";
 import { ingestTrades } from "../trade-source/ingest.js";
 import { NinjaTraderSource } from "../trade-source/ninjatrader.js";
 import { envSetting, ENV_FILE } from "../core/env-local.js";
@@ -86,6 +86,9 @@ function defaultResolveSource(account?: string): TradeSource {
   return new NinjaTraderSource({ dbPath: cfg.dbPath, account: account ?? cfg.account });
 }
 
+const mismatchWarning = (n: number) =>
+  `${n} stored trade(s) differ from what NT8 reports now and were left untouched`;
+
 export interface TradeToolDeps {
   /** Defaults to the app-wide ledger singleton. Tests inject an in-memory instance. */
   ledger?: Ledger;
@@ -104,21 +107,28 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
     from,
     to,
     sync,
+    account,
   }: {
     from: number;
     to: number;
     sync?: boolean;
+    account?: string;
   }): Promise<ToolResult> => {
-    const inRange = (t: { entryTime: number }) =>
-      t.entryTime >= from && t.entryTime <= to;
+    const inRange = (t: Trade) => t.entryTime >= from && t.entryTime <= to;
+    const matches = (t: Trade) => !account || t.account === account;
 
-    let trades = ledger.listTrades().filter(inRange);
+    let all = ledger.listTrades().filter(inRange);
+    let trades = all.filter(matches);
+    // Rows imported before accounts were stored; an import fills them in.
+    const unattributed = () => (account ? all.filter((t) => t.account === null).length : 0);
+    let mismatched = 0;
 
-    if (trades.length === 0 || sync === true) {
+    if (trades.length === 0 || sync === true || unattributed() > 0) {
       try {
-        const source = resolveSource();
-        await ingestTrades(source, ledger, { from, to });
-        trades = ledger.listTrades().filter(inRange);
+        const source = resolveSource(account || undefined);
+        ({ mismatched } = await ingestTrades(source, ledger, { from, to }));
+        all = ledger.listTrades().filter(inRange);
+        trades = all.filter(matches);
       } catch (err) {
         if (trades.length === 0) {
           // No pre-existing rows and ingest failed — surface the error.
@@ -128,12 +138,25 @@ export function createGetTradesHandler(deps?: TradeToolDeps) {
         return jsonResult({
           count: trades.length,
           trades,
-          warning: `sync requested but ingest failed: ${msg}; returning existing rows`,
+          warning: `ingest failed: ${msg}; returning existing rows`,
         });
       }
     }
 
-    return jsonResult({ count: trades.length, trades });
+    const warnings: string[] = [];
+    if (mismatched > 0) warnings.push(mismatchWarning(mismatched));
+    if (unattributed() > 0) {
+      warnings.push(`${unattributed()} trade(s) in range have no recorded account and were left out`);
+    }
+    if (account && trades.length === 0) {
+      const names = [...new Set(all.flatMap((t) => (t.account ? [t.account] : [])))];
+      warnings.push(`no trades for account "${account}"; accounts in range: ${names.join(", ") || "none"}`);
+    }
+    return jsonResult({
+      count: trades.length,
+      trades,
+      ...(warnings.length > 0 ? { warning: warnings.join("; ") } : {}),
+    });
   };
 }
 
@@ -142,7 +165,7 @@ export function registerGetTrades(server: McpServer): void {
 
   server.tool(
     "get_trades",
-    "Returns the user's imported trades in [from,to]; ingests on demand if the range is empty or sync is true; returns { count, trades }. Each trade carries its entry and exit time and price, direction, quantity and commission; P&L is not stored.",
+    "Returns imported trades in [from,to], ingesting on demand if the range is empty or sync is true: { count, trades }. Per trade: account, direction, entry/exit time and avg price, quantity (peak position), filledQuantity, commission.",
     {
       from: z.number().describe("range start, unix seconds"),
       to: z.number().describe("range end, unix seconds"),
@@ -150,6 +173,7 @@ export function registerGetTrades(server: McpServer): void {
         .boolean()
         .optional()
         .describe("force re-ingest even if rows already exist for the range"),
+      account: z.string().optional().describe("omit for all accounts"),
     },
     handler,
   );
@@ -170,8 +194,10 @@ export function createSyncTradesHandler(deps?: TradeToolDeps) {
   }): Promise<ToolResult> => {
     try {
       const source = resolveSource(account);
-      const { fetched, inserted } = await ingestTrades(source, ledger, { from, to });
-      return jsonResult({ fetched, inserted });
+      const result = await ingestTrades(source, ledger, { from, to });
+      return jsonResult(
+        result.mismatched > 0 ? { ...result, warning: mismatchWarning(result.mismatched) } : result,
+      );
     } catch (err) {
       return errorResult(err instanceof Error ? err.message : String(err));
     }
@@ -183,7 +209,7 @@ export function registerSyncTrades(server: McpServer): void {
 
   server.tool(
     "sync_trades",
-    "Explicit refresh that ingests NinjaTrader trades for the range and returns { fetched, inserted }.",
+    "Explicit refresh: ingests NinjaTrader trades for the range; returns { fetched, inserted, filled, mismatched } (filled: older rows completed).",
     {
       from: z.number().describe("range start, unix seconds"),
       to: z.number().describe("range end, unix seconds"),
