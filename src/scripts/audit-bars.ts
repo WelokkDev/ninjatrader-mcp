@@ -16,11 +16,8 @@ import {
   isSubMinuteTimeframe,
   SUPPORTED_TIMEFRAMES,
 } from "../core/constants.js";
-import { getInstrumentConfig } from "../core/sessions/registry.js";
-import {
-  sessionDayContaining,
-  sessionDayRange,
-} from "../core/sessions/session-day.js";
+import { getInstrumentConfig, REGISTRY } from "../core/sessions/registry.js";
+import { makeSessionDayResolver, sessionDayRange } from "../core/sessions/session-day.js";
 import { loadCalendar, type SessionCalendar } from "../core/sessions/calendar.js";
 import { formatExchangeTime } from "../core/time.js";
 import {
@@ -86,13 +83,6 @@ function observeSparse(r: ValidationResult): SparseObservation | null {
 function main(): void {
   const nowUnix = Math.floor(Date.now() / 1000);
 
-  // Discover all (symbol, session-day) pairs with at least one bar at
-  // any TF. A session-day with zero bars at every TF is invisible
-  // here — by design (see header comment).
-  const distinctRows = db
-    .prepare(`SELECT DISTINCT symbol, timestamp FROM candles`)
-    .all() as Array<{ symbol: string; timestamp: number }>;
-
   // Session calendars per template (holiday / early-close exceptions).
   const calendars = new Map<string, SessionCalendar>();
   const calendarFor = (templateName: string): SessionCalendar => {
@@ -104,26 +94,28 @@ function main(): void {
     return cal;
   };
 
+  // Streamed per symbol: the distinct stamps outgrow the heap. Timestamp order
+  // keeps the memoizing resolver from re-deriving each row's session-day.
+  const hasRows = db.prepare(`SELECT 1 FROM candles WHERE symbol = ? LIMIT 1`).pluck();
+  const stamps = db
+    .prepare(`SELECT DISTINCT timestamp FROM candles WHERE symbol = ? ORDER BY timestamp`)
+    .pluck();
   const pairs = new Map<string, { symbol: string; label: string }>();
   let orphanClosedDayBars = 0;
-  for (const row of distinctRows) {
-    let config;
-    try {
-      config = getInstrumentConfig(row.symbol);
-    } catch {
-      continue; // unknown symbol in the DB — skip
+  for (const [symbol, config] of Object.entries(REGISTRY)) {
+    if (hasRows.get(symbol) === undefined) continue;
+    // Resolved before the stream opens: loadCalendar may seed rows, and a
+    // write while an iterator is open throws.
+    const resolve = makeSessionDayResolver(config.session, calendarFor(config.session.name));
+    for (const timestamp of stamps.iterate(symbol) as IterableIterator<number>) {
+      const sd = resolve(timestamp);
+      if (sd === null) {
+        // Closed holiday or after an early close.
+        orphanClosedDayBars++;
+        continue;
+      }
+      pairs.set(`${symbol}|${sd.label}`, { symbol, label: sd.label });
     }
-    const sd = sessionDayContaining(row.timestamp, config.session, calendarFor(config.session.name));
-    if (sd === null) {
-      // Bars on closed holidays or after an early close map to no
-      // session-day — count them as orphans rather than skip silently.
-      orphanClosedDayBars++;
-      continue;
-    }
-    pairs.set(`${row.symbol}|${sd.label}`, {
-      symbol: row.symbol,
-      label: sd.label,
-    });
   }
 
   const sortedPairs = [...pairs.values()].sort(

@@ -17,8 +17,9 @@ import {
   expectedCloseStamps,
   mismatchIsEmpty,
   validateSessionDay,
+  type ValidationResult,
 } from "../core/cache/validator.js";
-import { classifySessionDay, ensureCached, planFetchWindows } from "../core/cache/fill.js";
+import { ensureCached } from "../core/cache/fill.js";
 import { isConnected as defaultIsConnected } from "../bridge/index.js";
 import {
   computeDerivedForSessionDay,
@@ -32,9 +33,9 @@ import {
 import { prefetchManager } from "../prefetch-instance.js";
 import { errorResult, jsonResult, type ToolResult } from "./result.js";
 
-// A connected call fetches at most this many uncached session-days inline;
-// colder ranges are refused toward prefetch_candles so a synchronous fill
-// can't outlive the MCP tool-call timeout.
+// Most fetch round-trips a connected call makes inline (daily batches many days
+// into one); bigger plans go to prefetch_candles so a synchronous fill can't
+// outlive the MCP tool-call timeout.
 export const MAX_INLINE_COLD_DAYS = 10;
 
 // A moved front contract earns a `warning` this long; its note stays for good.
@@ -93,19 +94,21 @@ interface ValidationSummary {
 // Final-pass validation over the requested range at the REQUESTED TF.
 // Takes the (possibly calendar-refreshed) day list — after an observed
 // early close, validation must run against the adjusted geometry.
+// `settled`: verdicts already reached at this TF for days whose bars haven't changed since.
 function validateRequestedRange(
   db: Database,
   symbol: string,
   days: readonly SessionDay[],
   timeframe: Timeframe,
   nowUnix: number,
+  settled?: ReadonlyMap<string, ValidationResult>,
 ): ValidationSummary {
   const summary: ValidationSummary = { ok: 0, mismatch: 0, in_progress: 0 };
   const issues: ValidationIssue[] = [];
   const inProgressDays: string[] = [];
 
   for (const day of days) {
-    const r = validateSessionDay(db, symbol, day, timeframe, nowUnix);
+    const r = settled?.get(day.label) ?? validateSessionDay(db, symbol, day, timeframe, nowUnix);
     if (r.status === "skipped") {
       summary.in_progress++;
       inProgressDays.push(day.label);
@@ -187,34 +190,6 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     const rawTF = fetchTimeframeFor(timeframe);
     const nowUnix = Math.floor(Date.now() / 1000);
 
-    // Refuse inline fills past the cap. Disconnected calls do no fetch work
-    // (instant per-window failures), so the guard doesn't apply.
-    //
-    // The cap is on bridge ROUND-TRIPS, not cold days — that is the work a
-    // synchronous call must fit inside the MCP tool-call timeout. For intraday
-    // TFs the two are the same (one window per cold day); daily batches many
-    // days into one request, so a long daily backfill stays inline.
-    if (deps.isConnected()) {
-      const coldDays = requestedDays.filter(
-        (day) => classifySessionDay(deps.db, symbol, day, rawTF, nowUnix) !== "complete",
-      );
-      const coldWindows = planFetchWindows(
-        coldDays.map((day) => ({ day, class: "empty" as const })),
-        rawTF,
-      );
-      if (coldWindows.length > MAX_INLINE_COLD_DAYS) {
-        return errorResult(
-          `Range [${start}, ${end}] has ${coldDays.length} session-day(s) not yet cached at ${rawTF} — ` +
-            `${coldWindows.length} fetches, over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
-            `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
-            `poll prefetch_status until it completes, then re-issue this get_candles.`,
-        );
-      }
-    }
-
-    // Fill any gaps in the cache at the raw TF that backs this request.
-    // Day-aligned: any session-day that is empty, partial, or in-progress
-    // triggers a fetch covering the entire session-day window.
     const fillResult = await ensureCached(
       deps.db,
       symbol,
@@ -228,7 +203,18 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
       },
       nowUnix,
       calendar,
+      MAX_INLINE_COLD_DAYS,
     );
+
+    if (fillResult.refusedWindows !== undefined) {
+      const coldDays = fillResult.classifications.filter((c) => c.class !== "complete").length;
+      return errorResult(
+        `Range [${start}, ${end}] has ${coldDays} session-day(s) not yet cached at ${rawTF} — ` +
+          `${fillResult.refusedWindows} fetches, over the inline maximum of ${MAX_INLINE_COLD_DAYS}. Start a background job: ` +
+          `prefetch_candles {symbol: "${symbol}", timeframe: "${rawTF}", start: "${start}", end: "${end}"}, ` +
+          `poll prefetch_status until it completes, then re-issue this get_candles.`,
+      );
+    }
 
     if (fillResult.windowsFetched > 0) {
       console.error(
@@ -238,12 +224,24 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
 
     const isDerived = !isRawTimeframe(timeframe);
 
+    // The fill's verdicts stand only if it attempted no fetch: a fetch can rewrite
+    // days it never asked for, and so can another conversation while it waits.
+    const settledAtRaw = new Map<string, ValidationResult>();
+    const noFetchAttempted =
+      fillResult.windowsFetched === 0 &&
+      fillResult.windowsFailed === 0 &&
+      !fillResult.simFeedRejected;
+    for (const c of noFetchAttempted ? fillResult.classifications : []) {
+      if (c.class === "complete" && c.validation) settledAtRaw.set(c.day.label, c.validation);
+    }
+
     let validation = validateRequestedRange(
       deps.db,
       symbol,
       requestedDays,
       timeframe,
       nowUnix,
+      isDerived ? undefined : settledAtRaw,
     );
 
     // No fetch path fixes derived rows that diverge from their 15m backing —
@@ -311,9 +309,13 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
     // would present untrusted bars as clean. Excluded, never deleted: they may
     // be real bars orphaned by a calendar edit. LIMIT applies pre-filter, so
     // heavy residue can push canonical rows out; `truncated` keeps that loud.
-    const rows = rowsRaw.filter((r) =>
-      requestedDays.some((d) => r.timestamp > d.startUnix && r.timestamp <= d.endUnix),
-    );
+    // Relies on rows and days both being in time order.
+    const rows: Candle[] = [];
+    let di = 0;
+    for (const r of rowsRaw) {
+      while (di < requestedDays.length && r.timestamp > requestedDays[di].endUnix) di++;
+      if (di < requestedDays.length && r.timestamp > requestedDays[di].startUnix) rows.push(r);
+    }
 
     // The geometry gate keys on expected bars, but actual rows can exceed it
     // (orphan partials). Counted per session-day so inter-session residue
@@ -426,6 +428,7 @@ export function createGetCandlesHandler(deps: GetCandlesDeps) {
         requestedDays.filter((d) => !flagged.has(d.label)),
         "15m",
         nowUnix,
+        settledAtRaw,
       );
       if (summary.mismatch > 0) raw15m = summary;
     }

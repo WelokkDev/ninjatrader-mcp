@@ -6,7 +6,12 @@ import { sessionDayRange, sessionDaysOverlapping } from "../sessions/session-day
 import { tradingHoursFields } from "../sessions/nt8-hours.js";
 import { loadCalendar, type SessionCalendar } from "../sessions/calendar.js";
 import { getInstrumentConfig, REGISTRY } from "../sessions/registry.js";
-import { mayNeedDailyBar, mismatchIsEmpty, validateSessionDay } from "./validator.js";
+import {
+  mayNeedDailyBar,
+  mismatchIsEmpty,
+  validateSessionDay,
+  type ValidationResult,
+} from "./validator.js";
 import { expectedRawGrid, purgeOffGridRawRows } from "./purge.js";
 import { frontContractFor, servesMixedContracts, soleAttestedContract } from "./contracts.js";
 import { UNATTESTED_CONTRACT } from "../../db/schema.js";
@@ -29,6 +34,8 @@ export type SessionDayClass =
 export interface DayClassification {
   day: SessionDay;
   class: SessionDayClass;
+  /** Absent for an imported day. */
+  validation?: ValidationResult;
 }
 
 /**
@@ -56,13 +63,13 @@ function sessionDaySource(
   return row?.source ?? null;
 }
 
-export function classifySessionDay(
+export function assessSessionDay(
   db: Database,
   symbol: string,
   day: SessionDay,
   rawTimeframe: Timeframe,
   nowUnix: number,
-): SessionDayClass {
+): DayClassification {
   // Imported days are immutable (see isImportedSource) — report complete
   // before validation runs, so nothing refetches and overwrites them.
   // In-progress days fall through: the live stream owns "today", not an import.
@@ -70,15 +77,26 @@ export function classifySessionDay(
     day.endUnix <= nowUnix &&
     isImportedSource(sessionDaySource(db, symbol, day, rawTimeframe))
   ) {
-    return "complete";
+    return { day, class: "complete" };
   }
-  const r = validateSessionDay(db, symbol, day, rawTimeframe, nowUnix);
-  if (r.status === "skipped") return "in_progress";
-  if (r.status === "ok") {
+  const validation = validateSessionDay(db, symbol, day, rawTimeframe, nowUnix);
+  let cls: SessionDayClass;
+  if (validation.status === "skipped") cls = "in_progress";
+  else if (validation.status === "ok") {
     // Two contracts served: "partial" so a re-fetch assigns the day's front.
-    return servesMixedContracts(db, symbol, rawTimeframe, day) ? "partial" : "complete";
-  }
-  return mismatchIsEmpty(r) ? "empty" : "partial";
+    cls = servesMixedContracts(db, symbol, rawTimeframe, day) ? "partial" : "complete";
+  } else cls = mismatchIsEmpty(validation) ? "empty" : "partial";
+  return { day, class: cls, validation };
+}
+
+export function classifySessionDay(
+  db: Database,
+  symbol: string,
+  day: SessionDay,
+  rawTimeframe: Timeframe,
+  nowUnix: number,
+): SessionDayClass {
+  return assessSessionDay(db, symbol, day, rawTimeframe, nowUnix).class;
 }
 
 export interface FetchWindow {
@@ -185,6 +203,7 @@ export interface EnsureCachedResult {
   // True iff a fetch this call was served by (and rejected for) the Simulated
   // Data Feed, so nothing was cached. get_candles surfaces it as a warning.
   simFeedRejected: boolean;
+  refusedWindows?: number;
 }
 
 /** Best-effort. `through` widens the request so it also covers the rest of a batch. */
@@ -246,6 +265,8 @@ export async function fetchMissingDailyBars(
  * In-progress days are always refetched. The live bar_close ingest is
  * best-effort; refetching today on every query keeps the view fresh
  * without depending on stream reliability.
+ *
+ * A connected plan over `maxWindows` is refused whole, setting refusedWindows.
  */
 export async function ensureCached(
   db: Database,
@@ -257,6 +278,7 @@ export async function ensureCached(
   deps: EnsureCachedDeps,
   nowUnix: number,
   calendar?: SessionCalendar,
+  maxWindows?: number,
 ): Promise<EnsureCachedResult> {
   // Calendar-aware enumeration: closed days don't exist; timed early-close
   // days carry adjusted geometry so they can classify complete.
@@ -266,10 +288,9 @@ export async function ensureCached(
   if (wantsDailyBar && deps.isConnected()) {
     await fetchMissingDailyBars(db, symbol, days, rawTimeframe, template, deps.request, nowUnix);
   }
-  const classifications: DayClassification[] = days.map((day) => ({
-    day,
-    class: classifySessionDay(db, symbol, day, rawTimeframe, nowUnix),
-  }));
+  const classifications = days.map((day) =>
+    assessSessionDay(db, symbol, day, rawTimeframe, nowUnix),
+  );
   const windows = planFetchWindows(classifications, rawTimeframe);
 
   const result: EnsureCachedResult = {
@@ -293,6 +314,11 @@ export async function ensureCached(
         message: "NinjaTrader not connected",
       });
     }
+    return result;
+  }
+
+  if (maxWindows !== undefined && windows.length > maxWindows) {
+    result.refusedWindows = windows.length;
     return result;
   }
 

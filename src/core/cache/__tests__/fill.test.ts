@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import Database from "better-sqlite3";
 import { initializeSchema } from "../../../db/schema.js";
 import {
+  assessSessionDay,
   CANDLE_FETCH_TIMEOUT_MS,
   classifySessionDay,
   DAILY_FETCH_BATCH_DAYS,
@@ -357,5 +358,93 @@ describe("sparse 15s days through classify and early-close observation", () => {
     // now < endUnix: the live stream owns today, so the guard must not fire.
     const during = DAYS[0].endUnix - 3600;
     expect(classifySessionDay(db, "NQ", DAYS[0], "15s", during)).toBe("in_progress");
+  });
+});
+
+describe("assessSessionDay", () => {
+  function seed5m(db: Database.Database, stamps: readonly number[]): void {
+    const stmt = db.prepare(
+      `INSERT INTO candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES ('NQ', '5m', ?, 1, 2, 0.5, 1.5, 10)`,
+    );
+    for (const t of stamps) stmt.run(t);
+  }
+
+  it("keeps the validation behind the verdict", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const all = expectedCloseStamps(DAYS[0], "5m");
+    seed5m(db, all.slice(0, 100));
+
+    const partial = assessSessionDay(db, "NQ", DAYS[0], "5m", NOW);
+    expect(partial.class).toBe("partial");
+    expect(partial.validation?.status).toBe("mismatch");
+    expect(partial.validation?.missing).toEqual(all.slice(100));
+
+    expect(assessSessionDay(db, "NQ", DAYS[1], "5m", NOW)).toMatchObject({
+      day: DAYS[1],
+      class: "empty",
+      validation: { status: "mismatch", actual: [] },
+    });
+    expect(assessSessionDay(db, "NQ", DAYS[1], "5m", DAYS[1].startUnix + 60)).toMatchObject({
+      class: "in_progress",
+      validation: { status: "skipped" },
+    });
+  });
+
+  it("judges an imported day complete without validating it", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    seed5m(db, expectedCloseStamps(DAYS[0], "5m").slice(0, 100));
+    db.prepare(`UPDATE candles SET source = 'databento'`).run();
+    expect(assessSessionDay(db, "NQ", DAYS[0], "5m", NOW)).toEqual({ day: DAYS[0], class: "complete" });
+  });
+});
+
+describe("ensureCached window budget", () => {
+  function coldRange(connected: boolean, maxWindows: number) {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    const request = vi.fn(async () => ({}));
+    const run = () =>
+      ensureCached(
+        db,
+        "NQ",
+        DAYS[0].startUnix,
+        DAYS[2].endUnix,
+        "5m",
+        CME_US_INDEX_FUTURES_ETH,
+        { isConnected: () => connected, request },
+        NOW,
+        undefined,
+        maxWindows,
+      );
+    return { request, run };
+  }
+
+  it("refuses a plan over the budget whole, fetching nothing", async () => {
+    const { request, run } = coldRange(true, 2);
+    const result = await run();
+    expect(request).not.toHaveBeenCalled();
+    expect(result.refusedWindows).toBe(3);
+    expect(result.windowsFetched).toBe(0);
+    expect(result.windowsFailed).toBe(0);
+    expect(result.classifications.map((c) => c.class)).toEqual(["empty", "empty", "empty"]);
+  });
+
+  it("runs a plan within the budget", async () => {
+    const { request, run } = coldRange(true, 3);
+    const result = await run();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(result.refusedWindows).toBeUndefined();
+  });
+
+  it("fails a disconnected call's windows instead of refusing", async () => {
+    const { request, run } = coldRange(false, 1);
+    const result = await run();
+    expect(request).not.toHaveBeenCalled();
+    expect(result.refusedWindows).toBeUndefined();
+    expect(result.bridgeDisconnected).toBe(true);
+    expect(result.windowsFailed).toBe(3);
   });
 });

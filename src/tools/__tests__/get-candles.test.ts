@@ -189,6 +189,42 @@ describe("get_candles inline cold-work guard", () => {
   });
 });
 
+describe("get_candles verdicts from before the fill", () => {
+  const MON_START = unix(2026, 5, 3, 22);
+  const AFTER = MON_START + 90_000;
+  const bars = (start: number) =>
+    Array.from({ length: 276 }, (_, i) => ({
+      timestamp: start + (i + 1) * 300, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10,
+    }));
+
+  it("re-checks a cached day after a fetch that switched its contract", async () => {
+    const { db, handler, request } = harness({ connected: true });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    ingestCandles("NQ", "5m", bars(DAY_START), db, {
+      mode: "day-refill", nowUnix: AFTER, contractForDay: () => "NQ 06-26",
+    });
+    // Monday's fetch also brings Friday's daily bar under the next contract, as
+    // a daily span over both days does, so Friday's 5m bars stop being served.
+    request.mockImplementation(async () => {
+      ingestCandles("NQ", "5m", bars(MON_START), db, {
+        mode: "day-refill", nowUnix: AFTER, contractForDay: () => "NQ 06-26",
+      });
+      ingestCandles("NQ", "1d", [{ ...bars(DAY_START)[0], timestamp: DAY_START + 82_800 }], db, {
+        mode: "day-refill", nowUnix: AFTER, contractForDay: () => "NQ 09-26",
+      });
+      return {};
+    });
+
+    const out = JSON.parse(await call(handler, { start: "2026-05-01", end: "2026-05-04", limit: 600 }));
+    log.mockRestore();
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(out.count).toBe(276);
+    expect(out.validation).toMatchObject({ ok: 1, mismatch: 1 });
+    expect(out.data_complete).toBe(false);
+  });
+});
+
 describe("get_candles 15s raw stream", () => {
   it("computes 15s geometry and fails closed at the default limit", async () => {
     const { handler, request } = harness({ connected: true });
