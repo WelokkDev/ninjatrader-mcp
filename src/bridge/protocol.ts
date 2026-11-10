@@ -872,7 +872,7 @@ export const errorMessageSchema = reqMsg("error", {
 export type ErrorMessage = z.infer<typeof errorMessageSchema>;
 
 // Registering here admits a type to parseMessage and adds it to InboundMessage.
-const INBOUND_SCHEMAS = {
+export const INBOUND_SCHEMAS = {
   hello: helloMessageSchema,
   heartbeat: heartbeatMessageSchema,
   instruments_update: instrumentsUpdateMessageSchema,
@@ -903,33 +903,36 @@ const INBOUND_SCHEMAS = {
   error: errorMessageSchema,
 };
 
+export const OUTBOUND_SCHEMAS = {
+  hello_ack: helloAckMessageSchema,
+  draw_zone: drawZoneMessageSchema,
+  draw: drawMessageSchema,
+  clear_zones: clearZonesMessageSchema,
+  request_candles: requestCandlesMessageSchema,
+  request_session_calendar: requestSessionCalendarMessageSchema,
+  resolve_instrument: resolveInstrumentMessageSchema,
+  request_open_charts: requestOpenChartsMessageSchema,
+  navigate_chart: navigateChartMessageSchema,
+  request_drawings: requestDrawingsMessageSchema,
+  request_chart_indicators: requestChartIndicatorsMessageSchema,
+  request_indicator_values: requestIndicatorValuesMessageSchema,
+  request_set_indicator_params: requestSetIndicatorParamsMessageSchema,
+  subscribe_bars: subscribeBarsMessageSchema,
+  unsubscribe_bars: unsubscribeBarsMessageSchema,
+  request_positions: requestPositionsMessageSchema,
+  subscribe_positions: subscribePositionsMessageSchema,
+  unsubscribe_positions: unsubscribePositionsMessageSchema,
+  place_order: placeOrderMessageSchema,
+  place_oco: placeOcoMessageSchema,
+  cancel_order: cancelOrderMessageSchema,
+  cancel_all: cancelAllMessageSchema,
+  flatten: flattenMessageSchema,
+  change_order: changeOrderMessageSchema,
+  client_response: clientResponseMessageSchema,
+};
+
 export type InboundMessage = z.infer<(typeof INBOUND_SCHEMAS)[keyof typeof INBOUND_SCHEMAS]>;
-export type OutboundMessage =
-  | HelloAckMessage
-  | DrawZoneMessage
-  | DrawMessage
-  | ClearZonesMessage
-  | RequestCandlesMessage
-  | RequestSessionCalendarMessage
-  | ResolveInstrumentMessage
-  | RequestOpenChartsMessage
-  | NavigateChartMessage
-  | RequestDrawingsMessage
-  | RequestChartIndicatorsMessage
-  | RequestIndicatorValuesMessage
-  | RequestSetIndicatorParamsMessage
-  | SubscribeBarsMessage
-  | UnsubscribeBarsMessage
-  | RequestPositionsMessage
-  | SubscribePositionsMessage
-  | UnsubscribePositionsMessage
-  | PlaceOrderMessage
-  | PlaceOcoMessage
-  | CancelOrderMessage
-  | CancelAllMessage
-  | FlattenMessage
-  | ChangeOrderMessage
-  | ClientResponseMessage;
+export type OutboundMessage = z.infer<(typeof OUTBOUND_SCHEMAS)[keyof typeof OUTBOUND_SCHEMAS]>;
 export type AnyMessage = InboundMessage | OutboundMessage;
 
 export type ParseResult =

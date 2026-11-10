@@ -57,7 +57,7 @@ interface DispatchOutcome {
   code?: string;
 }
 
-interface DispatchSpec {
+export interface DispatchSpec {
   /** C# codes raised BEFORE the NT8 call — provably never dispatched. */
   definitiveCodes: ReadonlySet<string>;
   /** C# codes meaning the NT8 API call itself threw — ambiguous outcome. */
@@ -66,8 +66,8 @@ interface DispatchSpec {
   special?: Readonly<Record<string, string>>;
 }
 
-// Rejections raised BEFORE Submit() — certainly-not-submitted. Kept in sync
-// with HandlePlaceOrder/HandlePlaceOco in mcp-bridge.cs.
+// Rejections raised BEFORE Submit() — certainly-not-submitted. That ordering is kept by hand
+// in HandlePlaceOrder/HandlePlaceOco (mcp-bridge.cs).
 const PRE_SUBMIT_CODES = new Set<string>([
   "gate-disabled",
   "account-not-allowed",
@@ -108,7 +108,7 @@ const INSTRUMENT_OP_DEFINITIVE_CODES = new Set<string>([
   "instrument-not-found",
 ]);
 
-function placeSpec(clientOrderId: string): DispatchSpec {
+export function placeSpec(clientOrderId: string): DispatchSpec {
   return {
     definitiveCodes: PRE_SUBMIT_CODES,
     ambiguousCodes: SUBMIT_THREW_CODES,
@@ -118,7 +118,7 @@ function placeSpec(clientOrderId: string): DispatchSpec {
   };
 }
 
-function ocoSpec(baseId: string): DispatchSpec {
+export function ocoSpec(baseId: string): DispatchSpec {
   return {
     definitiveCodes: PRE_SUBMIT_CODES,
     ambiguousCodes: SUBMIT_THREW_CODES,
@@ -149,10 +149,10 @@ function managementSpec(
   };
 }
 
-const CANCEL_SPEC = managementSpec("cancel", CANCEL_DEFINITIVE_CODES, "cancel-failed");
-const CANCEL_ALL_SPEC = managementSpec("cancel-all", INSTRUMENT_OP_DEFINITIVE_CODES, "cancel-all-failed");
-const FLATTEN_SPEC = managementSpec("flatten", INSTRUMENT_OP_DEFINITIVE_CODES, "flatten-failed");
-const CHANGE_SPEC = managementSpec("change", CHANGE_DEFINITIVE_CODES, "change-failed");
+export const CANCEL_SPEC = managementSpec("cancel", CANCEL_DEFINITIVE_CODES, "cancel-failed");
+export const CANCEL_ALL_SPEC = managementSpec("cancel-all", INSTRUMENT_OP_DEFINITIVE_CODES, "cancel-all-failed");
+export const FLATTEN_SPEC = managementSpec("flatten", INSTRUMENT_OP_DEFINITIVE_CODES, "flatten-failed");
+export const CHANGE_SPEC = managementSpec("change", CHANGE_DEFINITIVE_CODES, "change-failed");
 
 /** Classify a dispatch failure by TYPE, never by sniffing the message string.
  *  `certainlyNot` is true ONLY when the request provably never reached NT8;

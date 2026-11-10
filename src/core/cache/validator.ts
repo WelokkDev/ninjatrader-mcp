@@ -1,6 +1,6 @@
 import type { Database } from "better-sqlite3";
 import type { SessionDay, SessionTemplate } from "../sessions/types.js";
-import type { Timeframe } from "../types.js";
+import type { SubMinuteTimeframe, Timeframe } from "../types.js";
 import { REGISTRY } from "../sessions/registry.js";
 
 // Intraday period lengths. "1d" has no fixed period — its geometry is the
@@ -47,14 +47,13 @@ function isDaily(tf: Timeframe): tf is "1d" {
 // be sparser. 5s/15s remain estimates (15s measured at 97% of its ceiling,
 // `npm run audit-bars`, 2026-08-03).
 // 1m observed max (M2K): 9.6% missing, 6-minute gaps.
-export const SPARSE_TOLERANCE: Partial<
-  Record<Timeframe, { maxMissingFraction: number; maxGapSeconds: number }>
-> = {
+type SparseTolerance = { maxMissingFraction: number; maxGapSeconds: number };
+export const SPARSE_TOLERANCE: Partial<Record<Timeframe, SparseTolerance>> = {
   "1s": { maxMissingFraction: 0.6, maxGapSeconds: 180 },
   "5s": { maxMissingFraction: 0.35, maxGapSeconds: 600 },
   "15s": { maxMissingFraction: 0.02, maxGapSeconds: 120 },
   "1m": { maxMissingFraction: 0.15, maxGapSeconds: 900 },
-};
+} satisfies Record<SubMinuteTimeframe | "1m", SparseTolerance>;
 
 /** True iff a mismatch is acceptable zero-tick sparseness for its TF. */
 export function isAcceptableSparseMismatch(
