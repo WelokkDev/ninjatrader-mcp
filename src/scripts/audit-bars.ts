@@ -11,11 +11,7 @@
 // the response's `validation` field.
 
 import db from "../db/connection.js";
-import {
-  isRawTimeframe,
-  isSubMinuteTimeframe,
-  SUPPORTED_TIMEFRAMES,
-} from "../core/constants.js";
+import { isRawTimeframe, SUPPORTED_TIMEFRAMES } from "../core/constants.js";
 import { getInstrumentConfig, REGISTRY } from "../core/sessions/registry.js";
 import { makeSessionDayResolver, sessionDayRange } from "../core/sessions/session-day.js";
 import { loadCalendar, type SessionCalendar } from "../core/sessions/calendar.js";
@@ -162,10 +158,8 @@ function main(): void {
       if (result.status === "ok") {
         ok++;
         // "ok" with missing stamps means SPARSE_TOLERANCE absorbed the day.
-        if (isSubMinuteTimeframe(tf)) {
-          const obs = observeSparse(result);
-          if (obs) sparse.push(obs);
-        }
+        const obs = observeSparse(result);
+        if (obs) sparse.push(obs);
       } else if (result.status === "skipped") skipped++;
       else {
         mismatch++;

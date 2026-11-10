@@ -89,12 +89,14 @@ describe("resolve_session_days relative anchors", () => {
       "1s": 414000,
       "5s": 82800,
       "15s": 27600,
+      "1m": 6900,
       "5m": 1380,
       "15m": 460,
       "30m": 230,
       "1h": 115,
       "2h": 60,
       "4h": 30,
+      "8h": 15,
       "1d": 5,
     });
     const sum5m = out.sessionDays.reduce(

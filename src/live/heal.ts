@@ -13,6 +13,7 @@ export const HEAL_MAX_WINDOW_SECS: Record<LiveTimeframe, number> = {
   "1s": 30 * 60,
   "5s": 2 * 3600,
   "15s": 6 * 3600,
+  "1m": 86400,
   "5m": 3 * 86400,
   "15m": 3 * 86400,
 };
@@ -21,6 +22,7 @@ export const TF_SECS: Record<LiveTimeframe, number> = {
   "1s": 1,
   "5s": 5,
   "15s": 15,
+  "1m": 60,
   "5m": 300,
   "15m": 900,
 };
@@ -38,6 +40,7 @@ export const GAP_MIN_SPAN_SECS: Record<LiveTimeframe, number> = {
   "1s": 180,
   "5s": 120,
   "15s": 0,
+  "1m": 300,
   "5m": 0,
   "15m": 0,
 };

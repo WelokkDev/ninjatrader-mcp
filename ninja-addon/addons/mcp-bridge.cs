@@ -118,7 +118,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		// "1d" is historical-fetch only — subscribe_bars rejects it (see
 		// HandleSubscribeBars); the server's LIVE_TIMEFRAMES matches.
 		private static readonly HashSet<string> ALLOWED_RAW_TIMEFRAMES =
-			new HashSet<string>(StringComparer.Ordinal) { "1s", "5s", "15s", "5m", "15m", "1d" };
+			new HashSet<string>(StringComparer.Ordinal) { "1s", "5s", "15s", "1m", "5m", "15m", "1d" };
 
 		// Fallback for servers that send no nt8TradingHours; a new template needs no entry here.
 		private static readonly Dictionary<string, string> TRADING_HOURS_MAP =
@@ -160,7 +160,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		{
 			public string      Key;        // symbol + "|" + timeframe
 			public string      Symbol;     // roster symbol, e.g. "MNQ"
-			public string      Timeframe;  // "1s" | "5s" | "15s" | "5m" | "15m"
+			public string      Timeframe;  // "1s" | "5s" | "15s" | "1m" | "5m" | "15m"
 			public string      TradingHoursTemplate; // internal key, for reconnect re-resolution
 			public string      Nt8TradingHours;      // NT8 name the server sent; null = use the map
 			public int         TfSeconds;

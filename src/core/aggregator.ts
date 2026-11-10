@@ -9,12 +9,13 @@ import {
 } from "./sessions/session-day.js";
 
 // Derived targets only: "1d" is excluded (see core/constants.ts header)
-// and the raw streams (1s/5s/15s/5m/15m) short-circuit before this map is read.
+// and the raw streams short-circuit before this map is read.
 const PERIOD_MINUTES: Record<DerivedTimeframe, number> = {
   "30m": 30,
   "1h": 60,
   "2h": 120,
   "4h": 240,
+  "8h": 480,
 };
 
 export interface AggregateOptions {

@@ -246,9 +246,9 @@ describe("two contracts on one session-day", () => {
       ingestCandles("NQ", "5m", barsAt(300, 1, 276), db, {
         mode: "day-refill", nowUnix: AFTER, contractForDay: () => null,
       });
-      fetch(db, null); // 92 x 15m, plus the 87 rows derived from them
+      fetch(db, null); // 92 x 15m, plus the 90 rows derived from them
       const before = unattestedStored(db);
-      expect(before).toBe(276 + 92 + 87);
+      expect(before).toBe(276 + 92 + 90);
 
       ingestCandles(
         "NQ", "1d",

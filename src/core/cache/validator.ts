@@ -10,12 +10,14 @@ const SECONDS_PER_TIMEFRAME: Record<Exclude<Timeframe, "1d">, number> = {
   "1s": 1,
   "5s": 5,
   "15s": 15,
+  "1m": 60,
   "5m": 300,
   "15m": 900,
   "30m": 1800,
   "1h": 3600,
   "2h": 7200,
   "4h": 14400,
+  "8h": 28800,
 };
 
 /**
@@ -31,8 +33,8 @@ function isDaily(tf: Timeframe): tf is "1d" {
   return tf === "1d";
 }
 
-// NT8 emits a bar only for buckets with >=1 tick, so sub-minute days
-// legitimately miss stamps — coarser TFs don't and have no entry here.
+// NT8 emits a bar only for buckets with >=1 tick, so sub-minute and 1m days
+// legitimately miss stamps — 5m and coarser don't and have no entry here.
 //
 // 1s is MEASURED over 260 imported MNQ session-days (Aug 2025 - Aug 2026):
 //
@@ -44,12 +46,14 @@ function isDaily(tf: Timeframe): tf is "1d" {
 // below have headroom above these maxima — thinner instruments than MNQ will
 // be sparser. 5s/15s remain estimates (15s measured at 97% of its ceiling,
 // `npm run audit-bars`, 2026-08-03).
+// 1m observed max (M2K): 9.6% missing, 6-minute gaps.
 export const SPARSE_TOLERANCE: Partial<
   Record<Timeframe, { maxMissingFraction: number; maxGapSeconds: number }>
 > = {
   "1s": { maxMissingFraction: 0.6, maxGapSeconds: 180 },
   "5s": { maxMissingFraction: 0.35, maxGapSeconds: 600 },
   "15s": { maxMissingFraction: 0.02, maxGapSeconds: 120 },
+  "1m": { maxMissingFraction: 0.15, maxGapSeconds: 900 },
 };
 
 /** True iff a mismatch is acceptable zero-tick sparseness for its TF. */

@@ -234,7 +234,7 @@ Restart your MCP client so it picks up the server, then:
    | Arg | Value |
    |---|---|
    | `symbol` | ES, NQ, YM, RTY, MES, MNQ, MYM, M2K, CL, MCL, GC, MGC, SIL, M6A, M6E |
-   | `timeframe` | `1s`, `5s`, `15s`, `5m`, `15m` or `1d` — the raw streams NT8 serves. `15m` also rebuilds derived 30m/1h/2h/4h; the rest are parallel streams. The sub-minute ones are dense (up to ~82,800 buckets/day at `1s`) and slow to fill — prefetch them a few days at a time. |
+   | `timeframe` | `1s`, `5s`, `15s`, `1m`, `5m`, `15m` or `1d` — the raw streams NT8 serves. `15m` also rebuilds derived 30m/1h/2h/4h/8h; the rest are parallel streams. The sub-minute ones are dense (up to ~82,800 buckets/day at `1s`) and slow to fill — prefetch them a few days at a time. |
    | `start` | `YYYY-MM-DD` session day (close-date convention) |
    | `end` | `YYYY-MM-DD`, inclusive |
 
@@ -511,7 +511,7 @@ quiet window suppresses baselines and unsettled states, never RED.
 | `[bridge] heartbeat timeout (30123ms) — closing socket` | 30s of silence from NT8. It'll reconnect on its own. |
 | `[McpBridge] [startup] WARNING: mapping target NOT FOUND in NT8: ...` | A Trading Hours template name doesn't match this install. Candle requests for it fail closed. See step 5. |
 | `NT8 has no TradingHours template named '...'` | Same root cause, hit at request time. |
-| `Unsupported timeframe: 'x'. Supported raw TFs: …` | Only the raw TFs (`1s`, `5s`, `15s`, `5m`, `15m`, `1d`) are fetched raw; 30m–4h are derived from 15m. The message lists the AddOn's own set — if it is missing `1s`/`5s`, the AddOn predates them and needs a recompile. |
+| `Unsupported timeframe: 'x'. Supported raw TFs: …` | Only the raw TFs (`1s`, `5s`, `15s`, `1m`, `5m`, `15m`, `1d`) are fetched raw; 30m–8h are derived from 15m. The message lists the AddOn's own set — if it is missing `1m`, `1s` or `5s`, the AddOn predates them and needs a recompile. |
 | `NinjaTrader is not connected — start NT8 with the McpBridge addon, then retry.` | Prefetch with no bridge client. Work back through step 5. |
 | Tool list is missing tools after a rebuild | Stop the hub (`npm stop`) and reconnect the client — a running hub keeps serving the code it started with. |
 

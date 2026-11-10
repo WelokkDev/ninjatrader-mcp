@@ -13,12 +13,14 @@ export const PERIOD_SECONDS: Record<Exclude<Timeframe, "1d">, number> = {
   "1s": 1,
   "5s": 5,
   "15s": 15,
+  "1m": 60,
   "5m": 5 * 60,
   "15m": 15 * 60,
   "30m": 30 * 60,
   "1h": 60 * 60,
   "2h": 120 * 60,
   "4h": 240 * 60,
+  "8h": 480 * 60,
 };
 
 // Build the as-of multi-timeframe snapshot for a single decision instant.
@@ -46,7 +48,7 @@ export function buildFrozenView(args: {
   for (const tf of timeframes) {
     if (tf === "1d") {
       throw new Error(
-        `buildFrozenView: "1d" is out of scope — the frozen view buckets intraday bars, and daily is a raw NT8 stream (read it from the cache directly). Pass a subset of 15m/30m/1h/2h/4h.`,
+        `buildFrozenView: "1d" is out of scope — the frozen view buckets intraday bars, and daily is a raw NT8 stream (read it from the cache directly). Pass a subset of 15m/30m/1h/2h/4h/8h.`,
       );
     }
     const { completedBars, formingBar } = bucketAsOf(

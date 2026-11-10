@@ -32,7 +32,7 @@ TICK_SIZES = {
     "MES": 0.25, "MNQ": 0.25, "MYM": 1.0, "M2K": 0.1,
     "CL": 0.01, "GC": 0.1,
 }  # fmt: skip
-LIVE_TIMEFRAMES = ("1s", "5s", "15s", "5m", "15m")
+LIVE_TIMEFRAMES = ("1s", "5s", "15s", "1m", "5m", "15m")
 
 
 def log(text: str) -> None:

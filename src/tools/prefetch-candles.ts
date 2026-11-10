@@ -103,7 +103,7 @@ export function registerPrefetchTools(server: McpServer, session: SessionContext
 
   server.tool(
     "prefetch_candles",
-    "Start a BACKGROUND batch download of candle history into the local cache and return instantly with a job plan ({jobId, daysTotal, alreadyComplete, expectedBarsToFetch}). Use this instead of big synchronous get_candles pulls — the fetch runs one session-day at a time inside the server (kind to NT8), every day is verified against the cache after its response, and failures are recorded per-day. Fills the RAW stream: '5m' feeds 5m; '15m' also rebuilds the derived 30m–4h TFs; '1d' fills one bar per session-day, batched 120 days per request. Already-complete days are skipped, so re-issuing the same range resumes after a crash or restart. A prefetch is a bounded batch: resolve and confirm the range with resolve_session_days BEFORE starting. Poll prefetch_status for progress; read the data afterwards with get_candles (instant once cached).",
+    "Start a BACKGROUND batch download of candle history into the local cache and return instantly with a job plan ({jobId, daysTotal, alreadyComplete, expectedBarsToFetch}). Use this instead of big synchronous get_candles pulls — the fetch runs one session-day at a time inside the server (kind to NT8), every day is verified against the cache after its response, and failures are recorded per-day. Fills the RAW stream: '5m' feeds 5m; '15m' also rebuilds the derived 30m–8h TFs; '1d' fills one bar per session-day, batched 120 days per request. Already-complete days are skipped, so re-issuing the same range resumes after a crash or restart. A prefetch is a bounded batch: resolve and confirm the range with resolve_session_days BEFORE starting. Poll prefetch_status for progress; read the data afterwards with get_candles (instant once cached).",
     {
       symbol: z
         .string()
@@ -111,7 +111,7 @@ export function registerPrefetchTools(server: McpServer, session: SessionContext
       timeframe: z
         .enum(RAW_TIMEFRAMES as unknown as [RawTimeframe, ...RawTimeframe[]])
         .describe(
-          "RAW timeframe to ingest. '15m' also rebuilds the derived 30m/1h/2h/4h aggregates; '1s', '5s', '15s', '5m' and '1d' are their own parallel streams. The sub-minute TFs are tick-derived and dense (~5,520 bars/day at 15s, ~16,560 at 5s, up to ~82,800 at 1s) — expect slow per-day fetches and large cache growth; this background job is the only sane transport for them, and second-granularity history is SHALLOW provider-side, so old ranges may simply return nothing. '1d' is one bar per session-day and is fetched in batches of 120 days per request, so even multi-year daily history is a handful of round-trips.",
+          "RAW timeframe to ingest. '15m' also rebuilds the derived 30m/1h/2h/4h/8h aggregates; '1s', '5s', '15s', '1m', '5m' and '1d' are their own parallel streams. The sub-minute TFs are tick-derived and dense (~5,520 bars/day at 15s, ~16,560 at 5s, up to ~82,800 at 1s) — expect slow per-day fetches and large cache growth; this background job is the only sane transport for them, and second-granularity history is SHALLOW provider-side, so old ranges may simply return nothing. '1d' is one bar per session-day and is fetched in batches of 120 days per request, so even multi-year daily history is a handful of round-trips.",
         ),
       start: z
         .string()

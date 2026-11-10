@@ -209,6 +209,19 @@ describe("sparse-TF heal floor (GAP_MIN_SPAN_SECS)", () => {
     expect(rec.status()[0].lastGapAt).not.toBeNull();
   });
 
+  it("heals a 1m outage only once it reaches 5 minutes", () => {
+    const gaps: Array<{ fromTs: number; toTs: number }> = [];
+    const rec = makeRecorder({ onGap: (g) => gaps.push(g) });
+    const t = DAY_START + 3_600;
+    rec.record(bar({ ts: t, timeframe: "1m" }));
+    rec.record(bar({ ts: t + 3 * 60, timeframe: "1m" })); // 2 empty minutes
+    expect(gaps).toHaveLength(0);
+    rec.record(bar({ ts: t + 9 * 60, timeframe: "1m" })); // 5 empty minutes
+    expect(gaps).toEqual([
+      expect.objectContaining({ fromTs: t + 4 * 60, toTs: t + 8 * 60 }),
+    ]);
+  });
+
   it("leaves floor-0 timeframes (5m) healing on any missing stamp", () => {
     const gaps: Array<{ fromTs: number; toTs: number }> = [];
     const rec = makeRecorder({ onGap: (g) => gaps.push(g) });

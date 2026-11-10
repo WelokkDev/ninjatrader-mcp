@@ -174,6 +174,25 @@ describe("aggregateCandles — 4h is session-aligned (CME ETH)", () => {
   });
 });
 
+describe("aggregateCandles — 8h is session-aligned (CME ETH)", () => {
+  it("produces 3 buckets at 02:00, 10:00, 17:00 (7h stub) for one Tue session-day", () => {
+    const start = et("2026-04-20T18:00:00");
+    const end = et("2026-04-21T17:00:00");
+    const input: Candle[] = [];
+    for (let ts = start + 900; ts <= end; ts += 900) {
+      input.push({ timestamp: ts, open: 100, high: 100, low: 100, close: 100, volume: 1 });
+    }
+
+    const out = aggregateCandles(input, "8h", ETH_OPTS);
+    expect(out.map((c) => c.timestamp)).toEqual([
+      et("2026-04-21T02:00:00"),
+      et("2026-04-21T10:00:00"),
+      et("2026-04-21T17:00:00"),
+    ]);
+    expect(out.map((c) => c.volume)).toEqual([32, 32, 28]);
+  });
+});
+
 describe("aggregateCandles — boundary close-stamps land in the correct bucket", () => {
   it("Tue 22:00, 02:00, 06:00, 10:00, 14:00 each land in bucket 0..4 (not 1..5)", () => {
     // Each test bar carries a unique volume so we can identify which
@@ -461,7 +480,7 @@ describe("calendar-aware aggregation (holiday early close)", () => {
     );
     const adjustedDay = { label: "2026-02-16", startUnix: start, endUnix: end };
 
-    for (const tf of ["30m", "1h", "2h", "4h"] as const) {
+    for (const tf of ["30m", "1h", "2h", "4h", "8h"] as const) {
       const derived = aggregateCandles(input, tf, {
         ...ETH_OPTS,
         calendar: FEB16_CAL,

@@ -23,7 +23,8 @@ function sd(label: string, startUnix: number, endUnix: number): SessionDay {
 // fixtures programmatically so tests never hardcode unix values.
 function generateExpectedStamps(day: SessionDay, tf: Timeframe): number[] {
   const period: Record<Timeframe, number> = {
-    "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
+    "8h": 28800,
   };
   const p = period[tf];
   const dur = day.endUnix - day.startUnix;
@@ -63,7 +64,7 @@ const EST_DAY: SessionDay = sd(
 );
 
 describe("validateSessionDay — full sessions at every timeframe pass", () => {
-  for (const tf of ["5m", "15m", "30m", "1h", "2h", "4h"] as Timeframe[]) {
+  for (const tf of ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h"] as Timeframe[]) {
     it(`${tf}: full EDT session → ok`, () => {
       const db = makeDb();
       seedFull(db, "NQ", tf, EDT_DAY);
@@ -162,11 +163,45 @@ describe("validateSessionDay — generic stamp computation", () => {
     // are TZ-agnostic; geometry is invariant.
     const day = sd("test", 1_700_000_000, 1_700_000_000 + 82800);
     const counts: Record<Timeframe, number> = {
-      "5m": 276, "15m": 92, "30m": 46, "1h": 23, "2h": 12, "4h": 6,
+      "1m": 1380, "5m": 276, "15m": 92, "30m": 46, "1h": 23, "2h": 12, "4h": 6, "8h": 3,
     };
     for (const tf of Object.keys(counts) as Timeframe[]) {
       const r = validateSessionDay(db, "NQ", day, tf, NOW_FUTURE);
       expect(r.expected.length).toBe(counts[tf]);
     }
+  });
+});
+
+describe("validateSessionDay — 1m tolerates tickless minutes", () => {
+  function seedWithout(drop: (i: number) => boolean): DatabaseType {
+    const db = makeDb();
+    generateExpectedStamps(EDT_DAY, "1m").forEach((t, i) => {
+      if (!drop(i)) insertBar(db, "NQ", "1m", t);
+    });
+    return db;
+  }
+
+  it("scattered empty minutes and a 6-minute lull → ok", () => {
+    const db = seedWithout((i) => i % 40 === 0 || (i >= 600 && i < 606));
+    const r = validateSessionDay(db, "NQ", EDT_DAY, "1m", NOW_FUTURE);
+    expect(r.missing.length).toBeGreaterThan(6);
+    expect(r.status).toBe("ok");
+  });
+
+  it("a 15-minute hole → ok, a 16-minute hole → mismatch", () => {
+    const at = (len: number) =>
+      validateSessionDay(seedWithout((i) => i >= 600 && i < 600 + len), "NQ", EDT_DAY, "1m", NOW_FUTURE);
+    expect(at(15).status).toBe("ok");
+    const hole = at(16);
+    expect(hole.status).toBe("mismatch");
+    expect(hole.missing).toHaveLength(16);
+  });
+
+  it("one empty minute in 7 → ok, one in 6 → mismatch", () => {
+    // 14.3% vs 16.7% missing, all single-minute gaps: only the 15% cap separates them.
+    const every = (n: number) =>
+      validateSessionDay(seedWithout((i) => i % n === 0), "NQ", EDT_DAY, "1m", NOW_FUTURE);
+    expect(every(7).status).toBe("ok");
+    expect(every(6).status).toBe("mismatch");
   });
 });

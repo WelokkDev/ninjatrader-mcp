@@ -20,7 +20,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 > Placing orders *is* possible, but it ships **default-off** behind three independent safety gates and is deliberately not part of the zero-code path — see [TRADING.md](TRADING.md) only if you decide you want it.
 
-> **Trading something other than NQ?** Candle fetching is validated strictly and fails closed — it refuses rather than hand you partial or misaligned data. An instrument that trades in every 5-minute bucket is held to having every bar. One that doesn't is marked `density: "thin"` in `src/core/sessions/registry.ts`, and its days are verified against the daily bar's volume instead. If a symbol you add shows false `incomplete` days at 5m or 15m, it needs that flag. The sub-minute timeframes (`1s`, `5s`, `15s`) tolerate a fixed share of empty buckets, measured on MNQ, so a quieter instrument's sub-minute days can still read `incomplete`; the tolerances are in `src/core/cache/validator.ts`.
+> **Trading something other than NQ?** Candle fetching is validated strictly and fails closed — it refuses rather than hand you partial or misaligned data. An instrument that trades in every 5-minute bucket is held to having every bar. One that doesn't is marked `density: "thin"` in `src/core/sessions/registry.ts`, and its days are verified against the daily bar's volume instead. If a symbol you add shows false `incomplete` days at 5m or 15m, it needs that flag. The sub-minute timeframes (`1s`, `5s`, `15s`) and `1m` tolerate a fixed share of empty buckets, sized for liquid CME futures, so a quieter instrument's days at those timeframes can still read `incomplete`; the tolerances are in `src/core/cache/validator.ts`.
 
 **Docs map:**
 
@@ -50,8 +50,8 @@ Everything above is **read-only or draw-only** — the bridge never touches your
   │     list_sessions (registered by the hub itself)                 │
   │                                                                  │
   │   Bridge (src/bridge/)          SQLite (data/candles.db, WAL)    │
-  │   - WS server on 127.0.0.1:9472 - candles (1s/5s/15s/5m/15m,     │
-  │   - Bearer-token auth             1d raw; 30m–4h from 15m)       │
+  │   - WS server on 127.0.0.1:9472 - candles (1s/5s/15s/1m/5m/15m,  │
+  │   - Bearer-token auth             1d raw; 30m–8h from 15m)       │
   │   - one active NT8 client       - trades ledger                  │
   │   - /feed push channel          - live subscriptions, positions  │
   │     for local bots              - order-submission audit         │
@@ -88,7 +88,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 1. **MCP client → server (stdio).** Claude invokes a tool; handlers run in-process in the Node server. stdout is reserved for the MCP protocol — all logging goes to stderr.
 2. **Server ↔ NT8 (WebSocket).** The bridge is a WebSocket *server* bound to `127.0.0.1:9472`; the NT8 AddOn dials out to it with `Authorization: Bearer <token>`. Nothing reaches in from the internet. One NT8 client at a time (a second connection gets 409). The AddOn heartbeats every 10s; the server drops the connection after 30s of silence and the AddOn reconnects with backoff.
 3. **Historical fill.** `get_candles` classifies every session day in the requested range (complete / partial / empty / in-progress) and fetches each incomplete day from NT8 as its own `request_candles` window — windows are deliberately not merged, so one slow day can't poison the range. Responses ingest idempotently even after the 30s request timeout ("late heal"). `prefetch_candles` does the same in the background for bulk history.
-4. **Live fill.** `subscribe_live_bars` streams closed bars from NT8 straight into the same cache `get_candles` reads — 30m–4h derive automatically on 15m closes. Subscriptions persist across server restarts, replay on every NT8 reconnect, and missed bars heal automatically via `request_candles`. Local bots can consume the same stream over `ws://127.0.0.1:9472/feed` with the same bearer token.
+4. **Live fill.** `subscribe_live_bars` streams closed bars from NT8 straight into the same cache `get_candles` reads — 30m–8h derive automatically on 15m closes. Subscriptions persist across server restarts, replay on every NT8 reconnect, and missed bars heal automatically via `request_candles`. Local bots can consume the same stream over `ws://127.0.0.1:9472/feed` with the same bearer token.
 5. **Positions (read-only).** `get_positions` and the position event feed observe accounts — fills, order changes, position transitions, with snapshot self-heal on reconnect. When NT8 is disconnected the answer is marked stale, never assumed flat.
 6. **Trade import (no bridge).** `get_trades` / `sync_trades` read NinjaTrader's own `NinjaTrader.sqlite` directly — via a temp snapshot copy, never the live file — pair executions into round-trip trades, and store them in the ledger.
 7. **Orders (default-off).** There is exactly one write path — `ExecutionService` (place, OCO exit pairs, change, cancel, cancel-all, flatten) — behind three independent fail-closed gates (tool registration, runtime config, and a C#-side gate the server can't recompile away). Risk-reducing ops (cancel/flatten) are allow-list-only so they keep working through a kill-switch. Every attempt is audited. See [TRADING.md](TRADING.md).
@@ -105,7 +105,7 @@ The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: 
 
 | Tool | Summary |
 |---|---|
-| `get_candles` | OHLCV for `(symbol, timeframe, start, end)` session-day range from the cache, auto-filling missing days from NT8. **Fail-closed:** if the range's expected bar count exceeds `limit` (default 500) it refuses rather than silently truncating, and every response reports expected vs. actual counts plus per-day validation. The sub-minute TFs are dense — per session-day roughly 82,800 buckets at `1s`, 16,560 at `5s`, 5,520 at `15s` — and always need an explicit `limit`. They are also sparse: NT8 emits no bar for a bucket that saw no tick, so a legitimate `1s` day returns well under its full grid. |
+| `get_candles` | OHLCV for `(symbol, timeframe, start, end)` session-day range from the cache, auto-filling missing days from NT8. **Fail-closed:** if the range's expected bar count exceeds `limit` (default 500) it refuses rather than silently truncating, and every response reports expected vs. actual counts plus per-day validation. The sub-minute TFs are dense — per session-day roughly 82,800 buckets at `1s`, 16,560 at `5s`, 5,520 at `15s` — and always need an explicit `limit`, as does `1m` (~1,380 per session-day). They are also sparse: NT8 emits no bar for a bucket that saw no tick, so a legitimate `1s` day returns well under its full grid. |
 | `resolve_session_days` | Pure calendar math: converts a date range or a relative anchor (`today`, `last-week`, `last-n-sessions`, …) into exact session days with ET spans, unix bounds, and per-timeframe bar-count estimates. Fetches nothing. Holidays/early closes come from the session calendar synced from NT8; `holidaysModeled: false` flags a calendar-blind template. |
 | `prefetch_candles` / `prefetch_status` / `prefetch_cancel` | Bulk history pull in the background, one NT8 request at a time, verifying each day against the cache. Already-complete days are skipped, so re-issuing resumes rather than redoes. Jobs live in server memory and don't survive a restart — check `prefetch_status` for failed days. |
 
@@ -115,7 +115,7 @@ The three bar-feed tools and the two position-feed tools form the `live-feeds` t
 
 | Tool | Summary |
 |---|---|
-| `subscribe_live_bars` / `unsubscribe_live_bars` | Stream live **closed** bars for a symbol into the candle cache (raw TFs: `5m` default, `15m`, and `15s`/`5s`/`1s` on demand). Answers with the truth from NT8 — `acked` plus the resolved contract — not just "message sent". Persists across restarts, replays on reconnect, gap-heals automatically. |
+| `subscribe_live_bars` / `unsubscribe_live_bars` | Stream live **closed** bars for a symbol into the candle cache (raw TFs: `5m` default, `15m`, `1m`, and `15s`/`5s`/`1s` on demand). Answers with the truth from NT8 — `acked` plus the resolved contract — not just "message sent". Persists across restarts, replays on reconnect, gap-heals automatically. |
 | `live_feed_status` | Per-subscription health: acked state, contract, lag, dup/out-of-order/gap counters, heals in flight, `/feed` consumer count, position-feed health. |
 | `get_positions` | Read-only open positions per account (sim vs. live never merged): average entry, working stops/targets matched into dollar risk and R, unrealized P&L with its price source and age. Disconnected ⇒ `stale: true`, treated as *unknown*, never as flat. |
 | `subscribe_live_positions` / `unsubscribe_live_positions` | Sparse event feed (fills, order changes, position transitions) with full-snapshot self-heal; adds per-trade age, fill history, and MAE/MFE to `get_positions`. |
@@ -176,7 +176,7 @@ Symbols are defined in `src/core/sessions/registry.ts`, each bound to a session 
 | GC, MGC, SIL | COMEX Metals ETH |
 | M6A, M6E | CME FX Futures ETH |
 
-Timeframes: `1s`, `5s`, `15s`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `1d`. Raw streams from NT8 are `1s`, `5s`, `15s`, `5m`, `15m` and `1d` (seconds history is shallow provider-side, and shallower the finer the TF — subscribe/prefetch on demand); 30m–4h are derived from 15m per session day. `1d` is one bar per session-day, close-stamped, fetched but never streamed live. Timestamps are unix seconds, **close-stamped**, with `America/New_York` as the canonical exchange timezone (DST-safe math throughout).
+Timeframes: `1s`, `5s`, `15s`, `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `8h`, `1d`. Raw streams from NT8 are `1s`, `5s`, `15s`, `1m`, `5m`, `15m` and `1d` (seconds history is shallow provider-side, and shallower the finer the TF — subscribe/prefetch on demand); 30m–8h are derived from 15m per session day. `1d` is one bar per session-day, close-stamped, fetched but never streamed live. Timestamps are unix seconds, **close-stamped**, with `America/New_York` as the canonical exchange timezone (DST-safe math throughout).
 
 All bar-count and range logic goes through the session-day model (`src/core/sessions/`) — weekends and the maintenance break are handled structurally. Exchange holidays and early closes sync from NT8's own Trading Hours calendars on every AddOn `hello` (a bootstrap set of 2026–2027 CME holidays ships offline), and `resolve_session_days` reports `holidaysModeled` per template so calendar-blind math is never silent. Each template also names the NT8 Trading Hours template its bars are fetched under (`nt8TradingHours` in `src/core/sessions/templates.ts`); the same `hello` compares the two sets of hours and reports any difference in the server log and under `nt8Hours` in `resolve_session_days`.
 
