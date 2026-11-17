@@ -20,6 +20,9 @@ export {
 import { registerGetCandles } from "./tools/get-candles.js";
 import { registerResolveSessionDays } from "./tools/resolve-session-days.js";
 import { registerPrefetchTools } from "./tools/prefetch-candles.js";
+import { registerTickTools } from "./tools/prefetch-ticks.js";
+import { prefetchManager } from "./prefetch-instance.js";
+import { tickFetchManager } from "./tick-fetch-instance.js";
 import { registerDraw } from "./tools/draw.js";
 import { registerClearZones } from "./tools/clear-zones.js";
 import { registerListOpenCharts } from "./tools/list-open-charts.js";
@@ -61,6 +64,14 @@ export { createSession, STDIO_SESSION, type SessionContext } from "./tools/sessi
 
 const RISK_ADDING_TOOLS = ["place_order", "place_oco", "change_order"];
 const RISK_REDUCING_TOOLS = ["cancel_order", "cancel_all", "flatten"];
+const TICK_TOOLS = [
+  "prefetch_ticks",
+  "prefetch_ticks_status",
+  "prefetch_ticks_cancel",
+  "tick_lake_status",
+  "tick_lake_show",
+  "tick_fetch_probe",
+];
 
 export const TOOLSETS = ["core", "live-feeds"] as const;
 export type Toolset = (typeof TOOLSETS)[number];
@@ -135,7 +146,7 @@ export function announceToolGating(
  * can register its own replacement under the same name (the MCP SDK rejects
  * duplicate tool names, so skip-then-register is the override mechanism).
  * Note: the three prefetch_* tools share one registration — excluding any of
- * them excludes all three.
+ * them excludes all three. The same holds for the tick tools.
  */
 export function registerGenericTools(
   server: McpServer,
@@ -153,6 +164,7 @@ export function registerGenericTools(
   unless(["prefetch_candles", "prefetch_status", "prefetch_cancel"], () =>
     registerPrefetchTools(server, session),
   );
+  unless(TICK_TOOLS, () => registerTickTools(server, session));
   unless(["draw"], () => registerDraw(server, session));
   unless(["clear_zones"], () => registerClearZones(server, session));
   unless(["list_open_charts"], () => registerListOpenCharts(server));
@@ -207,6 +219,15 @@ export async function startRuntime(): Promise<void> {
   // instead of leaving a companion indicator waiting out its timeout.
   startClientRequestDispatch();
   startLiveFeedRuntime();
+}
+
+export function fetchJobRunning(): boolean {
+  return tickFetchManager.activity() !== null || prefetchManager.hasRunningJob();
+}
+
+/** A tick job is ended only by a forced stop. */
+export function shutdownRefusal(): string | null {
+  return tickFetchManager.activity();
 }
 
 export async function stopRuntime(): Promise<void> {

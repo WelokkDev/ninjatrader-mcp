@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadOrCreateToken } from "../bridge/auth.js";
-import { endSession, processToolsets, startRuntime, stopRuntime } from "../server.js";
+import { endSession, fetchJobRunning, processToolsets, shutdownRefusal, startRuntime, stopRuntime } from "../server.js";
 import { registerListSessions } from "../tools/list-sessions.js";
 import { STDIO_SESSION, type SessionContext } from "../tools/session.js";
 import { HUB_HOST, HUB_IDLE_EXIT_MS, HUB_TOKEN_KEY, buildFingerprint, hubPort } from "./config.js";
@@ -70,7 +70,8 @@ async function runHub(spec: BinSpec, resident: boolean): Promise<void> {
         token,
         resident,
         idleExitMs: HUB_IDLE_EXIT_MS,
-        holdOpen: spec.holdOpen,
+        holdOpen: () => spec.holdOpen?.() === true || fetchJobRunning(),
+        refuseShutdown: shutdownRefusal,
         onIdleExit: () => void shutdown("idle, no sessions"),
         onShutdownRequest: () => void shutdown("stop requested"),
         build: buildFingerprint(),

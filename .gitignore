@@ -181,4 +181,9 @@ vite.config.ts.timestamp-*
 # Personal trade exports
 Last_Trades.xlsx
 
+# NT8 Historical Data tick exports: gigabytes of text no editor should load
+*.Last.txt
+*.Bid.txt
+*.Ask.txt
+
 .DS_Store

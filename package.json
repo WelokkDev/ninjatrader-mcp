@@ -21,6 +21,7 @@
     "rebuild-bars": "tsc && node build/scripts/rebuild-bars.js",
     "dump-bars": "tsc && node build/scripts/dump-bars.js",
     "audit-bars": "tsc && node build/scripts/audit-bars.js",
+    "nt8-lake": "tsc && node build/scripts/nt8-lake.js",
     "stop": "node scripts/mcp-entry.mjs --stop",
     "status": "node scripts/mcp-entry.mjs --status"
   },
@@ -45,6 +46,7 @@
   },
   "homepage": "https://github.com/WelokkDev/ninjatrader-mcp#readme",
   "dependencies": {
+    "@duckdb/node-api": "^2.0.0-r.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/ws": "^8.18.1",
     "better-sqlite3": "^12.8.0",
@@ -54,9 +56,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.2",
-    "quicktype": "^23.2.6",
     "shx": "^0.4.0",
-    "ts-json-schema-generator": "^2.9.0",
     "typescript": "^6.0.2",
     "vitest": "^4.1.5"
   }

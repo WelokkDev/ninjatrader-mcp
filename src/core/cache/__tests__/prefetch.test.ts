@@ -337,6 +337,22 @@ describe("PrefetchManager jobs", () => {
     expect(status.job).toMatchObject({ state: "cancelled", fetched: 1, cancelled: 2 });
   });
 
+  it("counts a job as running until its in-flight day drains, cancelled or not", async () => {
+    const db = memDb();
+    const { request, calls } = deferredRequest();
+    const m = manager(db, request);
+    expect(m.hasRunningJob()).toBe(false);
+    const started = m.startJob({ symbol: "NQ", rawTimeframe: "15m", days: [D1, D2], template: TEMPLATE });
+    if ("error" in started) throw new Error(started.error);
+    await flush();
+    expect(m.hasRunningJob()).toBe(true);
+    m.cancel(started.job.jobId);
+    expect(m.hasRunningJob()).toBe(true);
+    calls[0].release(() => seed15m(db, D1));
+    await m.whenSettled(started.job.jobId);
+    expect(m.hasRunningJob()).toBe(false);
+  });
+
   it("reports an ETA once at least one day has been timed", async () => {
     const db = memDb();
     const { request, calls } = deferredRequest();

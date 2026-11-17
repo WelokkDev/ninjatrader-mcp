@@ -1,0 +1,65 @@
+{
+  "format": "ticks.v1",
+  "instrument": "MNQ 12-26",
+  "symbol": "MNQ",
+  "contract": "MNQ_12-26",
+  "session": "2026-10-28",
+  "take": 1,
+  "cut": {
+    "from": 1793134800,
+    "to": 1793221200
+  },
+  "tickSize": "0.25",
+  "tickSizeFrom": "manifest",
+  "wholeBy": "manifest",
+  "source": {
+    "kind": "fixture",
+    "manifest": {
+      "instrument": "MNQ 12-26",
+      "tickSize": "0.25",
+      "window": {
+        "from": "17931348000000000",
+        "to": "17932212000000000"
+      },
+      "fetchedAt": "17932248000000000",
+      "priceBasis": "unattested",
+      "origin": "unattested",
+      "provider": "made-up",
+      "addonVersion": "unattested",
+      "streams": {
+        "prints": "unattested",
+        "bid": "unattested",
+        "ask": "unattested"
+      }
+    }
+  },
+  "streams": {
+    "prints": {
+      "file": "prints.parquet",
+      "rows": 6,
+      "fingerprint": "109408470683040994889396266289314185557",
+      "sha256": "3ec57e7d8a4aa968a7a144218d02ef5a5cbefbc0bc29c2d63fb8786326421c45",
+      "bytes": 1221
+    },
+    "bid": {
+      "file": "bid.parquet",
+      "rows": 3,
+      "fingerprint": "84811469294646842499136053167653736175",
+      "sha256": "e1a2cb24d6f8fab75b1fdcd7fd37974e8a0643c4e32470ff40f27734352ed86a",
+      "bytes": 874
+    },
+    "ask": {
+      "file": "ask.parquet",
+      "rows": 3,
+      "fingerprint": "66850616363533242723957643543454478021",
+      "sha256": "e7b8398f67bf94b975c596204d2ca32fd820e4b4744e09d0caed71b5cfd31aba",
+      "bytes": 873
+    }
+  },
+  "writer": {
+    "version": "1",
+    "engine": "v2.0.0",
+    "nodeApi": "2.0.0-r.1"
+  },
+  "writtenAt": "2026-11-11T19:11:58.259Z"
+}

@@ -570,7 +570,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private static readonly string[] WriteCaps = new[]
 		{
 			"place_order", "place_oco", "cancel_order", "cancel_all", "flatten", "change_order",
-			"set_indicator_params",
+			"set_indicator_params", "request_ticks.v2",
 		};
 
 		private async Task SendHelloAsync(ClientWebSocket ws, CancellationToken ct)
@@ -591,7 +591,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 		// Bars are stamped in NT8's configured timezone; the server warns if it
 		// isn't Eastern. Fully reflective so it compiles on any NT8 build.
-		private static string GetConfiguredTimeZoneId()
+		private static TimeZoneInfo GetConfiguredTimeZone()
 		{
 			try
 			{
@@ -601,12 +601,17 @@ namespace NinjaTrader.NinjaScript.AddOns
 				if (go != null)
 				{
 					var p = go.GetType().GetProperty("TimeZoneInfo");
-					var tz = p != null ? p.GetValue(go, null) as TimeZoneInfo : null;
-					if (tz != null) return tz.Id;
+					return p != null ? p.GetValue(go, null) as TimeZoneInfo : null;
 				}
 			}
-			catch (Exception) { /* fall through to the OS fallback */ }
-			return "unknown(local:" + TimeZoneInfo.Local.Id + ")";
+			catch (Exception) { /* unreadable */ }
+			return null;
+		}
+
+		private static string GetConfiguredTimeZoneId()
+		{
+			var tz = GetConfiguredTimeZone();
+			return tz != null ? tz.Id : "unknown(local:" + TimeZoneInfo.Local.Id + ")";
 		}
 
 		// Push the renderer roster on change so the server's known-instruments list
@@ -929,6 +934,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 				case "resolve_instrument":
 					HandleResolveInstrument(obj);
 					break;
+
+				// Off the read thread: the account scan and instrument lookup can block.
+				case "request_ticks":
+				{
+					var o = obj;
+					Task.Run(() => HandleRequestTicks(o));
+					break;
+				}
 
 				case "request_session_calendar":
 					HandleRequestSessionCalendar(obj);
@@ -1450,6 +1463,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{ "attested", r.Attested },
 				{ "tradable", r.Tradable },
 			};
+			var rollovers = r.Instrument != null ? RolloverWindows(r.Instrument) : null;
+			if (rollovers != null) payload["rollovers"] = rollovers;
 			SendFireAndForget(Json.Serialize(payload),
 				"resolve_instrument_result " + symbol + " → " + (contract ?? "<none>") + " (" + r.Source + ")");
 		}
@@ -2066,6 +2081,485 @@ namespace NinjaTrader.NinjaScript.AddOns
 			if (rollovers != null) payload["rollovers"] = rollovers;
 			SendFireAndForget(Json.Serialize(payload),
 				"candles_response id=" + id + " count=" + candles.Count);
+		}
+
+		// request_ticks
+
+		// Bump with the ".vN" of request_ticks in WriteCaps whenever the drop-file format changes.
+		private const string TicksAddonVersion       = "2";
+		private const string DefaultTickTradingHours = "Default 24 x 7";
+		// ".noindex" keeps Spotlight out when a Mac host shares this folder.
+		private const string TickDropFolder          = "mcp-ticks.noindex";
+		private const long   TickMinGuestFreeMb      = 4096;
+		private static readonly System.Text.RegularExpressions.Regex TickJobName =
+			new System.Text.RegularExpressions.Regex(@"^[A-Za-z0-9-]{1,40}$");
+
+		// One tick load at a time: after a timeout or a hub restart the hub sends
+		// more while NT8 is still loading the last one.
+		private readonly object tickSlotLock = new object();
+		private string   tickSlotId;
+		private string   tickSlotWhat;
+		private DateTime tickSlotSinceUtc;
+
+		// Null when taken; otherwise what holds the slot.
+		private string TakeTickSlot(string id, string what)
+		{
+			lock (tickSlotLock)
+			{
+				if (tickSlotId != null)
+					return "request " + tickSlotId + " (" + tickSlotWhat + "), started "
+						+ (int) (DateTime.UtcNow - tickSlotSinceUtc).TotalMinutes + " min ago";
+				tickSlotId       = id;
+				tickSlotWhat     = what;
+				tickSlotSinceUtc = DateTime.UtcNow;
+				return null;
+			}
+		}
+
+		private void ReleaseTickSlot(string id)
+		{
+			lock (tickSlotLock)
+			{
+				if (tickSlotId == id) tickSlotId = null;
+			}
+		}
+
+		private sealed class TickDay
+		{
+			public string      Id;
+			public Instrument  Instrument;
+			public string      Stream;
+			public string      DayText;
+			public string      Dir;
+			public string      Lookup;
+			public TimeZoneInfo Tz;
+			public long        DayFromTs;
+			public long        DayToTs;
+			public DateTime    StartedUtc;
+			public long        MemoryBeforeMb;
+			public long        GuestFreeBeforeMb;
+			public BarsRequest Request;
+		}
+
+		private void HandleRequestTicks(IDictionary<string, object> obj)
+		{
+			var id = GetString(obj, "id");
+			if (string.IsNullOrEmpty(id)) { Log("request_ticks missing id; dropping"); return; }
+
+			var inv            = System.Globalization.CultureInfo.InvariantCulture;
+			var instrumentName = GetString(obj, "instrument");
+			var stream         = GetString(obj, "stream");
+			var dayText        = GetString(obj, "day");
+			var job            = GetString(obj, "job");
+			var lookup         = GetString(obj, "lookup") ?? "provider";
+			var hoursName      = GetString(obj, "tradingHours") ?? DefaultTickTradingHours;
+			var toOffsetDays   = GetInt(obj, "toOffsetDays") ?? 0;
+
+			MarketDataType marketData;
+			if (!TryTickMarketData(stream, out marketData))
+			{
+				SendErrorResponse(id, "request_ticks: stream must be prints, bid or ask, not '" + stream + "'");
+				return;
+			}
+			DateTime day;
+			if (!DateTime.TryParseExact(dayText, "yyyy-MM-dd", inv, System.Globalization.DateTimeStyles.None, out day))
+			{
+				SendErrorResponse(id, "request_ticks: day must be yyyy-MM-dd, not '" + dayText + "'");
+				return;
+			}
+			if (string.IsNullOrEmpty(instrumentName) || job == null || !TickJobName.IsMatch(job)
+				|| (lookup != "provider" && lookup != "repository") || (toOffsetDays != 0 && toOffsetDays != 1))
+			{
+				SendErrorResponse(id, "request_ticks: bad request (instrument='" + instrumentName + "', job='" + job
+					+ "', lookup='" + lookup + "', toOffsetDays=" + toOffsetDays + ")");
+				return;
+			}
+
+			var exposure = DescribeExposure();
+			if (exposure != null)
+			{
+				SendErrorResponse(id, "request_ticks refused: NT8 is not flat (" + exposure + ")", "not_flat");
+				return;
+			}
+
+			var r = Resolve(instrumentName);
+			if (r.Instrument == null || r.Source != "explicit")
+			{
+				SendErrorResponse(id, "request_ticks: no NT8 instrument is named '" + instrumentName + "' (resolved by "
+					+ r.Source + "); a tick fetch never picks a contract itself", "unknown_instrument");
+				return;
+			}
+
+			var tz = GetConfiguredTimeZone();
+			long dayFromTs, dayToTs;
+			try
+			{
+				if (tz == null) throw new InvalidOperationException("the time zone in Tools > Options > General is unreadable");
+				dayFromTs = LocalToTs(day, tz);
+				dayToTs   = LocalToTs(day.AddDays(1), tz);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "request_ticks: NT8's time zone: " + ex.Message, "bad_time_zone");
+				return;
+			}
+
+			TradingHours hours = null;
+			try { hours = TradingHours.Get(hoursName); }
+			catch (Exception ex) { Log("request_ticks: TradingHours.Get('" + hoursName + "') threw: " + ex.Message); }
+			if (hours == null || !string.Equals(hours.Name, hoursName, StringComparison.Ordinal))
+			{
+				SendErrorResponse(id, "request_ticks: NT8 has no TradingHours template named '" + hoursName + "'");
+				return;
+			}
+
+			// Below this, loading a day of ticks makes Windows page to disk.
+			var guestFree = GuestFreeMb();
+			if (guestFree < TickMinGuestFreeMb)
+			{
+				SendErrorResponse(id, "request_ticks refused: Windows has "
+					+ (guestFree < 0 ? "an unreadable amount of" : guestFree + " MB of") + " physical memory available; a tick fetch needs "
+					+ TickMinGuestFreeMb + " MB", "low_memory");
+				return;
+			}
+
+			string dir;
+			try
+			{
+				dir = Path.Combine(Globals.UserDataDir, TickDropFolder, job);
+				Directory.CreateDirectory(dir);
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "request_ticks: cannot create the drop folder: " + ex.Message, "io");
+				return;
+			}
+
+			var t = new TickDay
+			{
+				Id = id, Instrument = r.Instrument, Stream = stream, DayText = dayText, Dir = dir, Lookup = lookup,
+				Tz = tz, DayFromTs = dayFromTs, DayToTs = dayToTs,
+				StartedUtc = DateTime.UtcNow, MemoryBeforeMb = ProcessMemoryMb(), GuestFreeBeforeMb = guestFree,
+			};
+			try
+			{
+				t.Request = new BarsRequest(r.Instrument, day, day.AddDays(toOffsetDays));
+				t.Request.BarsPeriod = new BarsPeriod { BarsPeriodType = BarsPeriodType.Tick, Value = 1, MarketDataType = marketData };
+				t.Request.TradingHours = hours;
+			}
+			catch (Exception ex)
+			{
+				SendErrorResponse(id, "request_ticks: BarsRequest construction failed: " + ex.Message, "bars_request_failed");
+				return;
+			}
+			var mergeError = SetEnumProperty(t.Request, "MergePolicy", "DoNotMerge");
+			if (mergeError != null)
+			{
+				try { t.Request.Dispose(); } catch { /* ignore */ }
+				SendErrorResponse(id, "request_ticks: " + mergeError, "merge_policy");
+				return;
+			}
+			var lookupError = SetEnumProperty(t.Request, "LookupPolicy", lookup == "repository" ? "Repository" : "Provider");
+			if (lookupError != null)
+			{
+				try { t.Request.Dispose(); } catch { /* ignore */ }
+				SendErrorResponse(id, "request_ticks: " + lookupError, "bars_request_failed");
+				return;
+			}
+
+			Log("request_ticks id=" + id + " " + DescribeInstrument(r.Instrument) + " " + stream + " " + dayText
+				+ " lookup=" + lookup + " hours='" + hoursName + "' toOffsetDays=" + toOffsetDays + " → " + dir);
+			var holder = TakeTickSlot(id, r.Instrument.FullName + " " + stream + " " + dayText);
+			if (holder != null)
+			{
+				try { t.Request.Dispose(); } catch { /* ignore */ }
+				SendErrorResponse(id, "request_ticks refused: NT8 is still loading " + holder + "; one tick load at a time", "busy");
+				return;
+			}
+
+			// Every path from here frees the slot before it replies: the hub sends the
+			// next request as soon as it reads one.
+			try
+			{
+				t.Request.Request((bars, errorCode, errorMessage) =>
+				{
+					if (errorCode != ErrorCode.NoError)
+					{
+						Log("request_ticks id=" + id + " errorCode=" + errorCode + " errorMessage=" + (errorMessage ?? "<null>")
+							+ " | provider " + DescribeProviderState());
+						try { t.Request.Dispose(); } catch { /* ignore */ }
+						ReleaseTickSlot(id);
+						SendErrorResponse(id, "request_ticks: BarsRequest failed: " + errorCode + " — " + errorMessage, "bars_request_failed");
+						return;
+					}
+					// The row walk runs on a pool thread so NT8's callback thread is not held.
+					Task.Run(() => WriteTickDay(t, bars));
+				});
+			}
+			catch (Exception ex)
+			{
+				try { t.Request.Dispose(); } catch { /* ignore */ }
+				ReleaseTickSlot(id);
+				SendErrorResponse(id, "request_ticks: BarsRequest.Request threw: " + ex.Message, "bars_request_failed");
+			}
+		}
+
+		private void WriteTickDay(TickDay t, BarsRequest loaded)
+		{
+			var inv  = System.Globalization.CultureInfo.InvariantCulture;
+			var file = Path.Combine(t.Dir, t.Stream + "." + t.DayText + ".txt.gz");
+			var part = file + ".part";
+			// Sent from the finally block, once the slot is free.
+			Action reply = null;
+			try
+			{
+				var policy = EffectiveMergePolicy(t.Request);
+				if (policy != MergePolicy.DoNotMerge)
+				{
+					reply = () => SendErrorResponse(t.Id, "request_ticks: NT8 served the request as " + policy + ", not DoNotMerge", "merge_policy");
+					return;
+				}
+
+				var data   = loaded != null ? loaded.Bars : null;
+				var count  = data != null ? data.Count : 0;
+				var prints = t.Stream == "prints";
+				long rows = 0, loadedRows = 0, sizeSum = 0, firstTs = 0, lastTs = 0, loadedFirst = 0, loadedLast = 0;
+				long minuteKey = long.MinValue, offsetTicks = 0;
+				var minuteBad = false;
+				using (var fs = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None))
+				using (var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Optimal))
+				using (var w = new StreamWriter(gz, new UTF8Encoding(false), 1 << 20))
+				{
+					for (int i = 0; i < count; i++)
+					{
+						var local = data.GetTime(i);
+						var key   = local.Ticks / TimeSpan.TicksPerMinute;
+						if (key != minuteKey)
+						{
+							// Zones change offset on whole minutes, so one lookup per minute.
+							var minute = new DateTime(key * TimeSpan.TicksPerMinute, DateTimeKind.Unspecified);
+							minuteBad  = t.Tz.IsAmbiguousTime(minute) || t.Tz.IsInvalidTime(minute);
+							if (!minuteBad) offsetTicks = minute.Ticks - TimeZoneInfo.ConvertTimeToUtc(minute, t.Tz).Ticks;
+							minuteKey  = key;
+						}
+						if (minuteBad)
+						{
+							var why = "request_ticks: row " + i + " is at " + local.ToString("yyyy-MM-dd HH:mm:ss.fffffff", inv)
+								+ ", which " + t.Tz.Id + " calls ambiguous or skipped";
+							reply = () => SendErrorResponse(t.Id, why, "ambiguous_time");
+							return;
+						}
+						var ts = local.Ticks - offsetTicks - UnixEpoch.Ticks;
+						if (loadedRows == 0) loadedFirst = ts;
+						loadedLast = ts;
+						loadedRows++;
+						if (ts < t.DayFromTs || ts >= t.DayToTs) continue;
+
+						var volume = data.GetVolume(i);
+						w.Write(ts.ToString(inv));
+						w.Write(';');
+						w.Write(TickPriceText(data.GetClose(i)));
+						w.Write(';');
+						w.Write(volume.ToString(inv));
+						if (prints)
+						{
+							w.Write(';');
+							w.Write(TickPriceText(data.GetBid(i)));
+							w.Write(';');
+							w.Write(TickPriceText(data.GetAsk(i)));
+						}
+						w.Write('\n');
+						if (rows == 0) firstTs = ts;
+						lastTs = ts;
+						rows++;
+						sizeSum += (long) volume;
+					}
+				}
+				if (File.Exists(file)) File.Delete(file);
+				if (rows > 0) File.Move(part, file);
+				var memoryAfter = ProcessMemoryMb();
+				var guestFreeAfter = GuestFreeMb();
+
+				var payload = new Dictionary<string, object>
+				{
+					{ "v",                 1 },
+					{ "id",                t.Id },
+					{ "type",              "ticks_response" },
+					{ "instrument",        t.Instrument.FullName },
+					{ "stream",            t.Stream },
+					{ "day",               t.DayText },
+					{ "file",              rows > 0 ? file : null },
+					{ "rows",              rows },
+					{ "sizeSum",           sizeSum.ToString(inv) },
+					{ "firstTs",           rows > 0 ? firstTs.ToString(inv) : null },
+					{ "lastTs",            rows > 0 ? lastTs.ToString(inv) : null },
+					{ "dayFromTs",         t.DayFromTs.ToString(inv) },
+					{ "dayToTs",           t.DayToTs.ToString(inv) },
+					{ "loadedRows",        loadedRows },
+					{ "loadedFirstTs",     loadedRows > 0 ? loadedFirst.ToString(inv) : null },
+					{ "loadedLastTs",      loadedRows > 0 ? loadedLast.ToString(inv) : null },
+					{ "tickSize",          TickPriceText(t.Instrument.MasterInstrument.TickSize) },
+					{ "mergePolicy",       policy.ToString() },
+					{ "priceBasis",        PriceBasisOf(policy) },
+					{ "lookup",            t.Lookup },
+					{ "dataSource",        ClassifyDataSource() },
+					{ "timeZone",          t.Tz.Id },
+					{ "fetchedAt",         (t.StartedUtc.Ticks - UnixEpoch.Ticks).ToString(inv) },
+					{ "elapsedMs",         (long) (DateTime.UtcNow - t.StartedUtc).TotalMilliseconds },
+					{ "memoryBeforeMb",    t.MemoryBeforeMb },
+					{ "memoryAfterMb",     memoryAfter },
+					{ "guestFreeBeforeMb", t.GuestFreeBeforeMb },
+					{ "guestFreeAfterMb",  guestFreeAfter },
+					{ "addonVersion",      TicksAddonVersion },
+				};
+				Log("request_ticks id=" + t.Id + " wrote " + rows + " of " + loadedRows + " loaded rows"
+					+ (rows > 0 ? " to " + file : "") + " in " + payload["elapsedMs"] + " ms, memory "
+					+ t.MemoryBeforeMb + " → " + memoryAfter + " MB, Windows free " + t.GuestFreeBeforeMb + " → " + guestFreeAfter + " MB");
+				var json  = Json.Serialize(payload);
+				var label = "ticks_response id=" + t.Id + " " + t.Stream + " " + t.DayText + " rows=" + rows;
+				reply = () => SendFireAndForget(json, label);
+			}
+			catch (IOException ex)
+			{
+				reply = () => SendErrorResponse(t.Id, "request_ticks: writing " + part + " failed: " + ex.Message, "io");
+			}
+			catch (UnauthorizedAccessException ex)
+			{
+				reply = () => SendErrorResponse(t.Id, "request_ticks: writing " + part + " failed: " + ex.Message, "io");
+			}
+			catch (Exception ex)
+			{
+				reply = () => SendErrorResponse(t.Id, "request_ticks failed: " + ex.Message);
+			}
+			finally
+			{
+				try { if (File.Exists(part)) File.Delete(part); } catch { /* reported above if it mattered */ }
+				try { t.Request.Dispose(); } catch { /* ignore */ }
+				ReleaseTickSlot(t.Id);
+				if (reply != null) reply();
+			}
+		}
+
+		private static bool TryTickMarketData(string stream, out MarketDataType type)
+		{
+			switch (stream)
+			{
+				case "prints": type = MarketDataType.Last; return true;
+				case "bid":    type = MarketDataType.Bid;  return true;
+				case "ask":    type = MarketDataType.Ask;  return true;
+				default:       type = MarketDataType.Last; return false;
+			}
+		}
+
+		// 100 ns since 1970 UTC; throws on a time the zone skips.
+		private static long LocalToTs(DateTime local, TimeZoneInfo tz)
+		{
+			return TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(local, DateTimeKind.Unspecified), tz).Ticks - UnixEpoch.Ticks;
+		}
+
+		// Exact decimal text, so the lake does the tick arithmetic; a value
+		// decimal cannot hold goes as it is, for the lake to refuse.
+		private static string TickPriceText(double value)
+		{
+			var inv = System.Globalization.CultureInfo.InvariantCulture;
+			if (double.IsNaN(value) || double.IsInfinity(value) || Math.Abs(value) >= 1e15) return value.ToString("R", inv);
+			return ((decimal) value).ToString(inv);
+		}
+
+		// Set by name, so the file compiles whatever this NT8 build calls the enum types.
+		private static string SetEnumProperty(object target, string property, string value)
+		{
+			try
+			{
+				var prop = target.GetType().GetProperty(property);
+				if (prop == null || !prop.CanWrite) return "BarsRequest has no settable " + property;
+				prop.SetValue(target, Enum.Parse(prop.PropertyType, value), null);
+				return null;
+			}
+			catch (Exception ex)
+			{
+				return "could not set " + property + " to " + value + ": " + ex.Message;
+			}
+		}
+
+		private static long ProcessMemoryMb()
+		{
+			try
+			{
+				using (var p = System.Diagnostics.Process.GetCurrentProcess())
+					return p.PrivateMemorySize64 / (1024 * 1024);
+			}
+			catch { return -1; }
+		}
+
+		[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+		private sealed class MemoryStatusEx
+		{
+			public uint  Length = (uint) System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatusEx));
+			public uint  MemoryLoad;
+			public ulong TotalPhys;
+			public ulong AvailPhys;
+			public ulong TotalPageFile;
+			public ulong AvailPageFile;
+			public ulong TotalVirtual;
+			public ulong AvailVirtual;
+			public ulong AvailExtendedVirtual;
+		}
+
+		[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+		[return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+		private static extern bool GlobalMemoryStatusEx([System.Runtime.InteropServices.In, System.Runtime.InteropServices.Out] MemoryStatusEx buffer);
+
+		private static long GuestFreeMb()
+		{
+			try
+			{
+				var status = new MemoryStatusEx();
+				return GlobalMemoryStatusEx(status) ? (long) (status.AvailPhys / (1024 * 1024)) : -1;
+			}
+			catch (Exception) { return -1; }
+		}
+
+		// Null only when every account is flat with no working order; fails closed.
+		private static string DescribeExposure()
+		{
+			var open = new List<string>();
+			try
+			{
+				var accounts = new List<Account>();
+				lock (Account.All)
+				{
+					foreach (var a in Account.All) if (a != null) accounts.Add(a);
+				}
+				foreach (var a in accounts)
+				{
+					var positions = new List<Position>();
+					lock (a.Positions)
+					{
+						foreach (var p in a.Positions) if (p != null) positions.Add(p);
+					}
+					foreach (var p in positions)
+					{
+						if (p.MarketPosition == MarketPosition.Flat || p.Quantity == 0) continue;
+						open.Add(a.Name + " " + (p.Instrument != null ? p.Instrument.FullName : "?") + " " + p.MarketPosition + " " + p.Quantity);
+					}
+					var orders = new List<Order>();
+					lock (a.Orders)
+					{
+						foreach (var o in a.Orders) if (o != null) orders.Add(o);
+					}
+					foreach (var o in orders)
+					{
+						if (Order.IsTerminalState(o.OrderState)) continue;
+						open.Add(a.Name + " order '" + o.Name + "' " + o.OrderState);
+					}
+				}
+			}
+			catch (Exception ex)
+			{
+				return "accounts unreadable: " + ex.Message;
+			}
+			return open.Count == 0 ? null : string.Join("; ", open);
 		}
 
 		private void SendErrorResponse(string id, string message)

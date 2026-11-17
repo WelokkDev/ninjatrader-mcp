@@ -1,0 +1,279 @@
+{
+  "checksVersion": 1,
+  "thresholds": {
+    "spanEdgeSecs": 60,
+    "maxGapSecs": {
+      "prints": 300,
+      "bid": 60,
+      "ask": 60
+    },
+    "sideKnownMin": 0.999,
+    "atBidMin": 0.25,
+    "atBidMax": 0.75,
+    "quotesMatchMin": 0.999
+  },
+  "computedAt": "2026-11-11T19:11:58.272Z",
+  "session": "2026-10-28",
+  "take": 1,
+  "inSession": {
+    "from": 1793138400,
+    "to": 1793221200
+  },
+  "results": [
+    {
+      "id": "time_order.prints",
+      "status": "fail",
+      "detail": "1 rows earlier than the row before",
+      "values": {
+        "backwards": 1
+      }
+    },
+    {
+      "id": "spans_session.prints",
+      "status": "pass",
+      "detail": "first 0.016s after the open (2026-10-27 18:00:00.0160000), last 0.0000001s before the close (2026-10-28 16:59:59.9999999); limit 60s",
+      "values": {
+        "firstAfterOpenSecs": 0.016,
+        "lastBeforeCloseSecs": 1e-7
+      }
+    },
+    {
+      "id": "no_long_gap.prints",
+      "status": "fail",
+      "detail": "longest silence 82797.9839999s; limit 300s",
+      "values": {
+        "longestSecs": 82797.9839999
+      }
+    },
+    {
+      "id": "time_order.bid",
+      "status": "pass",
+      "detail": "0 rows earlier than the row before",
+      "values": {
+        "backwards": 0
+      }
+    },
+    {
+      "id": "spans_session.bid",
+      "status": "fail",
+      "detail": "first 0.015999s after the open (2026-10-27 18:00:00.0159990), last 82797.984s before the close (2026-10-27 18:00:02.0160000); limit 60s",
+      "values": {
+        "firstAfterOpenSecs": 0.015999,
+        "lastBeforeCloseSecs": 82797.984
+      }
+    },
+    {
+      "id": "no_long_gap.bid",
+      "status": "pass",
+      "detail": "longest silence 1.000001s; limit 60s",
+      "values": {
+        "longestSecs": 1.000001
+      }
+    },
+    {
+      "id": "time_order.ask",
+      "status": "pass",
+      "detail": "0 rows earlier than the row before",
+      "values": {
+        "backwards": 0
+      }
+    },
+    {
+      "id": "spans_session.ask",
+      "status": "fail",
+      "detail": "first 0.015999s after the open (2026-10-27 18:00:00.0159990), last 82797.984s before the close (2026-10-27 18:00:02.0160000); limit 60s",
+      "values": {
+        "firstAfterOpenSecs": 0.015999,
+        "lastBeforeCloseSecs": 82797.984
+      }
+    },
+    {
+      "id": "no_long_gap.ask",
+      "status": "pass",
+      "detail": "longest silence 1.000001s; limit 60s",
+      "values": {
+        "longestSecs": 1.000001
+      }
+    },
+    {
+      "id": "stamped",
+      "status": "fail",
+      "detail": "2 prints without a bid or ask stamp",
+      "values": {
+        "unstamped": 2
+      }
+    },
+    {
+      "id": "sizes_positive",
+      "status": "fail",
+      "detail": "1 prints below size 1; smallest 0",
+      "values": {
+        "belowOne": 1,
+        "minSize": 0
+      }
+    },
+    {
+      "id": "side_known",
+      "status": "fail",
+      "detail": "50.0000% on exactly one side; 3 not (1 with bid = ask); minimum 99.9%",
+      "values": {
+        "fraction": 0.5,
+        "unsided": 3
+      }
+    },
+    {
+      "id": "side_balanced",
+      "status": "fail",
+      "detail": "16.67% of prints at the bid; allowed 25% to 75%",
+      "values": {
+        "atBidFraction": 0.16666666666666666
+      }
+    },
+    {
+      "id": "quotes_match_stamps",
+      "status": "pass",
+      "detail": "100.0000% of 3 sided prints match the other side's quote; 3 unsided prints not tested; minimum 99.9%",
+      "values": {
+        "tested": 3,
+        "matched": 3,
+        "unsided": 3
+      }
+    },
+    {
+      "id": "matches_1s_reference",
+      "status": "no_reference",
+      "detail": "no 1s reference rows for MNQ 12-26",
+      "values": {
+        "lakeBars": 4,
+        "referenceBars": 0
+      }
+    }
+  ],
+  "facts": {
+    "streams": {
+      "prints": {
+        "rows": 6,
+        "contracts": "4294967302",
+        "firstTs": "17931384000160000",
+        "lastTs": "17932211999999999",
+        "inSessionRows": 6,
+        "longestGaps": [
+          {
+            "fromTs": "17931384020160000",
+            "toTs": "17932211999999999",
+            "secs": 82797.9839999
+          },
+          {
+            "fromTs": "17931384005160000",
+            "toTs": "17931384020160000",
+            "secs": 1.5
+          },
+          {
+            "fromTs": "17931384000160000",
+            "toTs": "17931384010160000",
+            "secs": 1
+          },
+          {
+            "fromTs": "17931384000160000",
+            "toTs": "17931384000160000",
+            "secs": 0
+          },
+          {
+            "fromTs": "17931384010160000",
+            "toTs": "17931384005160000",
+            "secs": -0.5
+          }
+        ],
+        "rowsPerHour": [
+          {
+            "hour": 1793138400,
+            "rows": 5
+          },
+          {
+            "hour": 1793217600,
+            "rows": 1
+          }
+        ],
+        "mostRowsOnOneTs": {
+          "ts": "17931384000160000",
+          "rows": 2
+        }
+      },
+      "bid": {
+        "rows": 3,
+        "contracts": "19",
+        "firstTs": "17931384000159990",
+        "lastTs": "17931384020160000",
+        "inSessionRows": 3,
+        "longestGaps": [
+          {
+            "fromTs": "17931384000159990",
+            "toTs": "17931384010160000",
+            "secs": 1.000001
+          },
+          {
+            "fromTs": "17931384010160000",
+            "toTs": "17931384020160000",
+            "secs": 1
+          }
+        ],
+        "rowsPerHour": [
+          {
+            "hour": 1793138400,
+            "rows": 3
+          }
+        ],
+        "mostRowsOnOneTs": {
+          "ts": "17931384000159990",
+          "rows": 1
+        }
+      },
+      "ask": {
+        "rows": 3,
+        "contracts": "14",
+        "firstTs": "17931384000159990",
+        "lastTs": "17931384020160000",
+        "inSessionRows": 3,
+        "longestGaps": [
+          {
+            "fromTs": "17931384000159990",
+            "toTs": "17931384010160000",
+            "secs": 1.000001
+          },
+          {
+            "fromTs": "17931384010160000",
+            "toTs": "17931384020160000",
+            "secs": 1
+          }
+        ],
+        "rowsPerHour": [
+          {
+            "hour": 1793138400,
+            "rows": 3
+          }
+        ],
+        "mostRowsOnOneTs": {
+          "ts": "17931384000159990",
+          "rows": 1
+        }
+      }
+    },
+    "prints": {
+      "atBid": {
+        "rows": 1,
+        "contracts": "2"
+      },
+      "atAsk": {
+        "rows": 2,
+        "contracts": "4294967296"
+      },
+      "bothSides": 1,
+      "unsided": 3,
+      "delta": "4294967294"
+    },
+    "bars1s": {
+      "lake": 4,
+      "reference": 0
+    }
+  }
+}

@@ -39,6 +39,7 @@ export interface HubOptions {
   holdOpen?: () => boolean;
   onIdleExit: () => void;
   onShutdownRequest?: () => void;
+  refuseShutdown?: () => string | null;
   build: BuildFingerprint;
   detachGraceMs?: number;
   maxSessions?: number;
@@ -127,7 +128,7 @@ export async function startHub(spec: HubSpec, opts: HubOptions): Promise<Hub> {
       idleTimer = null;
       if (stopping || sessions.size > 0) return;
       if (opts.holdOpen?.()) {
-        log("[hub] no sessions, but held open (a run still needs the bridge)");
+        log("[hub] no sessions, but held open (a live run or a fetch job is still going)");
         scheduleIdleExit();
         return;
       }
@@ -218,6 +219,8 @@ export async function startHub(spec: HubSpec, opts: HubOptions): Promise<Hub> {
     const url = new URL(req.url ?? "/", `http://${HUB_HOST}`);
     if (url.pathname === HEALTH_PATH) return json(res, 200, health());
     if (url.pathname === SHUTDOWN_PATH && req.method === "POST") {
+      const refused = url.searchParams.has("force") ? null : (opts.refuseShutdown?.() ?? null);
+      if (refused !== null) return json(res, 409, { error: refused });
       json(res, 202, { ok: true });
       (opts.onShutdownRequest ?? (() => void stop()))();
       return;

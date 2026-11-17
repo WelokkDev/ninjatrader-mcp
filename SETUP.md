@@ -491,7 +491,28 @@ blinding the watchdog to that same half dying later.
 A connection already down when NT8 starts alerts on that first pass: the startup
 quiet window suppresses baselines and unsettled states, never RED.
 
-## 12. Troubleshooting
+## 12. Optional — tick history
+
+Pulls whole session-days of NT8 tick data, every print and every best bid or ask
+change, into the NT8 tick lake (`data/nt8-lake/`, or `NT8_LAKE_PATH`). Skip this
+if candles are all you need.
+
+1. **Recompile the AddOn** as in step 4. Its hello line on Output Tab 1 then
+   counts one more cap.
+2. **Set `NT_TICK_DROP_PATH`** in `.env.local` to the AddOn's drop folder,
+   `Documents/NinjaTrader 8/mcp-ticks.noindex`, as the machine running the
+   server sees it. The AddOn creates the folder.
+
+`prefetch_ticks { symbol, start, end }` starts a background fetch and returns
+its plan; `prefetch_ticks_status` reports each day, and `tick_lake_status` and
+`tick_lake_show` read the lake. A day is stored only when the fetch proves it
+whole. Fetches are refused while any account holds a position or working order,
+or while Windows has under 4 GB of memory free. The ingest runs in memory,
+capped at 16 GB (`NT8_LAKE_MEMORY_LIMIT`). `NT_TICK_PROBE=1` plus `npm stop`
+adds `tick_fetch_probe`, a diagnostic that fetches a day or two without storing
+anything.
+
+## 13. Troubleshooting
 
 | What you see | What it means |
 |---|---|
@@ -521,9 +542,10 @@ MCP server runs cache-only against whatever is already in `candles.db`.
 **`.env.local` is not a dotenv file.** There's no `dotenv` in this repo and
 nothing is injected into `process.env`. The hand-rolled reader consults a fixed
 set of keys — the bridge (`NT_BRIDGE_*`), the hub (`NT_HUB_*`), trade import
-(`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT`) and the order gate (`NT_TRADING_*`)
-— and ignores everything else, so putting any *other* variable there does
-nothing. Real process env always wins over the file.
+(`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT`), the order gate (`NT_TRADING_*`) and
+tick history (`NT_TICK_*`, `NT8_LAKE_*`) — and ignores everything else, so
+putting any *other* variable there does nothing. Real process env always wins
+over the file.
 
 Because it's gitignored, `.env.local` is the right home for anything
 machine-specific: one checkout can serve a Windows box running NT8 locally
@@ -547,6 +569,10 @@ machines.
 | `NT_TRADES_ACCOUNT` | unset | Optional account filter to pair with `NT_TRADES_DB_PATH`. Leave unset to import all accounts. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. Only consulted when `NT_TRADES_DB_PATH` is unset. |
 | `NT_TRADING_*` | unset ⇒ **disabled** | The order write path. See [TRADING.md](TRADING.md). |
+| `NT_TICK_DROP_PATH` | unset | This machine's path to the AddOn's tick drop folder, `<NT8 user data dir>/mcp-ticks.noindex` (step 12). Unset, `prefetch_ticks` refuses. |
+| `NT_TICK_PROBE` | unset | `1` registers `tick_fetch_probe` (step 12). |
+| `NT8_LAKE_PATH` | `<NT_DATA_PATH>/nt8-lake` | Root of the NT8 tick lake. A plain folder copy backs it up. |
+| `NT8_LAKE_MEMORY_LIMIT` | `16GB` | Memory cap for a tick-lake ingest, which never spills to disk; a day that needs more is refused. Raise it (e.g. `24GB`) to retry such a day. |
 
 ### Config files
 
@@ -647,7 +673,7 @@ its `-wal`/`-shm` siblings and integrity-checks the copy), just slower.
 
 ---
 
-## 13. Next steps
+## 14. Next steps
 
 The public tool surface is set up; [README.md](README.md#mcp-tools) lists every
 tool. From here:

@@ -158,6 +158,19 @@ describe("hub surface", () => {
     expect(onShutdownRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses a shutdown request while something must not be ended, unless forced", async () => {
+    const onShutdownRequest = vi.fn();
+    const h = await boot(spec(), options({ onShutdownRequest, refuseShutdown: () => "tick job tk-1 is running" }));
+    const auth = { authorization: `Bearer ${TOKEN}` };
+    const refused = await fetch(`http://127.0.0.1:${h.port}/shutdown`, { method: "POST", headers: auth });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: "tick job tk-1 is running" });
+    expect(onShutdownRequest).not.toHaveBeenCalled();
+    const forced = await fetch(`http://127.0.0.1:${h.port}/shutdown?force=1`, { method: "POST", headers: auth });
+    expect(forced.status).toBe(202);
+    expect(onShutdownRequest).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses a session past the cap and frees the slot when one leaves", async () => {
     const h = await boot(spec(), options({ maxSessions: 2 }));
     const a = await attach(h);

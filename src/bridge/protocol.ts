@@ -159,6 +159,10 @@ export const candlePayloadSchema = z.object({
 });
 export type CandlePayload = z.infer<typeof candlePayloadSchema>;
 
+const rolloversSchema = z
+  .array(z.object({ contractMonth: z.string(), rolloverDate: z.string() }))
+  .nullish();
+
 export const candlesResponseMessageSchema = reqMsg("candles_response", {
   symbol: z.string(),
   timeframe: z.string(),
@@ -175,9 +179,7 @@ export const candlesResponseMessageSchema = reqMsg("candles_response", {
   contract: z.string().optional(),
   // The roll dates NT8 merged across. Omitted/null = could not read; empty =
   // no table, so every bar is `contract`'s own.
-  rollovers: z
-    .array(z.object({ contractMonth: z.string(), rolloverDate: z.string() }))
-    .nullish(),
+  rollovers: rolloversSchema,
 });
 export type CandlesResponseMessage = z.infer<typeof candlesResponseMessageSchema>;
 
@@ -242,8 +244,57 @@ export const resolveInstrumentResultMessageSchema = reqMsg("resolve_instrument_r
   source: z.string(), // explicit | rollover-table | expiry-scan | name-probe | none
   attested: z.boolean(), // explicit name, or NT8's own rollover table — never a guess
   tradable: z.boolean(), // real and not past its last trading day
+  rollovers: rolloversSchema,
 });
 export type ResolveInstrumentResultMessage = z.infer<typeof resolveInstrumentResultMessageSchema>;
+
+// ---------- tick fetch ----------
+// One stream of one day of one contract, never merged. The AddOn writes the rows, gzipped,
+// into <UserDataDir>/mcp-ticks.noindex/<job>/ and answers with totals.
+
+export const TICK_STREAMS = ["prints", "bid", "ask"] as const;
+
+export const requestTicksMessageSchema = reqMsg("request_ticks", {
+  instrument: z.string(), // exact contract, e.g. "MNQ 12-26"; never resolved to a front month
+  stream: z.enum(TICK_STREAMS),
+  day: z.string(), // NT8-local calendar date, YYYY-MM-DD
+  job: z.string().regex(/^[A-Za-z0-9-]{1,40}$/), // folder name, never a path
+  lookup: z.enum(["provider", "repository"]).optional(),
+  tradingHours: z.string().optional(), // NT8 template name
+  toOffsetDays: z.union([z.literal(0), z.literal(1)]).optional(), // BarsRequest toLocal: day + this
+});
+export type RequestTicksMessage = z.infer<typeof requestTicksMessageSchema>;
+
+/** Times are 100 ns since 1970 UTC as decimal strings; `first`/`last` are null with no rows. */
+export const ticksResponseMessageSchema = reqMsg("ticks_response", {
+  instrument: z.string(), // NT8's FullName for it
+  stream: z.string(),
+  day: z.string(),
+  file: z.string().nullable(), // the AddOn's path; null when no row fell inside the day
+  rows: z.number(),
+  sizeSum: z.string(),
+  firstTs: z.string().nullable(),
+  lastTs: z.string().nullable(),
+  dayFromTs: z.string(), // NT8-zone midnight at `day`
+  dayToTs: z.string(), // and at `day` + 1
+  loadedRows: z.number(), // every row the request returned, inside the day or not
+  loadedFirstTs: z.string().nullable(),
+  loadedLastTs: z.string().nullable(),
+  tickSize: z.string(),
+  mergePolicy: z.string(),
+  priceBasis: z.string(),
+  lookup: z.string(),
+  dataSource: z.string(),
+  timeZone: z.string(),
+  fetchedAt: z.string(), // when the request was made
+  elapsedMs: z.number(),
+  memoryBeforeMb: z.number(),
+  memoryAfterMb: z.number(),
+  guestFreeBeforeMb: z.number(), // physical memory Windows has available; -1 unreadable
+  guestFreeAfterMb: z.number(),
+  addonVersion: z.string(),
+});
+export type TicksResponseMessage = z.infer<typeof ticksResponseMessageSchema>;
 
 export const requestSessionCalendarMessageSchema = reqMsg("request_session_calendar", {
   tradingHoursTemplate: z.string(),
@@ -880,6 +931,7 @@ export const INBOUND_SCHEMAS = {
   bar_close: barCloseMessageSchema,
   session_calendar_response: sessionCalendarResponseMessageSchema,
   resolve_instrument_result: resolveInstrumentResultMessageSchema,
+  ticks_response: ticksResponseMessageSchema,
   open_charts_response: openChartsResponseMessageSchema,
   navigate_chart_ack: navigateChartAckMessageSchema,
   drawings_response: drawingsResponseMessageSchema,
@@ -911,6 +963,7 @@ export const OUTBOUND_SCHEMAS = {
   request_candles: requestCandlesMessageSchema,
   request_session_calendar: requestSessionCalendarMessageSchema,
   resolve_instrument: resolveInstrumentMessageSchema,
+  request_ticks: requestTicksMessageSchema,
   request_open_charts: requestOpenChartsMessageSchema,
   navigate_chart: navigateChartMessageSchema,
   request_drawings: requestDrawingsMessageSchema,

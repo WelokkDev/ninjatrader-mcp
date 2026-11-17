@@ -18,12 +18,12 @@ import {
   servesMixedContracts,
 } from "./contracts.js";
 
-// PrefetchManager — the single owner of request_candles traffic.
+// PrefetchManager — the single owner of NT8 history traffic.
 //
 // Two lanes over one executor: foreground get_candles fills (high
-// priority) and background job days (low priority), exactly one bridge
-// request in flight — NT8 and the data provider handle concurrent history
-// requests poorly. A resolved request is not success: every day is
+// priority) and background requests (low priority: job days and tick fetches),
+// exactly one bridge request in flight — NT8 and the data provider handle
+// concurrent history requests poorly. A resolved request is not success: every day is
 // re-classified against the cache after its response, and failures stay
 // on the job for prefetch_status. Jobs are in-memory; the cache is the
 // durable state — re-issuing a prefetch after a restart fetches only the
@@ -157,6 +157,27 @@ export class PrefetchManager {
     });
   }
 
+  /** `lane` takes a round-robin turn beside each job owner. */
+  backgroundRequest(
+    lane: string,
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const queue = this.lo.get(lane) ?? [];
+      queue.push(async () => {
+        try {
+          resolve(await this.deps.request(type, payload, timeoutMs));
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+      this.lo.set(lane, queue);
+      void this.pump();
+    });
+  }
+
   startJob(args: StartJobArgs): { error: string } | { job: PrefetchJobSnapshot } {
     if (!this.deps.isConnected()) {
       return {
@@ -261,6 +282,11 @@ export class PrefetchManager {
       // its data still heals the cache.
     }
     return { job: this.snapshot(job) };
+  }
+
+  /** A cancelled job counts until its queued days drain. */
+  hasRunningJob(): boolean {
+    return [...this.jobs.values()].some((j) => !this.isSettled(j));
   }
 
   /** Resolves once the job is terminal AND its queued tasks have drained. */

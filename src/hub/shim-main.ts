@@ -40,7 +40,7 @@ export async function shimMain({ entry, args }: ShimMainOptions): Promise<void> 
 
   if (args.includes("--status") || args.includes("--stop")) {
     try {
-      await hubCommand(hub, port, args.includes("--stop"));
+      await hubCommand(hub, port, args.includes("--stop"), args.includes("--force"));
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exitCode = 1;
@@ -63,7 +63,7 @@ export async function shimMain({ entry, args }: ShimMainOptions): Promise<void> 
   await pipe.start();
 }
 
-async function hubCommand(hub: HubClient, port: number, stop: boolean): Promise<void> {
+async function hubCommand(hub: HubClient, port: number, stop: boolean, force: boolean): Promise<void> {
   const h = await hub.health();
   if (h === "absent") {
     console.log(`no hub listening on ${hubBaseUrl(port)}`);
@@ -77,7 +77,12 @@ async function hubCommand(hub: HubClient, port: number, stop: boolean): Promise<
     );
     return;
   }
-  await hub.shutdown();
+  const refused = await hub.shutdown(force);
+  if (refused !== null) {
+    console.error(`refused: ${refused}. \`npm stop -- --force\` ends it.`);
+    process.exitCode = 1;
+    return;
+  }
   const gone = await waitUntil(async () => (await hub.health()) === "absent", SPAWN_WAIT_MS);
   console.log(gone ? "hub stopped" : `hub did not stop in time; see ${hubLog()}`);
 }
@@ -120,8 +125,11 @@ class HubClient {
     return body;
   }
 
-  async shutdown(): Promise<void> {
-    await fetch(this.base + SHUTDOWN_PATH, { method: "POST", headers: this.headers() });
+  async shutdown(force: boolean): Promise<string | null> {
+    const res = await fetch(this.base + SHUTDOWN_PATH + (force ? "?force=1" : ""), { method: "POST", headers: this.headers() });
+    if (res.status !== 409) return null;
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+    return typeof body.error === "string" ? body.error : "the hub refused to stop";
   }
 
   transport(): Transport {
