@@ -84,8 +84,8 @@ Registration matrix (decided at startup):
 
 The AddOn advertises its supported write ops in the hello `caps` field; when a
 tool is called that the connected AddOn build doesn't support (deploy skew —
-new server, old AddOn), the server fails fast with a "recompile mcp-bridge.cs"
-message instead of a 10-second ambiguous timeout.
+new server, old AddOn), the server fails fast with a "recompile" message
+instead of a 10-second ambiguous timeout.
 
 Every attempt that reaches `ExecutionService` is written to the audit trail —
 placements (including each OCO leg, linked by `oco_group`) to the
@@ -169,7 +169,7 @@ together (SETUP.md step 4). In the NinjaScript Editor press **F5** to compile, t
 window (tab 1)** that the bridge reconnected and the server log shows the
 hello `caps` list. (See CLAUDE.md — copying/compiling NinjaScript is always
 the developer's own step.) Before recompiling after a server update, calling a
-new tool should fail fast with a "recompile mcp-bridge.cs" message — that is
+new tool should fail fast with a "recompile" message — that is
 the deploy-skew detection working, not a bug.
 
 ### Turning it OFF

@@ -501,7 +501,7 @@ describe("ExecutionService.submitOco", () => {
     const h = withOcoAck({ getAddonCaps: () => ["place_order"] });
     const r = await h.service.submitOco(ocoExit());
     expect(r).toMatchObject({ ok: false, blockedBy: "addon-unsupported", certainlyNotSubmitted: true });
-    if (!r.ok) expect(r.error).toMatch(/recompile.*mcp-bridge\.cs/);
+    if (!r.ok) expect(r.error).toMatch(/recompile.*mcp-bridge\*\.cs/);
     expect(h.request).not.toHaveBeenCalled();
   });
 

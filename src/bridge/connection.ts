@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { WebSocket } from "ws";
+import type { AddonCaps } from "./caps.js";
 import { encode, parseMessage, type OutboundMessage, type InboundMessage } from "./protocol.js";
 
 export const HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -60,6 +61,7 @@ interface ActiveConnection {
   ntVersion: string | null;
   instruments: string[];
   caps: string[] | null;
+  helloReceived: boolean;
   watchdog: NodeJS.Timeout;
 }
 
@@ -99,9 +101,10 @@ export class ConnectionManager {
     };
   }
 
-  /** null = disconnected OR AddOn predates caps (treat as place_order-only). */
-  getCaps(): string[] | null {
-    return this.active?.caps ? [...this.active.caps] : null;
+  getCaps(): AddonCaps {
+    if (!this.active) return null;
+    if (!this.active.helloReceived) return undefined;
+    return this.active.caps ? [...this.active.caps] : null;
   }
 
   onMessage<T extends InboundMessage["type"]>(
@@ -186,6 +189,7 @@ export class ConnectionManager {
       ntVersion: null,
       instruments: [],
       caps: null,
+      helloReceived: false,
       watchdog: this.startWatchdog(),
     };
     this.active = conn;
@@ -231,6 +235,7 @@ export class ConnectionManager {
         conn.ntVersion = msg.ntVersion;
         conn.instruments = [...msg.instruments];
         conn.caps = msg.caps ? [...msg.caps] : null;
+        conn.helloReceived = true;
         conn.lastHeartbeatAt = Date.now();
         console.error(
           `[bridge] hello received: NT ${msg.ntVersion}, instruments=[${msg.instruments.join(", ")}]` +

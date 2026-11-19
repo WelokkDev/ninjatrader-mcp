@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, rmdirSync, rmSync, st
 import { constants as osConstants, setPriority } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { capsError } from "../bridge/caps.js";
+import { capsError, type AddonCaps } from "../bridge/caps.js";
 import {
   canonicalContract,
   contractForLabel,
@@ -64,7 +64,7 @@ export interface TickFetchDeps {
   /** A history request, queued on the prefetch executor's background lane. */
   fetch: BridgeCall;
   isConnected: () => boolean;
-  caps: () => string[] | null;
+  caps: () => AddonCaps;
   dropPath: () => string | undefined;
   lakeRoot: () => string;
   calendarFor: (templateName: string) => SessionCalendar;
@@ -646,7 +646,7 @@ export class TickFetchManager {
     }
     if (reply.addonVersion !== TICKS_ADDON_VERSION) {
       throw new RefusedError(
-        `the AddOn wrote tick files in format ${reply.addonVersion}; this hub reads format ${TICKS_ADDON_VERSION}: recompile ninja-addon/addons/mcp-bridge.cs (SETUP.md step 12)`,
+        `the AddOn wrote tick files in format ${reply.addonVersion}; this hub reads format ${TICKS_ADDON_VERSION}: recompile every ninja-addon/addons/mcp-bridge*.cs (SETUP.md step 13)`,
       );
     }
     if (reply.rows === 0) return { contract, stream, date, file: null, reply };

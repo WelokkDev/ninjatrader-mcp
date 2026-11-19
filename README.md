@@ -97,7 +97,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
 
 ## MCP tools
 
-The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: `list_sessions` is hub-only). The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable).
+The public server (`build/index.js`) registers 28 tools (27 with `NT_NO_HUB=1`: `list_sessions` is hub-only), plus `tick_fetch_probe` with `NT_TICK_PROBE=1`. The write tools appear conditionally: `place_order` / `place_oco` / `change_order` only when trading is enabled at startup, `cancel_order` / `cancel_all` / `flatten` whenever any account is allow-listed (so a kill-switch restart keeps orders manageable).
 
 **Toolsets.** The surface is chosen once at startup with `NT_TOOLSETS` (comma-separated; unset or `all` registers everything). `core` is always on. `live-feeds` holds `subscribe_live_bars` / `unsubscribe_live_bars` / `live_feed_status` / `subscribe_live_positions` / `unsubscribe_live_positions`, which bots and algo work need. A discretionary trader on Claude Desktop can set `NT_TOOLSETS=core` and lose nothing: `get_candles` refetches the forming session on its own and `get_positions` works without the position feed. An unknown name serves everything and logs a warning with the valid list, so a typo never hides tools.
 
@@ -111,7 +111,7 @@ The public server (`build/index.js`) registers 22 tools (21 with `NT_NO_HUB=1`: 
 
 ### Live streaming
 
-The three bar-feed tools and the two position-feed tools form the `live-feeds` toolset; `get_positions` and `list_sessions` are `core`.
+The three bar-feed tools and the two position-feed tools form the `live-feeds` toolset; `get_positions`, `connect_feed` and `list_sessions` are `core`.
 
 | Tool | Summary |
 |---|---|
@@ -119,6 +119,7 @@ The three bar-feed tools and the two position-feed tools form the `live-feeds` t
 | `live_feed_status` | Per-subscription health: acked state, contract, lag, dup/out-of-order/gap counters, heals in flight, `/feed` consumer count, position-feed health. |
 | `get_positions` | Read-only open positions per account (sim vs. live never merged): average entry, working stops/targets matched into dollar risk and R, unrealized P&L with its price source and age. Disconnected ⇒ `stale: true`, treated as *unknown*, never as flat. |
 | `subscribe_live_positions` / `unsubscribe_live_positions` | Sparse event feed (fills, order changes, position transitions) with full-snapshot self-heal; adds per-trade age, fill history, and MAE/MFE to `get_positions`. |
+| `connect_feed` | Connect one of NT8's connections by name and wait until orders and market data are both green; does nothing if they already are, and waits for NT8 when it is already reconnecting. A failure returns NT8's own error, and the result lists every connection's state. Can be run from a script: [SETUP.md](SETUP.md) step 12. |
 | `list_sessions` | Every conversation attached to the hub and what each holds — bar subscriptions, running prefetch jobs, drawings, idle time — plus the hub process and whether it is serving an older build than the one on disk. |
 
 **For bots and dashboards** the same port serves a push channel, `ws://127.0.0.1:9472/feed`: bars in, orders out. [`examples/python/`](examples/python/README.md) documents it and ships a client to start from.
@@ -221,6 +222,7 @@ Public test coverage highlights: bridge wire protocol round-trips, candle aggreg
 | `npm run rebuild-bars` | Wipe the candle cache (it refills on demand). |
 | `npm run dump-bars` | Print cached bars for a symbol/day-range in ET for eyeballing against NT8. |
 | `npm run audit-bars` | Structural audit of every cached (symbol, session-day) against session geometry; exit 1 on mismatch. |
+| `npm run connect-feed` | Call `connect_feed` through the hub (starting it if needed), for a scheduler or script. Exit 0 connected, 1 failed, 2 no hub. |
 
 `src/scripts/` also contains dev harnesses that fake the NT8 side of the bridge (`fake-nt-candles.ts`, `fake-nt-handshake.ts`, `fake-nt-listen.ts`) and a standalone bridge REPL (`bridge-only.ts`).
 

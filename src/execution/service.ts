@@ -5,6 +5,7 @@ import {
   getAddonCaps as bridgeGetAddonCaps,
   capsError as bridgeCapsError,
   BridgeRequestError,
+  type AddonCaps,
 } from "../bridge/index.js";
 import type {
   OrderAckMessage,
@@ -261,10 +262,9 @@ export interface ExecutionServiceDeps {
   /** Best-effort: a failure downgrades to a warning, does not block the order.
    *  Must be idempotent/cheap. */
   ensurePositionFeed: () => Promise<EnsureFeedResult>;
-  /** Write ops the AddOn declared in its hello `caps`. null = pre-caps AddOn
-   *  (treated as ["place_order"]) or disconnected — lets ops fail fast with a
+  /** Write ops the AddOn declared in its hello `caps` — lets ops fail fast with a
    *  recompile message instead of a 10s ambiguous timeout during deploy skew. */
-  getAddonCaps: () => string[] | null;
+  getAddonCaps: () => AddonCaps;
   nowMs?: () => number;
   nowUnix?: () => number;
   newClientOrderId?: () => string;

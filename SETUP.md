@@ -495,7 +495,33 @@ blinding the watchdog to that same half dying later.
 A connection already down when NT8 starts alerts on that first pass: the startup
 quiet window suppresses baselines and unsettled states, never RED.
 
-## 12. Optional — tick history
+## 12. Optional — connecting from a script
+
+`connect_feed` connects one of NT8's connections, by the name its Connections
+menu shows, and waits until orders and market data are both green. It is part of
+the AddOn, so there is nothing extra to install; an AddOn compiled before it
+answers "does not support connect_feed — recompile".
+
+Put the name in `.env.local` so neither the tool nor the script needs it:
+
+```
+NT_FEED_CONNECTION=My Rithmic for NinjaTrader Brokerage
+```
+
+From a scheduler or script, without Claude:
+
+```
+npm run connect-feed
+npm run connect-feed -- --connection "My Rithmic for NinjaTrader Brokerage" --timeout 90
+```
+
+It starts the hub if none is running, prints the tool's JSON, and exits `0` when
+connected (or already was), `1` when the connect failed (the JSON carries NT8's
+error), `2` on bad arguments, no hub, or a hub without connect_feed. It runs
+from `build/`, so build first. Your own scripts can call any tool the same way
+with `callHubTool` from `build/hub/call.js`.
+
+## 13. Optional — tick history
 
 Pulls whole session-days of NT8 tick data, every print and every best bid or ask
 change, into the NT8 tick lake (`data/nt8-lake/`, or `NT8_LAKE_PATH`). Skip this
@@ -516,7 +542,7 @@ capped at 16 GB (`NT8_LAKE_MEMORY_LIMIT`). `NT_TICK_PROBE=1` plus `npm stop`
 adds `tick_fetch_probe`, a diagnostic that fetches a day or two without storing
 anything.
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | What you see | What it means |
 |---|---|
@@ -546,8 +572,9 @@ MCP server runs cache-only against whatever is already in `candles.db`.
 **`.env.local` is not a dotenv file.** There's no `dotenv` in this repo and
 nothing is injected into `process.env`. The hand-rolled reader consults a fixed
 set of keys — the bridge (`NT_BRIDGE_*`), the hub (`NT_HUB_*`), trade import
-(`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT`), the order gate (`NT_TRADING_*`) and
-tick history (`NT_TICK_*`, `NT8_LAKE_*`) — and ignores everything else, so
+(`NT_TRADES_DB_PATH`, `NT_TRADES_ACCOUNT`), the order gate (`NT_TRADING_*`),
+tick history (`NT_TICK_*`, `NT8_LAKE_*`) and the connection to connect
+(`NT_FEED_CONNECTION`) — and ignores everything else, so
 putting any *other* variable there does nothing. Real process env always wins
 over the file.
 
@@ -573,8 +600,9 @@ machines.
 | `NT_TRADES_ACCOUNT` | unset | Optional account filter to pair with `NT_TRADES_DB_PATH`. Leave unset to import all accounts. |
 | `NT_TRADES_CONFIG` | `<repo>/ninjatrader.config.json` | Trade-import config path. Relative values resolve against the process cwd. Only consulted when `NT_TRADES_DB_PATH` is unset. |
 | `NT_TRADING_*` | unset ⇒ **disabled** | The order write path. See [TRADING.md](TRADING.md). |
-| `NT_TICK_DROP_PATH` | unset | This machine's path to the AddOn's tick drop folder, `<NT8 user data dir>/mcp-ticks.noindex` (step 12). Unset, `prefetch_ticks` refuses. |
-| `NT_TICK_PROBE` | unset | `1` registers `tick_fetch_probe` (step 12). |
+| `NT_TICK_DROP_PATH` | unset | This machine's path to the AddOn's tick drop folder, `<NT8 user data dir>/mcp-ticks.noindex` (step 13). Unset, `prefetch_ticks` refuses. |
+| `NT_TICK_PROBE` | unset | `1` registers `tick_fetch_probe` (step 13). |
+| `NT_FEED_CONNECTION` | unset | The NT8 connection `connect_feed` and `npm run connect-feed` use when none is given (step 12). |
 | `NT8_LAKE_PATH` | `<NT_DATA_PATH>/nt8-lake` | Root of the NT8 tick lake. A plain folder copy backs it up. |
 | `NT8_LAKE_MEMORY_LIMIT` | `16GB` | Memory cap for a tick-lake ingest, which never spills to disk; a day that needs more is refused. Raise it (e.g. `24GB`) to retry such a day. |
 
@@ -677,7 +705,7 @@ its `-wal`/`-shm` siblings and integrity-checks the copy), just slower.
 
 ---
 
-## 14. Next steps
+## 15. Next steps
 
 The public tool surface is set up; [README.md](README.md#mcp-tools) lists every
 tool. From here:

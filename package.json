@@ -22,6 +22,7 @@
     "dump-bars": "tsc && node build/scripts/dump-bars.js",
     "audit-bars": "tsc && node build/scripts/audit-bars.js",
     "nt8-lake": "tsc && node build/scripts/nt8-lake.js",
+    "connect-feed": "node build/scripts/connect-feed.js",
     "stop": "node scripts/mcp-entry.mjs --stop",
     "status": "node scripts/mcp-entry.mjs --status"
   },

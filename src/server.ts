@@ -31,6 +31,7 @@ import { registerGetDrawings } from "./tools/read-drawings.js";
 import { registerListChartIndicators } from "./tools/list-chart-indicators.js";
 import { registerReadIndicatorValues } from "./tools/read-indicator-values.js";
 import { registerSetIndicatorParams } from "./tools/set-indicator-params.js";
+import { registerConnectFeed } from "./tools/connect-feed.js";
 import {
   registerSubscribeLiveBars,
   registerUnsubscribeLiveBars,
@@ -175,6 +176,7 @@ export function registerGenericTools(
   // Chart configuration, not orders, so not behind the trading gate.
   unless(["set_indicator_params"], () => registerSetIndicatorParams(server));
   unless(["get_positions"], () => registerGetPositions(server));
+  unless(["connect_feed"], () => registerConnectFeed(server));
   unless(["subscribe_live_bars"], () => registerSubscribeLiveBars(server, session), "live-feeds");
   unless(["unsubscribe_live_bars"], () => registerUnsubscribeLiveBars(server, session), "live-feeds");
   unless(["live_feed_status"], () => registerLiveFeedStatus(server), "live-feeds");

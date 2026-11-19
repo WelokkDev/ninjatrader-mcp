@@ -11,6 +11,12 @@ import {
   placeSpec,
   type DispatchSpec,
 } from "../../src/execution/service.js";
+import {
+  CONNECT_FEED_DEFAULT_TIMEOUT_SEC,
+  CONNECT_FEED_MAX_TIMEOUT_SEC,
+  CONNECT_FEED_MIN_TIMEOUT_SEC,
+  CONNECT_FEED_REPLY_MARGIN_MS,
+} from "../../src/tools/connect-feed-shared.js";
 import { CHART_INDICATORS_TIMEOUT_MS } from "../../src/tools/list-chart-indicators.js";
 import { OPEN_CHARTS_TIMEOUT_MS } from "../../src/tools/list-open-charts.js";
 import { NAVIGATE_CHART_TIMEOUT_MS } from "../../src/tools/navigate-chart.js";
@@ -213,6 +219,26 @@ describe("constants", () => {
       .filter(([, c]) => c.session === CME_US_INDEX_FUTURES_ETH)
       .map(([symbol]) => symbol);
     expect(sorted(roots)).toEqual(sorted(indexFutures));
+  });
+
+  it.each([
+    ["ConnectFeedMinWaitMs", CONNECT_FEED_MIN_TIMEOUT_SEC],
+    ["ConnectFeedDefaultWaitMs", CONNECT_FEED_DEFAULT_TIMEOUT_SEC],
+    ["ConnectFeedMaxWaitMs", CONNECT_FEED_MAX_TIMEOUT_SEC],
+  ])("connect_feed's timeoutSec bound matches the AddOn's %s", (constant, seconds) => {
+    expect(seconds * 1000).toBe(csIntConst(constant));
+  });
+
+  it("connect_feed's reply margin outlasts the AddOn's green hold", () => {
+    expect(CONNECT_FEED_REPLY_MARGIN_MS).toBeGreaterThan(
+      csIntConst("ConnectFeedSettleMs") + csIntConst("ConnectFeedPollMs"),
+    );
+  });
+
+  it("the AddOn advertises connect_feed in its caps", () => {
+    const m = /WriteCaps\s*=\s*new\[\]\s*\{([^}]*)\}/.exec(cs.src);
+    expect(m, "WriteCaps initializer not found").not.toBeNull();
+    expect([...m![1].matchAll(/"([\w.]+)"/g)].map((c) => c[1])).toContain("connect_feed");
   });
 
   it.each([

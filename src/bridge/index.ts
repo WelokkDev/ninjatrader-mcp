@@ -2,10 +2,11 @@ import { loadOrCreateToken } from "./auth.js";
 import { ConnectionManager, type ConnectionStatus } from "./connection.js";
 import { startServer, DEFAULT_PORT, DEFAULT_HOST, type BridgeServer } from "./server.js";
 import { envSetting } from "../core/env-local.js";
+import type { AddonCaps } from "./caps.js";
 import type { InboundMessage, OutboundMessage } from "./protocol.js";
 
 export { BridgeRequestError, type BridgeErrorKind } from "./connection.js";
-export { capsError, PRE_CAPS_ADDON_CAPS } from "./caps.js";
+export { capsError, PRE_CAPS_ADDON_CAPS, type AddonCaps } from "./caps.js";
 
 let server: BridgeServer | null = null;
 const connections = new ConnectionManager();
@@ -67,8 +68,7 @@ export function isConnected(): boolean {
   return connections.isConnected();
 }
 
-/** AddOn write caps; null (disconnected or pre-caps AddOn) means callers assume ["place_order"]. */
-export function getAddonCaps(): string[] | null {
+export function getAddonCaps(): AddonCaps {
   return connections.getCaps();
 }
 

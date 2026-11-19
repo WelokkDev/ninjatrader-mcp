@@ -3,7 +3,7 @@ import { z } from "zod";
 export const PROTOCOL_VERSION = 1;
 
 // Schemas are the single source; TS types are z.infer. The C# AddOn
-// (ninja-addon/addons/mcp-bridge.cs) mirrors these shapes by hand.
+// (ninja-addon/addons/mcp-bridge*.cs) mirrors these shapes by hand.
 
 function msg<T extends string, S extends z.ZodRawShape>(type: T, shape: S) {
   return z.object({ v: z.literal(1), type: z.literal(type), ...shape });
@@ -392,6 +392,39 @@ export const navigateChartAckMessageSchema = reqMsg("navigate_chart_ack", {
   skippedWindows: z.number().default(0),
 });
 export type NavigateChartAckMessage = z.infer<typeof navigateChartAckMessageSchema>;
+
+// ---------- data connection ----------
+
+export const connectFeedMessageSchema = reqMsg("connect_feed", {
+  connection: z.string().min(1),
+  timeoutMs: z.number().int().positive(),
+});
+export type ConnectFeedMessage = z.infer<typeof connectFeedMessageSchema>;
+
+/** Statuses are NT8's ConnectionStatus names ("Connected", "ConnectionLost", ...). */
+export const feedConnectionStateSchema = z.object({
+  name: z.string(),
+  status: z.string(),
+  priceStatus: z.string(),
+});
+export type FeedConnectionState = z.infer<typeof feedConnectionStateSchema>;
+
+export const connectFeedResponseMessageSchema = reqMsg("connect_feed_response", {
+  connection: z.string(),
+  found: z.boolean(),
+  ok: z.boolean(),
+  alreadyConnected: z.boolean(),
+  waitedForNt8: z.boolean(),
+  status: z.string(),
+  priceStatus: z.string(),
+  elapsedMs: z.number(),
+  connections: z.array(feedConnectionStateSchema),
+  ntError: z.string().optional(), // NT8's ErrorCode name
+  nativeError: z.string().optional(), // the provider's own message
+  message: z.string().optional(),
+  configured: z.array(z.string()).optional(), // NT8's connection names; sent when none matched
+});
+export type ConnectFeedResponseMessage = z.infer<typeof connectFeedResponseMessageSchema>;
 
 // ---------- drawing-tool read-back (read-only) ----------
 // Reads NT8 drawing objects off open charts, including hand-drawn ones.
@@ -951,6 +984,7 @@ export const INBOUND_SCHEMAS = {
   flatten_ack: flattenAckMessageSchema,
   change_ack: changeAckMessageSchema,
   oco_ack: ocoAckMessageSchema,
+  connect_feed_response: connectFeedResponseMessageSchema,
   client_request: clientRequestMessageSchema,
   error: errorMessageSchema,
 };
@@ -981,6 +1015,7 @@ export const OUTBOUND_SCHEMAS = {
   cancel_all: cancelAllMessageSchema,
   flatten: flattenMessageSchema,
   change_order: changeOrderMessageSchema,
+  connect_feed: connectFeedMessageSchema,
   client_response: clientResponseMessageSchema,
 };
 

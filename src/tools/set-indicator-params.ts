@@ -4,6 +4,7 @@ import {
   BridgeRequestError,
   capsError,
   getAddonCaps as defaultGetAddonCaps,
+  type AddonCaps,
   isConnected as defaultIsConnected,
   request as defaultRequest,
 } from "../bridge/index.js";
@@ -22,7 +23,7 @@ export interface SetIndicatorParamsArgs extends IndicatorSelectorArgs {
 
 export interface SetIndicatorParamsDeps {
   isConnected: () => boolean;
-  getAddonCaps: () => string[] | null;
+  getAddonCaps: () => AddonCaps;
   request: (
     type: string,
     payload: Record<string, unknown>,

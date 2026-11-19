@@ -4,13 +4,17 @@
 /** An AddOn that predates `caps` supported exactly one write op. */
 export const PRE_CAPS_ADDON_CAPS: readonly string[] = ["place_order"];
 
-/** null when supported, else the message; `caps` is null when disconnected or
- *  pre-caps. */
-export function capsError(op: string, caps: string[] | null): string | null {
+/** Hello `caps`: undefined until the hello arrives, null when disconnected or pre-caps. */
+export type AddonCaps = string[] | null | undefined;
+
+export function capsError(op: string, caps: AddonCaps): string | null {
+  if (caps === undefined) {
+    return `the AddOn has connected but not sent its hello yet — call ${op} again in a moment`;
+  }
   const supported = caps ?? PRE_CAPS_ADDON_CAPS;
   if (supported.includes(op)) return null;
   return (
-    `the connected AddOn does not support ${op} — recompile ` +
-    `ninja-addon/addons/mcp-bridge.cs in the NinjaScript Editor (F5) and reconnect`
+    `the connected AddOn does not support ${op} — recompile: copy every ` +
+    `ninja-addon/addons/mcp-bridge*.cs into NT8 and press F5 in the NinjaScript Editor`
   );
 }

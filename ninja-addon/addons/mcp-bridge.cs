@@ -304,6 +304,9 @@ namespace NinjaTrader.NinjaScript.AddOns
 		// dispose and recreate every live sub when a provider reconnects.
 		private void OnConnectionStatusUpdate(object sender, ConnectionStatusEventArgs connectionStatusUpdate)
 		{
+			try { NoteConnectionError(connectionStatusUpdate); }
+			catch (Exception ex) { Log("could not record a connection error: " + ex.Message); }
+
 			try
 			{
 				if (connectionStatusUpdate.Status == ConnectionStatus.Connected
@@ -491,7 +494,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 		private static readonly string[] WriteCaps = new[]
 		{
 			"place_order", "place_oco", "cancel_order", "cancel_all", "flatten", "change_order",
-			"set_indicator_params", "request_ticks.v2",
+			"set_indicator_params", "request_ticks.v2", "connect_feed",
 		};
 
 		private async Task SendHelloAsync(ClientWebSocket ws, CancellationToken ct)
@@ -958,6 +961,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 				{
 					var o = obj;
 					Task.Run(() => HandleChangeOrder(o));
+					break;
+				}
+
+				// Off the read thread: it waits up to a minute or more for NT8 to connect.
+				case "connect_feed":
+				{
+					var o = obj;
+					Task.Run(() => HandleConnectFeed(o));
 					break;
 				}
 
