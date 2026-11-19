@@ -42,4 +42,4 @@ Follow [TRADING.md](TRADING.md) for the `place_order` write path: one submit
 seam (`ExecutionService.submit()`), three independent fail-closed gates, and the
 C# keystone gate that must be recompiled by the developer (never by you — see the
 boundary rules above). Read it before touching anything under `src/execution/`
-or the `place_order` handler in `ninja-addon/addons/mcp-bridge.cs`.
+or the order handlers in `ninja-addon/addons/mcp-bridge-trading.cs`.

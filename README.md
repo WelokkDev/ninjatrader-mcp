@@ -74,7 +74,7 @@ Everything above is **read-only or draw-only** — the bridge never touches your
           ▼                            │        │  store; no bridge  │
   ┌───────────────────────────────────┴──────┐ │  involved)         │
   │  NinjaTrader 8 (Windows)                 │ └────────────────────┘
-  │  ├─ addons/mcp-bridge.cs                 │
+  │  ├─ addons/mcp-bridge*.cs                │
   │  │   WS client; serves candles; streams  │
   │  │   live bars + positions; retains draw │
   │  │   commands; gated order submit        │
@@ -192,7 +192,7 @@ npm start
 
 A fresh clone builds clean with no private module. `npm start` runs the **hub**, the one process that owns the NT8 bridge, the candle cache and the live feeds; every MCP conversation attaches to it through the repo's `.mcp.json`, with no per-user editing.
 
-On the NT8 side there are two files to copy and compile: `ninja-addon/addons/mcp-bridge.cs` (the AddOn) and `ninja-addon/indicators/mcp-renderer.cs` (the renderer; attach it to every chart the server should draw on). Both are **the developer's own steps**.
+On the NT8 side there are two things to copy and compile: the AddOn (every `ninja-addon/addons/mcp-bridge*.cs` file) and the renderer (`ninja-addon/indicators/mcp-renderer.cs`; attach it to every chart the server should draw on). Both are **the developer's own steps**.
 
 **[SETUP.md](SETUP.md) is the walkthrough** for all of it: first run and the bridge token, the NT8 side, environment variables and config files, NT8 in a VM, and a troubleshooting table for every failure mode.
 

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
@@ -6,18 +6,28 @@ import { z } from "zod";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 
-export function repoFile(rel: string): string {
-  return readFileSync(REPO + rel, "utf-8");
+export interface CsFile {
+  name: string;
+  text: string;
 }
 
-function unterminated(what: string, src: string, at: number): never {
-  const line = src.slice(0, at).split("\n").length;
-  throw new Error(`unterminated ${what} at line ${line} of the C# source`);
+/** The files of one partial class, in name order. */
+export function repoFiles(dir: string, match: RegExp): CsFile[] {
+  return readdirSync(REPO + dir)
+    .filter((name) => match.test(name))
+    .sort()
+    .map((name) => ({ name, text: readFileSync(`${REPO}${dir}/${name}`, "utf-8") }));
+}
+
+function unterminated(what: string, file: CsFile, at: number): never {
+  const line = file.text.slice(0, at).split("\n").length;
+  throw new Error(`unterminated ${what} at line ${line} of ${file.name}`);
 }
 
 /** Same-length copy with comments, preprocessor lines and string/char contents blanked, so
  *  brackets and commas can be counted naively. */
-function maskCSharp(src: string): string {
+function maskCSharp(file: CsFile): string {
+  const src = file.text;
   const out = src.split("");
   const blank = (from: number, to: number, keepEnds: boolean): void => {
     for (let k = keepEnds ? from + 1 : from; k < (keepEnds ? to : to + 1); k++) {
@@ -36,14 +46,14 @@ function maskCSharp(src: string): string {
       i = stop + 1;
     } else if (c === "/" && next === "*") {
       const close = src.indexOf("*/", i + 2);
-      if (close < 0) unterminated("/* comment", src, i);
+      if (close < 0) unterminated("/* comment", file, i);
       blank(i, close + 1, false);
       i = close + 2;
     } else if (c === '"') {
       const verbatim = src[i - 1] === "@";
       let j = i + 1;
       for (;;) {
-        if (j >= src.length) unterminated("string", src, i);
+        if (j >= src.length) unterminated("string", file, i);
         if (!verbatim && src[j] === "\\") j += 2;
         else if (verbatim && src[j] === '"' && src[j + 1] === '"') j += 2;
         else if (src[j] === '"') break;
@@ -54,7 +64,7 @@ function maskCSharp(src: string): string {
     } else if (c === "'") {
       const j = src.indexOf("'", src[i + 1] === "\\" ? i + 3 : i + 2);
       // The longest char literal is an escape like '\u0041'.
-      if (j < 0 || j - i > 7) unterminated("char literal", src, i);
+      if (j < 0 || j - i > 7) unterminated("char literal", file, i);
       blank(i, j, true);
       i = j + 1;
     } else {
@@ -74,11 +84,13 @@ export interface CsMethod {
 const CLOSERS: Record<string, string> = { "{": "}", "(": ")", "[": "]" };
 
 export class CSharpSource {
+  readonly src: string;
   readonly masked: string;
   readonly methods: CsMethod[] = [];
 
-  constructor(readonly src: string) {
-    this.masked = maskCSharp(src);
+  constructor(files: CsFile[]) {
+    this.src = files.map((f) => f.text).join("\n");
+    this.masked = files.map(maskCSharp).join("\n");
     const decl =
       /^\t\t(?:(?:private|public|internal|protected|static|async|override|readonly)\s+)+[\w<>[\],.? ]+?\s+(\w+)\s*(?:<[\w\s,]*>)?\s*\(/gm;
     const body = /\s*(?:where\b[^{;=]*)?\{/y;

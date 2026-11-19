@@ -19,9 +19,9 @@ import {
   INDICATOR_VALUES_MAX_POINTS,
   INDICATOR_VALUES_TIMEOUT_MS,
 } from "../../src/tools/read-indicator-values.js";
-import { CSharpSource, deepKeys, repoFile, stringLiteral, topLevelKeys } from "./source-scan.js";
+import { CSharpSource, deepKeys, repoFiles, stringLiteral, topLevelKeys } from "./source-scan.js";
 
-const cs = new CSharpSource(repoFile("ninja-addon/addons/mcp-bridge.cs"));
+const cs = new CSharpSource(repoFiles("ninja-addon/addons", /^mcp-bridge.*\.cs$/));
 
 const sorted = (xs: Iterable<string>): string[] => [...xs].sort();
 

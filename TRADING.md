@@ -163,8 +163,9 @@ Missing or unparseable ⇒ the AddOn treats the write path as disabled.
 
 ### 3. Recompile the AddOn (your step — never done for you)
 
-`ninja-addon/addons/mcp-bridge.cs` carries all six write handlers. In the
-NinjaScript Editor press **F5** to compile, then confirm in the **Output
+`ninja-addon/addons/mcp-bridge-trading.cs` carries all six write handlers and
+the gate; it is one of the `mcp-bridge*.cs` files that are always copied
+together (SETUP.md step 4). In the NinjaScript Editor press **F5** to compile, then confirm in the **Output
 window (tab 1)** that the bridge reconnected and the server log shows the
 hello `caps` list. (See CLAUDE.md — copying/compiling NinjaScript is always
 the developer's own step.) Before recompiling after a server update, calling a

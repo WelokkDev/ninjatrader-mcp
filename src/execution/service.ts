@@ -67,7 +67,7 @@ export interface DispatchSpec {
 }
 
 // Rejections raised BEFORE Submit() — certainly-not-submitted. That ordering is kept by hand
-// in HandlePlaceOrder/HandlePlaceOco (mcp-bridge.cs).
+// in HandlePlaceOrder/HandlePlaceOco (mcp-bridge-trading.cs).
 const PRE_SUBMIT_CODES = new Set<string>([
   "gate-disabled",
   "account-not-allowed",

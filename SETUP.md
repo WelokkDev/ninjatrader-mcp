@@ -130,12 +130,16 @@ prints the exact path it looked at (see step 5).
 
 > **Hand this section to the user. Don't do it for them.**
 
-**Copy two files** from this repo into your NinjaTrader installation:
+**Copy these files** from this repo into your NinjaTrader installation:
 
 | From (this repo) | To |
 |---|---|
-| `ninja-addon/addons/mcp-bridge.cs` | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
+| every `ninja-addon/addons/mcp-bridge*.cs` file | `Documents\NinjaTrader 8\bin\Custom\AddOns\` |
 | `ninja-addon/indicators/mcp-renderer.cs` | `Documents\NinjaTrader 8\bin\Custom\Indicators\` |
+
+The AddOn is one class split over the `mcp-bridge*.cs` files. Copy all of
+them every time, after an update too: NinjaTrader compiles an old part next to
+new ones without complaint, and the AddOn then runs a mix of old and new code.
 
 `ninja-addon/addons/feed-watchdog.cs` is optional and standalone, connection
 alerts that keep working when everything else here is down. See step 11.
@@ -143,7 +147,7 @@ alerts that keep working when everything else here is down. See step 11.
 **Then, in NinjaTrader:**
 
 1. Open the NinjaScript Editor (**New → NinjaScript Editor**).
-2. Compile (**F5**, or right-click → Compile). Both files must compile clean.
+2. Compile (**F5**, or right-click → Compile). Every file must compile clean.
 3. The AddOn loads automatically once compiled — there is no enable checkbox.
 4. Open the NinjaScript Output window (**New → NinjaScript Output**) and stay on
    **Tab 1**. Everything below prints there.
